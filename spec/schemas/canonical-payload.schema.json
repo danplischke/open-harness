@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-harness.dev/schemas/hook/1/canonical-payload.json",
+  "title": "open-harness CanonicalPayload (hook@1)",
+  "description": "The JSON document the dispatcher writes to a hook capability's stdin.",
+  "type": "object",
+  "required": ["protocol", "harness", "event", "blocking", "raw"],
+  "additionalProperties": true,
+  "properties": {
+    "protocol": {
+      "type": "string",
+      "pattern": "^open-harness/hook@1(\\.[0-9]+)?$"
+    },
+    "harness": { "type": "string", "minLength": 1 },
+    "blocking": { "type": "boolean" },
+    "event": { "$ref": "#/$defs/event" },
+    "tool": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "input": {}
+      }
+    },
+    "prompt": { "type": "string" },
+    "cwd": { "type": "string" },
+    "raw": {}
+  },
+  "$defs": {
+    "event": {
+      "type": "object",
+      "required": ["phase", "subject"],
+      "additionalProperties": true,
+      "properties": {
+        "phase": { "enum": ["pre", "post"] },
+        "subject": {
+          "enum": ["tool", "model", "prompt", "session", "subagent", "task"]
+        },
+        "tool_class": {
+          "enum": ["any", "shell", "file_read", "file_write", "file_edit", "mcp", "web"]
+        },
+        "boundary": { "enum": ["start", "end"] },
+        "task_kind": { "enum": ["start", "resume", "cancel"] }
+      }
+    }
+  }
+}

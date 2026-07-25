@@ -15,4 +15,7 @@ pub use adapters::{Harness, Support};
 pub use dispatch::{dispatch, DispatchOutcome};
 pub use event::NormEvent;
 pub use manifest::{discover, LoadedCapability};
-pub use model::{merge, Decision, NativeResponse, Verdict};
+pub use model::{
+    merge, negotiate, parse_decision, validate_decision, Decision, NativeResponse, Verdict,
+    PROTOCOL, PROTOCOL_VERSION,
+};

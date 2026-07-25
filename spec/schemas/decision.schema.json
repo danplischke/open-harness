@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-harness.dev/schemas/hook/1/decision.json",
+  "title": "open-harness Decision (hook@1)",
+  "description": "The JSON document a hook capability writes to stdout. All fields optional; an empty document means allow. Unknown fields are ignored (forward-compat).",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "decision": {
+      "enum": ["allow", "deny", "modify"],
+      "default": "allow"
+    },
+    "reason": { "type": "string" },
+    "context_append": { "type": "string" },
+    "modified_input": {}
+  }
+}

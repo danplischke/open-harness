@@ -6,8 +6,12 @@
 
 use crate::event::NormEvent;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-pub const PROTOCOL: &str = "open-harness/hook@0";
+/// Full protocol id embedded in every payload. See `spec/hook-protocol.md`.
+pub const PROTOCOL: &str = "open-harness/hook@1";
+/// Short version token a capability manifest may declare via `protocol`.
+pub const PROTOCOL_VERSION: &str = "hook@1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolInfo {
@@ -66,6 +70,68 @@ impl Decision {
             modified_input: None,
         }
     }
+}
+
+/// The major number of a `hook@MAJOR[.MINOR]` token, accepting either the short
+/// form (`hook@1`) or the full id (`open-harness/hook@1.2`).
+pub fn protocol_major(token: &str) -> Option<u32> {
+    token.rsplit('@').next()?.split('.').next()?.parse().ok()
+}
+
+/// Version negotiation. A capability that declares no protocol is assumed
+/// compatible; one that declares a different *major* is refused.
+pub fn negotiate(capability_protocol: Option<&str>) -> Result<(), String> {
+    let Some(theirs_token) = capability_protocol else {
+        return Ok(());
+    };
+    let ours = protocol_major(PROTOCOL_VERSION).expect("our protocol version is well-formed");
+    let theirs = protocol_major(theirs_token)
+        .ok_or_else(|| format!("unparseable protocol version '{theirs_token}'"))?;
+    if theirs == ours {
+        Ok(())
+    } else {
+        Err(format!(
+            "protocol mismatch: capability speaks '{theirs_token}' (major {theirs}), dispatcher is '{PROTOCOL_VERSION}' (major {ours})"
+        ))
+    }
+}
+
+/// Validate a Decision document against `hook@1`. Unknown fields are permitted
+/// (forward-compat); wrong types and unknown verdicts are rejected.
+pub fn validate_decision(v: &Value) -> Result<(), String> {
+    let obj = v.as_object().ok_or("decision must be a JSON object")?;
+    if let Some(d) = obj.get("decision") {
+        let s = d.as_str().ok_or("`decision` must be a string")?;
+        if !matches!(s, "allow" | "deny" | "modify") {
+            return Err(format!(
+                "`decision` must be one of allow|deny|modify, got '{s}'"
+            ));
+        }
+    }
+    if let Some(r) = obj.get("reason") {
+        if !r.is_null() && !r.is_string() {
+            return Err("`reason` must be a string".into());
+        }
+    }
+    if let Some(c) = obj.get("context_append") {
+        if !c.is_null() && !c.is_string() {
+            return Err("`context_append` must be a string".into());
+        }
+    }
+    Ok(())
+}
+
+/// Parse a capability's stdout into a validated Decision. Empty output means
+/// allow. Validation runs before deserialization so errors are descriptive.
+pub fn parse_decision(stdout: &str) -> Result<Decision, String> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return Ok(Decision::allow());
+    }
+    let value: Value = serde_json::from_str(trimmed)
+        .map_err(|e| format!("decision was not valid JSON: {e} (got: {trimmed})"))?;
+    validate_decision(&value)?;
+    serde_json::from_value(value).map_err(|e| format!("decision did not match schema: {e}"))
 }
 
 /// Merge many capability decisions into one, with deny-wins semantics. This is

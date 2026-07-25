@@ -8,8 +8,8 @@
 
 use open_harness::adapters::{DenyStyle, Harness, Support};
 use open_harness::event::{Boundary, NormEvent, Phase, SubjectKind, TaskKind, ToolClass};
-use open_harness::manifest::{discover, EventBinding, LoadedCapability, Manifest, RunSpec};
-use open_harness::model::{merge, Decision, Verdict};
+use open_harness::manifest::{discover, LoadedCapability};
+use open_harness::model::{merge, negotiate, parse_decision, Decision, Verdict};
 use serde_json::json;
 
 fn caps() -> Vec<LoadedCapability> {
@@ -266,24 +266,16 @@ fn e2e_secret_input_is_blocked_via_each_native_signal() {
 fn e2e_capability_crash_fails_closed_on_blocking_event() {
     // A capability that exits non-zero must DENY on a blocking event, never
     // silently allow.
+    // Built from JSON so new manifest fields never break this fixture.
+    let manifest: open_harness::manifest::Manifest = serde_json::from_value(json!({
+        "id": "crasher",
+        "name": "Crasher",
+        "run": { "command": "python3", "args": ["-c", "import sys; sys.exit(3)"] },
+        "events": [{ "phase": "pre", "subject": "tool", "tool_class": "any", "required": true }]
+    }))
+    .unwrap();
     let crashing = LoadedCapability {
-        manifest: Manifest {
-            id: "crasher".into(),
-            name: "Crasher".into(),
-            description: String::new(),
-            run: RunSpec {
-                command: "python3".into(),
-                args: vec!["-c".into(), "import sys; sys.exit(3)".into()],
-            },
-            events: vec![EventBinding {
-                phase: Phase::Pre,
-                subject: SubjectKind::Tool,
-                tool_class: Some(ToolClass::Any),
-                boundary: None,
-                task_kind: None,
-                required: true,
-            }],
-        },
+        manifest,
         dir: std::path::PathBuf::from("."),
     };
     let ev = NormEvent::tool(Phase::Pre, ToolClass::Shell);
@@ -291,4 +283,32 @@ fn e2e_capability_crash_fails_closed_on_blocking_event() {
     let out = open_harness::dispatch(Harness::Claude, &ev, &[crashing], &safe);
     assert_eq!(out.response.exit_code, 2, "crash must fail closed (deny)");
     assert!(!out.errored.is_empty());
+}
+
+// ---- protocol (hook@1): validation + version negotiation -----------------
+
+#[test]
+fn strict_validation_rejects_malformed_decisions() {
+    assert!(parse_decision("").is_ok(), "empty output means allow");
+    assert!(parse_decision("{}").is_ok(), "empty object means allow");
+    assert!(parse_decision(r#"{"decision":"deny","reason":"x"}"#).is_ok());
+    // forward-compat: unknown fields are ignored, not rejected
+    assert!(parse_decision(r#"{"decision":"allow","future_field":true}"#).is_ok());
+    // rejected: unknown verdict and wrong types
+    assert!(parse_decision(r#"{"decision":"banana"}"#).is_err());
+    assert!(parse_decision(r#"{"decision":123}"#).is_err());
+    assert!(parse_decision(r#"{"reason":42}"#).is_err());
+}
+
+#[test]
+fn protocol_negotiation_refuses_major_mismatch() {
+    assert!(negotiate(None).is_ok(), "no declaration => compatible");
+    assert!(negotiate(Some("hook@1")).is_ok());
+    assert!(
+        negotiate(Some("hook@1.4")).is_ok(),
+        "minor bumps are compatible"
+    );
+    assert!(negotiate(Some("open-harness/hook@1")).is_ok());
+    assert!(negotiate(Some("hook@2")).is_err(), "major mismatch refused");
+    assert!(negotiate(Some("garbage")).is_err());
 }

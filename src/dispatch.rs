@@ -68,6 +68,9 @@ pub fn dispatch(
 }
 
 fn run_capability(cap: &LoadedCapability, payload: &CanonicalPayload) -> Result<Decision, String> {
+    // Refuse an incompatible protocol before spawning anything.
+    crate::model::negotiate(cap.manifest.protocol.as_deref())?;
+
     let input = serde_json::to_string(payload).map_err(|e| e.to_string())?;
     let mut child = Command::new(&cap.manifest.run.command)
         .args(&cap.manifest.run.args)
@@ -95,10 +98,7 @@ fn run_capability(cap: &LoadedCapability, payload: &CanonicalPayload) -> Result<
         ));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let trimmed = stdout.trim();
-    if trimmed.is_empty() {
-        return Ok(Decision::allow());
-    }
-    serde_json::from_str::<Decision>(trimmed)
-        .map_err(|e| format!("bad decision JSON: {e} (got: {trimmed})"))
+    // Validates against hook@1 before returning; malformed output fails closed
+    // on blocking events via the caller's error handling.
+    crate::model::parse_decision(&stdout)
 }

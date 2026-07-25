@@ -52,6 +52,10 @@ pub struct Manifest {
     pub run: RunSpec,
     #[serde(default)]
     pub events: Vec<EventBinding>,
+    /// Wire-protocol version this capability speaks, e.g. `"hook@1"`. Optional;
+    /// when present the dispatcher refuses a major-version mismatch.
+    #[serde(default)]
+    pub protocol: Option<String>,
 }
 
 /// A manifest plus the directory it was loaded from (the cwd used when the
