@@ -5,6 +5,7 @@
 
 use crate::adapters::Harness;
 use crate::event::NormEvent;
+use crate::kind::KindId;
 use crate::manifest::LoadedCapability;
 use crate::model::{merge, CanonicalPayload, Decision, NativeResponse, Verdict};
 use serde_json::Value;
@@ -31,7 +32,8 @@ pub fn dispatch(
     let mut errored = Vec::new();
 
     for cap in caps {
-        if !cap.binds(ev) {
+        // Only hook-kind capabilities have a runtime; others are generative.
+        if cap.manifest.kind != KindId::Hook || !cap.binds(ev) {
             skipped.push(cap.manifest.id.clone());
             continue;
         }
@@ -71,15 +73,21 @@ fn run_capability(cap: &LoadedCapability, payload: &CanonicalPayload) -> Result<
     // Refuse an incompatible protocol before spawning anything.
     crate::model::negotiate(cap.manifest.protocol.as_deref())?;
 
+    let run = cap
+        .manifest
+        .run
+        .as_ref()
+        .ok_or("hook capability has no `run` entrypoint")?;
+
     let input = serde_json::to_string(payload).map_err(|e| e.to_string())?;
-    let mut child = Command::new(&cap.manifest.run.command)
-        .args(&cap.manifest.run.args)
+    let mut child = Command::new(&run.command)
+        .args(&run.args)
         .current_dir(&cap.dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("spawn {}: {e}", cap.manifest.run.command))?;
+        .map_err(|e| format!("spawn {}: {e}", run.command))?;
 
     child
         .stdin

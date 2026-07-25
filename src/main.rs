@@ -9,6 +9,7 @@
 
 use open_harness::adapters::{Harness, Support, ALL};
 use open_harness::event::{Boundary, NormEvent, Phase, SubjectKind, ToolClass};
+use open_harness::kind::{kind_impl, Artifact, Installability};
 use open_harness::manifest::{discover, LoadedCapability};
 use std::io::Read;
 use std::path::PathBuf;
@@ -155,9 +156,26 @@ fn cmd_emit(rest: &[String]) {
         })],
     };
     for cap in &caps {
-        let events: Vec<NormEvent> = cap.manifest.events.iter().map(|b| b.event()).collect();
         for h in &harnesses {
-            println!("{}", h.emit_registration(&events, &cap.manifest.id));
+            let plan = kind_impl(cap.manifest.kind).plan(cap, *h);
+            match &plan.installability {
+                Installability::Unsupported(reason) => println!(
+                    "# capability `{}` [{}] on {} — UNSUPPORTED: {reason}\n",
+                    cap.manifest.id,
+                    cap.manifest.kind.as_str(),
+                    h.id()
+                ),
+                _ => {
+                    for art in &plan.artifacts {
+                        match art {
+                            Artifact::Registration { text } => println!("{text}"),
+                            Artifact::File { path, contents } => {
+                                println!("# file: {path}\n{contents}\n")
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -170,50 +188,25 @@ fn cmd_check(rest: &[String]) {
         exit(1);
     }
     for cap in &caps {
-        println!("capability: {} ({})", cap.manifest.id, cap.manifest.name);
+        println!(
+            "capability: {} ({})  [kind: {}]",
+            cap.manifest.id,
+            cap.manifest.name,
+            cap.manifest.kind.as_str()
+        );
+        let k = kind_impl(cap.manifest.kind);
         for h in ALL {
-            let mut required_gaps = Vec::new();
-            let mut optional_gaps = Vec::new();
-            let mut fanouts = Vec::new();
-            for b in &cap.manifest.events {
-                let ev = b.event();
-                match h.support(&ev) {
-                    Support::Native(_, _) => {}
-                    Support::Fanout(list) => fanouts.push((ev.id(), list.len())),
-                    Support::Unsupported(reason) => {
-                        if b.required {
-                            required_gaps.push(format!("{} ({reason})", ev.id()));
-                        } else {
-                            optional_gaps.push(ev.id());
-                        }
-                    }
-                }
-            }
-            let status = if !required_gaps.is_empty() {
-                format!("BLOCKED — missing required: {}", required_gaps.join(", "))
-            } else if !optional_gaps.is_empty() || !fanouts.is_empty() {
-                let mut parts = Vec::new();
-                if !fanouts.is_empty() {
-                    let f: Vec<String> = fanouts
-                        .iter()
-                        .map(|(e, n)| format!("{e}→{n} native events"))
-                        .collect();
-                    parts.push(format!("fan-out: {}", f.join(", ")));
-                }
-                if !optional_gaps.is_empty() {
-                    parts.push(format!(
-                        "degraded (skipped optional: {})",
-                        optional_gaps.join(", ")
-                    ));
-                }
-                format!("installable — {}", parts.join("; "))
-            } else {
-                "installable — clean".to_string()
+            let plan = k.plan(cap, h);
+            let status = match &plan.installability {
+                Installability::Clean => "installable — clean".to_string(),
+                Installability::Degraded(d) => format!("installable — {d}"),
+                Installability::Unsupported(r) => format!("BLOCKED — {r}"),
             };
-            let note = h
-                .platform_note()
-                .map(|n| format!("  [{n}]"))
-                .unwrap_or_default();
+            let note = if plan.notes.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}]", plan.notes.join("; "))
+            };
             println!("  {:<12} {}{}", h.id(), status, note);
         }
         println!();

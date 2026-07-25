@@ -8,12 +8,15 @@
 pub mod adapters;
 pub mod dispatch;
 pub mod event;
+pub mod kind;
+pub mod kinds;
 pub mod manifest;
 pub mod model;
 
 pub use adapters::{Harness, Support};
 pub use dispatch::{dispatch, DispatchOutcome};
 pub use event::NormEvent;
+pub use kind::{kind_impl, Artifact, Installability, Kind, KindId, KindPlan};
 pub use manifest::{discover, LoadedCapability};
 pub use model::{
     merge, negotiate, parse_decision, validate_decision, Decision, NativeResponse, Verdict,

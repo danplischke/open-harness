@@ -8,6 +8,7 @@
 
 use open_harness::adapters::{DenyStyle, Harness, Support};
 use open_harness::event::{Boundary, NormEvent, Phase, SubjectKind, TaskKind, ToolClass};
+use open_harness::kind::{kind_impl, Artifact, Installability, KindId};
 use open_harness::manifest::{discover, LoadedCapability};
 use open_harness::model::{merge, negotiate, parse_decision, Decision, Verdict};
 use serde_json::json;
@@ -311,4 +312,48 @@ fn protocol_negotiation_refuses_major_mismatch() {
     assert!(negotiate(Some("open-harness/hook@1")).is_ok());
     assert!(negotiate(Some("hook@2")).is_err(), "major mismatch refused");
     assert!(negotiate(Some("garbage")).is_err());
+}
+
+// ---- kind abstraction: hooks are now the first kind behind the trait ------
+
+#[test]
+fn manifest_defaults_to_hook_kind() {
+    let m: open_harness::manifest::Manifest =
+        serde_json::from_value(json!({ "id": "x", "run": { "command": "true" } })).unwrap();
+    assert_eq!(m.kind, KindId::Hook);
+    assert!(m.run.is_some());
+}
+
+#[test]
+fn hook_kind_plans_via_the_abstraction() {
+    let caps = caps();
+    let guard = caps
+        .iter()
+        .find(|c| c.manifest.id == "secret-guard")
+        .expect("secret-guard capability present");
+    assert_eq!(guard.manifest.kind, KindId::Hook);
+
+    let k = kind_impl(guard.manifest.kind);
+
+    // Claude: clean install, exactly one registration artifact mentioning the event.
+    let plan = k.plan(guard, Harness::Claude);
+    assert!(matches!(plan.installability, Installability::Clean));
+    match plan.artifacts.first() {
+        Some(Artifact::Registration { text }) => assert!(text.contains("PreToolUse")),
+        other => panic!("expected a registration artifact, got {other:?}"),
+    }
+
+    // Cursor: degraded (the pre.tool.any fan-out).
+    assert!(matches!(
+        k.plan(guard, Harness::Cursor).installability,
+        Installability::Degraded(_)
+    ));
+
+    // Aider: required event with no hook mechanism -> BLOCKED, no artifacts.
+    let aider = k.plan(guard, Harness::Aider);
+    assert!(matches!(
+        aider.installability,
+        Installability::Unsupported(_)
+    ));
+    assert!(aider.artifacts.is_empty());
 }

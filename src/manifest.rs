@@ -2,6 +2,7 @@
 //! installed into any harness. Language-agnostic: `run` is just a command line.
 
 use crate::event::{Boundary, NormEvent, Phase, SubjectKind, TaskKind, ToolClass};
+use crate::kind::KindId;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -49,13 +50,24 @@ pub struct Manifest {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    pub run: RunSpec,
+    /// Capability kind. Defaults to `hook` so pre-existing hook manifests load
+    /// unchanged.
+    #[serde(default)]
+    pub kind: KindId,
+    /// Hook execution entrypoint. Required for `hook` capabilities; absent for
+    /// generative kinds (skills, rules, ...).
+    #[serde(default)]
+    pub run: Option<RunSpec>,
     #[serde(default)]
     pub events: Vec<EventBinding>,
     /// Wire-protocol version this capability speaks, e.g. `"hook@1"`. Optional;
     /// when present the dispatcher refuses a major-version mismatch.
     #[serde(default)]
     pub protocol: Option<String>,
+    /// Kind-specific configuration (e.g. the `skill` block). Each kind parses
+    /// what it needs from here; unknown keys are ignored.
+    #[serde(flatten)]
+    pub config: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A manifest plus the directory it was loaded from (the cwd used when the
