@@ -1,0 +1,294 @@
+//! Conformance tests.
+//!
+//! These encode each harness's *real* hook contract as assertions, and run the
+//! actual Python and Node capabilities end-to-end through the dispatcher. They
+//! are the executable form of the feasibility finding: they pass where the
+//! normalization holds, and they document (via the matrix tests) exactly where
+//! it does not.
+
+use open_harness::adapters::{DenyStyle, Harness, Support};
+use open_harness::event::{Boundary, NormEvent, Phase, SubjectKind, TaskKind, ToolClass};
+use open_harness::manifest::{discover, EventBinding, LoadedCapability, Manifest, RunSpec};
+use open_harness::model::{merge, Decision, Verdict};
+use serde_json::json;
+
+fn caps() -> Vec<LoadedCapability> {
+    discover(std::path::Path::new("capabilities")).expect("capabilities/ should load")
+}
+
+// ---- event model round-trips --------------------------------------------
+
+#[test]
+fn event_id_roundtrip() {
+    for id in [
+        "pre.tool.any",
+        "pre.tool.shell",
+        "post.tool.file_edit",
+        "pre.model",
+        "pre.prompt",
+        "pre.session.start",
+        "post.session.end",
+        "pre.task.cancel",
+    ] {
+        let ev: NormEvent = id.parse().unwrap();
+        assert_eq!(ev.id(), id, "round-trip failed for {id}");
+    }
+}
+
+#[test]
+fn only_pre_tool_model_prompt_are_blocking() {
+    assert!(NormEvent::tool(Phase::Pre, ToolClass::Shell).blocking());
+    assert!(NormEvent::simple(Phase::Pre, SubjectKind::Model).blocking());
+    assert!(!NormEvent::tool(Phase::Post, ToolClass::Shell).blocking());
+    assert!(!NormEvent {
+        phase: Phase::Pre,
+        subject: SubjectKind::Session,
+        tool_class: None,
+        boundary: Some(Boundary::Start),
+        task_kind: None,
+    }
+    .blocking());
+}
+
+// ---- the support matrix: where it maps and where it breaks ---------------
+
+#[test]
+fn claude_maps_tool_natively() {
+    match Harness::Claude.support(&NormEvent::tool(Phase::Pre, ToolClass::Any)) {
+        Support::Native(name, _) => assert_eq!(name, "PreToolUse"),
+        other => panic!("expected native, got {other:?}"),
+    }
+}
+
+#[test]
+fn cursor_fans_out_generic_tool_to_three_events() {
+    match Harness::Cursor.support(&NormEvent::tool(Phase::Pre, ToolClass::Any)) {
+        Support::Fanout(list) => assert_eq!(list.len(), 3),
+        other => panic!("expected fan-out, got {other:?}"),
+    }
+}
+
+#[test]
+fn windsurf_fans_out_generic_tool_to_four_events() {
+    match Harness::Windsurf.support(&NormEvent::tool(Phase::Pre, ToolClass::Any)) {
+        Support::Fanout(list) => assert_eq!(list.len(), 4),
+        other => panic!("expected fan-out, got {other:?}"),
+    }
+}
+
+#[test]
+fn only_gemini_has_a_model_hook() {
+    assert!(matches!(
+        Harness::Gemini.support(&NormEvent::simple(Phase::Pre, SubjectKind::Model)),
+        Support::Native(_, _)
+    ));
+    for h in [
+        Harness::Claude,
+        Harness::Codex,
+        Harness::Cursor,
+        Harness::Cline,
+    ] {
+        assert!(matches!(
+            h.support(&NormEvent::simple(Phase::Pre, SubjectKind::Model)),
+            Support::Unsupported(_)
+        ));
+    }
+}
+
+#[test]
+fn task_lifecycle_is_cline_only() {
+    let ev = NormEvent {
+        phase: Phase::Pre,
+        subject: SubjectKind::Task,
+        tool_class: None,
+        boundary: None,
+        task_kind: Some(TaskKind::Start),
+    };
+    assert!(matches!(Harness::Cline.support(&ev), Support::Native(_, _)));
+    assert!(matches!(
+        Harness::Claude.support(&ev),
+        Support::Unsupported(_)
+    ));
+}
+
+#[test]
+fn aider_and_copilot_have_no_hook_target() {
+    let ev = NormEvent::tool(Phase::Pre, ToolClass::Any);
+    assert!(matches!(
+        Harness::Aider.support(&ev),
+        Support::Unsupported(_)
+    ));
+    assert!(matches!(
+        Harness::Copilot.support(&ev),
+        Support::Unsupported(_)
+    ));
+}
+
+// ---- decode: per-harness field translation into the canonical shape ------
+
+#[test]
+fn decode_translates_divergent_native_field_names() {
+    let ev = NormEvent::tool(Phase::Pre, ToolClass::Shell);
+
+    let claude = Harness::Claude.decode(
+        &json!({"tool_name": "Bash", "tool_input": {"command": "ls"}}),
+        &ev,
+    );
+    assert_eq!(claude.tool.unwrap().name, "Bash");
+
+    let cursor = Harness::Cursor.decode(
+        &json!({"toolName": "Bash", "toolInput": {"command": "ls"}}),
+        &ev,
+    );
+    assert_eq!(cursor.tool.unwrap().name, "Bash");
+
+    let windsurf = Harness::Windsurf.decode(
+        &json!({"tool": {"name": "Bash", "args": {"command": "ls"}}}),
+        &ev,
+    );
+    assert_eq!(windsurf.tool.unwrap().name, "Bash");
+}
+
+// ---- encode: the deny-signal fragmentation, made concrete ----------------
+
+#[test]
+fn deny_styles_are_grouped_correctly() {
+    assert_eq!(Harness::Claude.deny_style(), DenyStyle::Exit2);
+    assert_eq!(Harness::Windsurf.deny_style(), DenyStyle::Exit2);
+    assert_eq!(Harness::Cursor.deny_style(), DenyStyle::CursorJson);
+    assert_eq!(Harness::Cline.deny_style(), DenyStyle::ClineJson);
+    assert_eq!(Harness::OpenCode.deny_style(), DenyStyle::InProcess);
+}
+
+#[test]
+fn encode_deny_uses_each_harness_native_signal() {
+    let ev = NormEvent::tool(Phase::Pre, ToolClass::Shell);
+    let deny = Decision {
+        decision: Verdict::Deny,
+        reason: "nope".into(),
+        context_append: None,
+        modified_input: None,
+    };
+
+    // exit-2 family
+    let r = Harness::Claude.encode(&deny, &ev);
+    assert_eq!(r.exit_code, 2);
+    assert!(r.stderr.contains("nope"));
+
+    // cursor stdout-json permission
+    let r = Harness::Cursor.encode(&deny, &ev);
+    assert_eq!(r.exit_code, 0);
+    assert!(r.stdout.contains("\"permission\":\"deny\""));
+
+    // cline stdout-json cancel
+    let r = Harness::Cline.encode(&deny, &ev);
+    assert!(r.stdout.contains("\"cancel\":true"));
+
+    // in-process passes the canonical decision through
+    let r = Harness::OpenCode.encode(&deny, &ev);
+    assert!(r.stdout.contains("\"decision\":\"deny\""));
+}
+
+#[test]
+fn non_blocking_event_cannot_deny() {
+    // A deny returned on a post event must not turn into a block.
+    let ev = NormEvent::tool(Phase::Post, ToolClass::Shell);
+    let deny = Decision {
+        decision: Verdict::Deny,
+        reason: "too late".into(),
+        context_append: None,
+        modified_input: None,
+    };
+    let r = Harness::Claude.encode(&deny, &ev);
+    assert_eq!(r.exit_code, 0, "post-phase deny must not block");
+}
+
+// ---- merge: composition semantics ----------------------------------------
+
+#[test]
+fn merge_is_deny_wins_and_concatenates_context() {
+    let decisions = vec![
+        Decision {
+            decision: Verdict::Allow,
+            reason: String::new(),
+            context_append: Some("a".into()),
+            modified_input: None,
+        },
+        Decision {
+            decision: Verdict::Deny,
+            reason: "bad".into(),
+            context_append: Some("b".into()),
+            modified_input: None,
+        },
+    ];
+    let m = merge(&decisions);
+    assert_eq!(m.decision, Verdict::Deny);
+    assert_eq!(m.context_append.as_deref(), Some("a\nb"));
+    assert!(m.reason.contains("bad"));
+}
+
+// ---- end-to-end: real Python + Node capabilities through the dispatcher ---
+
+#[test]
+fn e2e_safe_input_allows_everywhere() {
+    let ev = NormEvent::tool(Phase::Pre, ToolClass::Any);
+    let safe = json!({"tool_name": "Bash", "tool_input": {"command": "ls -la"}});
+    for h in [Harness::Claude, Harness::Cline, Harness::OpenCode] {
+        let out = open_harness::dispatch(h, &ev, &caps(), &safe);
+        assert_eq!(
+            out.response.exit_code,
+            0,
+            "{} should allow safe input",
+            h.id()
+        );
+        assert!(out.ran.contains(&"secret-guard".to_string()));
+        assert!(out.ran.contains(&"audit-note".to_string()));
+    }
+}
+
+#[test]
+fn e2e_secret_input_is_blocked_via_each_native_signal() {
+    let ev = NormEvent::tool(Phase::Pre, ToolClass::Any);
+    let secret =
+        json!({"tool_name": "Bash", "tool_input": {"command": "echo AKIAIOSFODNN7EXAMPLE"}});
+
+    // Claude: exit 2
+    let out = open_harness::dispatch(Harness::Claude, &ev, &caps(), &secret);
+    assert_eq!(out.response.exit_code, 2);
+    assert!(out.response.stderr.contains("secret"));
+
+    // Cline: stdout cancel:true
+    let out = open_harness::dispatch(Harness::Cline, &ev, &caps(), &secret);
+    assert!(out.response.stdout.contains("\"cancel\":true"));
+}
+
+#[test]
+fn e2e_capability_crash_fails_closed_on_blocking_event() {
+    // A capability that exits non-zero must DENY on a blocking event, never
+    // silently allow.
+    let crashing = LoadedCapability {
+        manifest: Manifest {
+            id: "crasher".into(),
+            name: "Crasher".into(),
+            description: String::new(),
+            run: RunSpec {
+                command: "python3".into(),
+                args: vec!["-c".into(), "import sys; sys.exit(3)".into()],
+            },
+            events: vec![EventBinding {
+                phase: Phase::Pre,
+                subject: SubjectKind::Tool,
+                tool_class: Some(ToolClass::Any),
+                boundary: None,
+                task_kind: None,
+                required: true,
+            }],
+        },
+        dir: std::path::PathBuf::from("."),
+    };
+    let ev = NormEvent::tool(Phase::Pre, ToolClass::Shell);
+    let safe = json!({"tool_name": "Bash", "tool_input": {"command": "ls"}});
+    let out = open_harness::dispatch(Harness::Claude, &ev, &[crashing], &safe);
+    assert_eq!(out.response.exit_code, 2, "crash must fail closed (deny)");
+    assert!(!out.errored.is_empty());
+}

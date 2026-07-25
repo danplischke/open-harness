@@ -1,0 +1,74 @@
+# open-harness (feasibility spike)
+
+> **Status: feasibility spike, not a product.** This repository currently holds a
+> deliberately narrow prototype that answers one question — *can the fragmented
+> hook surface of the major coding harnesses be driven from a single normalized
+> model over a language-agnostic contract, and where does that break?* — before
+> committing to the full architecture. See [`FEASIBILITY.md`](./FEASIBILITY.md)
+> for the findings and verdict.
+
+## The idea being tested
+
+Different coding harnesses (Claude Code, Codex, Gemini CLI, Cursor, Windsurf,
+Cline, OpenCode, Pi, …) configure the same concepts — hooks, rules, commands,
+tools — in mutually incompatible ways. `open-harness` is meant to be the missing
+**integration layer**: OSS authors build a capability **once**, developers
+**compose** capabilities from different sources, and the customization is
+**programming-language-agnostic**. It stands *beside* the existing standards
+(AGENTS.md for instructions, MCP for tools, SKILL.md for skills) and covers the
+un-standardized middle.
+
+This spike implements the riskiest slice of that — **hooks** — for 10 harnesses.
+
+## What's here
+
+| Path | What |
+|---|---|
+| `src/event.rs` | Normalized event model: `(phase, subject, tool_class?)` |
+| `src/adapters.rs` | 10 harness adapters: event mapping, deny signal, registration format |
+| `src/dispatch.rs` | Single-entrypoint dispatcher: fan-out, merge, fail-closed |
+| `src/model.rs` | The canonical stdio contract (payload in, decision out) |
+| `capabilities/secret-guard/` | A real **Python** blocking capability |
+| `capabilities/audit-note/` | A real **Node/TS** non-blocking capability |
+| `tests/conformance.rs` | 16 tests encoding each harness's real contract |
+
+## The contract (this is the whole point)
+
+A **capability** is *any executable in any language* that reads a canonical
+payload as JSON on stdin and writes a decision as JSON on stdout:
+
+```jsonc
+// stdin  (CanonicalPayload)
+{ "protocol": "open-harness/hook@0", "harness": "claude-code",
+  "event": {"phase":"pre","subject":"tool","tool_class":"shell"},
+  "blocking": true, "tool": {"name":"Bash","input":{"command":"…"}} }
+
+// stdout (Decision)
+{ "decision": "deny", "reason": "potential secret in tool input" }
+```
+
+The dispatcher translates that one decision into whatever the target harness
+actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JSON
+(Cursor), a `cancel` JSON (Cline), or an in-process return via a generated shim
+(OpenCode/Pi).
+
+## Try it
+
+```sh
+cargo test                            # 16 conformance tests
+cargo run -- matrix                   # support grid across 10 harnesses
+cargo run -- check                    # per-capability installability
+bash examples/demo.sh                 # deny across all four signal families
+cargo run -- emit --harness cursor    # native registration (note the fan-out)
+```
+
+## Scope & honesty
+
+- Only the **hook** capability kind is implemented (the hardest one).
+- The 8 proprietary harnesses aren't installed here, so their native *runtime*
+  isn't exercised; their conventions are encoded from docs. Codex and Cursor
+  exact field names are `MEDIUM CONFIDENCE` (flagged in code).
+- Deferred: timeouts/sandboxing, registry/signing, rules/commands/permissions
+  kinds, `uniffi`/`napi` bindings, Windows exec. See `FEASIBILITY.md`.
+
+License: MIT.

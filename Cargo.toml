@@ -1,0 +1,21 @@
+[package]
+name = "open-harness"
+version = "0.0.0-spike"
+edition = "2021"
+description = "Feasibility spike: cross-harness capability normalization + language-agnostic stdio hook contract"
+license = "MIT"
+
+[[bin]]
+name = "oh-dispatch"
+path = "src/main.rs"
+
+[lib]
+name = "open_harness"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.dev]
+opt-level = 0
