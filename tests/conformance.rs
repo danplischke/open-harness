@@ -357,3 +357,66 @@ fn hook_kind_plans_via_the_abstraction() {
     ));
     assert!(aider.artifacts.is_empty());
 }
+
+// ---- skills kind: SKILL.md unified across vendors (a generative kind) -----
+
+fn skill_cap() -> LoadedCapability {
+    caps()
+        .into_iter()
+        .find(|c| c.manifest.id == "commit-style")
+        .expect("commit-style skill capability present")
+}
+
+#[test]
+fn skill_kind_generates_skill_md_for_supporting_harnesses() {
+    let cap = skill_cap();
+    assert_eq!(cap.manifest.kind, KindId::Skill);
+    let k = kind_impl(cap.manifest.kind);
+
+    let expected_paths = [
+        (Harness::Claude, ".claude/skills/commit-style/SKILL.md"),
+        (Harness::Codex, ".agents/skills/commit-style/SKILL.md"),
+        (Harness::Cursor, ".cursor/skills/commit-style/SKILL.md"),
+        (Harness::Windsurf, ".windsurf/skills/commit-style/SKILL.md"),
+    ];
+    for (h, expected) in expected_paths {
+        let plan = k.plan(&cap, h);
+        assert!(
+            matches!(plan.installability, Installability::Clean),
+            "{}",
+            h.id()
+        );
+        match plan.artifacts.first() {
+            Some(Artifact::File { path, contents }) => {
+                assert_eq!(path, expected);
+                assert!(contents.contains("name: Commit Style"));
+                assert!(contents.contains("allowed-tools: Read"));
+                assert!(contents.contains("Conventional Commits"));
+            }
+            other => panic!("{}: expected a File artifact, got {other:?}", h.id()),
+        }
+    }
+
+    // A harness with no SKILL.md directory is Unsupported, not silently dropped.
+    assert!(matches!(
+        k.plan(&cap, Harness::Gemini).installability,
+        Installability::Unsupported(_)
+    ));
+}
+
+#[test]
+fn skill_roundtrip_import() {
+    let cap = skill_cap();
+    let plan = kind_impl(KindId::Skill).plan(&cap, Harness::Claude);
+    let Some(Artifact::File { contents, .. }) = plan.artifacts.first() else {
+        panic!("expected a File artifact");
+    };
+    let imported = open_harness::kinds::skill::import_skill_md(contents).unwrap();
+    assert_eq!(imported.name, "Commit Style");
+    assert_eq!(
+        imported.description,
+        "Teaches the agent this repo's commit message conventions."
+    );
+    assert_eq!(imported.allowed_tools, vec!["Read".to_string()]);
+    assert!(imported.body.contains("Conventional Commits"));
+}

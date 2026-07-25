@@ -89,6 +89,7 @@ pub trait Kind {
 pub fn kind_impl(id: KindId) -> Box<dyn Kind> {
     match id {
         KindId::Hook => Box::new(crate::kinds::hook::HookKind),
+        KindId::Skill => Box::new(crate::kinds::skill::SkillKind),
         other => Box::new(Unimplemented(other)),
     }
 }

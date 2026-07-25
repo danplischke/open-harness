@@ -1,0 +1,10 @@
+{
+  "id": "commit-style",
+  "name": "Commit Style",
+  "description": "Teaches the agent this repo's commit message conventions.",
+  "kind": "skill",
+  "skill": {
+    "allowed_tools": ["Read"],
+    "body_file": "SKILL_BODY.md"
+  }
+}

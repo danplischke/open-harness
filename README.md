@@ -30,7 +30,7 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `capabilities/secret-guard/` | A real **Python** blocking capability |
 | `capabilities/audit-note/` | A real **Node/TS** non-blocking capability |
-| `tests/conformance.rs` | 16 tests encoding each harness's real contract |
+| `tests/conformance.rs` | 22 tests: harness contracts, protocol validation, kind plans |
 
 ## The contract (this is the whole point)
 
@@ -39,13 +39,16 @@ payload as JSON on stdin and writes a decision as JSON on stdout:
 
 ```jsonc
 // stdin  (CanonicalPayload)
-{ "protocol": "open-harness/hook@0", "harness": "claude-code",
+{ "protocol": "open-harness/hook@1", "harness": "claude-code",
   "event": {"phase":"pre","subject":"tool","tool_class":"shell"},
   "blocking": true, "tool": {"name":"Bash","input":{"command":"…"}} }
 
 // stdout (Decision)
 { "decision": "deny", "reason": "potential secret in tool input" }
 ```
+
+The wire protocol is frozen as `hook@1` with a normative spec and JSON Schemas in
+[`spec/`](./spec/).
 
 The dispatcher translates that one decision into whatever the target harness
 actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JSON
@@ -55,20 +58,29 @@ actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JS
 ## Try it
 
 ```sh
-cargo test                            # 16 conformance tests
+cargo test                            # 22 conformance tests
 cargo run -- matrix                   # support grid across 10 harnesses
 cargo run -- check                    # per-capability installability
 bash examples/demo.sh                 # deny across all four signal families
 cargo run -- emit --harness cursor    # native registration (note the fan-out)
 ```
 
+## Capability kinds
+
+Capabilities declare a `kind`; each kind plugs into the same `Kind` trait
+(`src/kind.rs`) and adding one needs no change to the dispatcher core.
+
+- **hook** (runtime) — the stdio contract above, across 10 harnesses.
+- **skill** (generative) — unifies `SKILL.md`, emitting the right file for
+  Claude / Codex / Cursor / Windsurf and reporting the rest Unsupported.
+- **rule / command / tool / permission** — planned; see the issue tracker.
+
 ## Scope & honesty
 
-- Only the **hook** capability kind is implemented (the hardest one).
 - The 8 proprietary harnesses aren't installed here, so their native *runtime*
   isn't exercised; their conventions are encoded from docs. Codex and Cursor
   exact field names are `MEDIUM CONFIDENCE` (flagged in code).
-- Deferred: timeouts/sandboxing, registry/signing, rules/commands/permissions
+- Deferred: timeouts/sandboxing, registry/signing, the remaining capability
   kinds, `uniffi`/`napi` bindings, Windows exec. See `FEASIBILITY.md`.
 
 License: MIT.
