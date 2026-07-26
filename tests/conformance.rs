@@ -682,3 +682,73 @@ fn tool_mcp_unsupported_on_aider() {
         Installability::Unsupported(_)
     ));
 }
+
+// ---- the stable embeddable API (the surface bindings call) ----------------
+
+use open_harness::api;
+
+#[test]
+fn api_lists_harnesses_and_kinds() {
+    let hs = api::harnesses();
+    assert_eq!(hs.len(), 10);
+    assert!(hs.contains(&"claude-code".to_string()));
+    let ks = api::kinds();
+    assert!(ks.contains(&"hook".to_string()) && ks.contains(&"tool".to_string()));
+    assert_eq!(api::protocol_version(), "hook@1");
+}
+
+#[test]
+fn api_plan_maps_installability_and_artifacts() {
+    // A hook plans to a registration on Claude, BLOCKED on Aider.
+    let hook = r#"{"id":"g","kind":"hook","run":{"command":"true"},
+        "events":[{"phase":"pre","subject":"tool","tool_class":"any","required":true}]}"#;
+    let claude = api::plan(hook, ".", "claude-code").unwrap();
+    assert_eq!(claude.installability, "clean");
+    assert_eq!(claude.artifacts.first().unwrap().kind, "registration");
+    let aider = api::plan(hook, ".", "aider").unwrap();
+    assert_eq!(aider.installability, "unsupported");
+
+    // An MCP-free exec tool plans to a file even on Aider.
+    let tool = r#"{"id":"t","name":"T","description":"d","kind":"tool",
+        "tool":{"provider":"exec","delivery":"cli","exec":{"command":"rg"}}}"#;
+    let p = api::plan(tool, ".", "aider").unwrap();
+    assert_eq!(p.installability, "clean");
+    assert_eq!(p.artifacts.first().unwrap().kind, "file");
+    assert_eq!(
+        p.artifacts.first().unwrap().path,
+        ".open-harness/tools/t.md"
+    );
+
+    // plan_all covers every harness in one call.
+    assert_eq!(api::plan_all(hook, ".").unwrap().len(), 10);
+}
+
+#[test]
+fn api_dispatch_over_json_boundary() {
+    let secret = r#"{"tool_name":"Bash","tool_input":{"command":"echo AKIAIOSFODNN7EXAMPLE"}}"#;
+    let blocked = api::dispatch("claude-code", "pre.tool.any", secret, "capabilities").unwrap();
+    assert_eq!(blocked.exit_code, 2);
+    assert!(blocked.ran.contains(&"secret-guard".to_string()));
+
+    let safe = r#"{"tool_name":"Bash","tool_input":{"command":"ls -la"}}"#;
+    let allowed = api::dispatch("claude-code", "pre.tool.any", safe, "capabilities").unwrap();
+    assert_eq!(allowed.exit_code, 0);
+}
+
+#[test]
+fn api_returns_errors_not_panics() {
+    let valid = r#"{"id":"x","kind":"hook","run":{"command":"true"}}"#;
+    assert!(matches!(
+        api::plan(valid, ".", "not-a-harness"),
+        Err(api::ApiError::Harness(_))
+    ));
+    assert!(matches!(
+        api::plan("{ not json", ".", "claude-code"),
+        Err(api::ApiError::Manifest(_))
+    ));
+    assert!(matches!(
+        api::dispatch("claude-code", "bogus.event", "{}", "capabilities"),
+        Err(api::ApiError::Event(_))
+    ));
+    assert!(api::negotiate(Some("hook@2".to_string())).is_err());
+}

@@ -6,6 +6,7 @@
 //! `oh-dispatch` (see `main.rs`) is the CLI face of the same functions.
 
 pub mod adapters;
+pub mod api;
 pub mod dispatch;
 pub mod event;
 pub mod kind;

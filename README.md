@@ -28,9 +28,10 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 | `src/adapters.rs` | 10 harness adapters: event mapping, deny signal, registration format |
 | `src/dispatch.rs` | Single-entrypoint dispatcher: fan-out, merge, fail-closed |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
+| `src/api.rs` | Stable embeddable API (JSON-string boundary) the CLI + bindings call |
 | `capabilities/secret-guard/` | A real **Python** blocking capability |
 | `capabilities/audit-note/` | A real **Node/TS** non-blocking capability |
-| `tests/conformance.rs` | 30 tests: harness contracts, protocol validation, kind plans |
+| `tests/conformance.rs` | 34 tests: harness contracts, protocol validation, kind plans, API |
 
 ## The contract (this is the whole point)
 
@@ -58,7 +59,7 @@ actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JS
 ## Try it
 
 ```sh
-cargo test                            # 30 conformance tests
+cargo test                            # 34 conformance tests
 cargo run -- matrix                   # support grid across 10 harnesses
 cargo run -- check                    # per-capability installability
 bash examples/demo.sh                 # deny across all four signal families

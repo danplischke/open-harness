@@ -88,57 +88,36 @@ fn load_caps(o: &Opts) -> Vec<LoadedCapability> {
 }
 
 fn cmd_run(rest: &[String]) {
+    // The CLI is a thin shell over the stable library API (`open_harness::api`).
     let o = parse_opts(rest);
-    let harness = o
-        .harness
-        .as_deref()
-        .and_then(Harness::from_id)
-        .unwrap_or_else(|| {
-            eprintln!("--harness required (e.g. claude-code, codex, cursor, ...)");
-            exit(2)
-        });
-    let ev: NormEvent = o
+    let harness = o.harness.clone().unwrap_or_default();
+    let event = o
         .event
-        .as_deref()
-        .unwrap_or("pre.tool.any")
-        .parse()
-        .unwrap_or_else(|e| {
-            eprintln!("bad --event: {e}");
-            exit(2)
-        });
-
+        .clone()
+        .unwrap_or_else(|| "pre.tool.any".to_string());
     let mut buf = String::new();
     let _ = std::io::stdin().read_to_string(&mut buf);
-    let native: serde_json::Value = if buf.trim().is_empty() {
-        serde_json::json!({})
-    } else {
-        serde_json::from_str(&buf).unwrap_or_else(|e| {
-            eprintln!("stdin was not valid JSON: {e}");
-            exit(2)
-        })
-    };
+    let caps_dir = o.capabilities.display().to_string();
 
-    let caps = load_caps(&o);
-    let outcome = open_harness::dispatch(harness, &ev, &caps, &native);
+    let result =
+        open_harness::api::dispatch(&harness, &event, &buf, &caps_dir).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            exit(2)
+        });
 
     if o.explain {
         eprintln!(
-            "[explain] harness={} event={} ran={:?} skipped={:?} errored={:?} -> exit={}",
-            harness.id(),
-            ev.id(),
-            outcome.ran,
-            outcome.skipped,
-            outcome.errored,
-            outcome.response.exit_code
+            "[explain] harness={harness} event={event} ran={:?} skipped={:?} errored={:?} -> exit={}",
+            result.ran, result.skipped, result.errored, result.exit_code
         );
     }
-    if !outcome.response.stdout.is_empty() {
-        print!("{}", outcome.response.stdout);
+    if !result.stdout.is_empty() {
+        print!("{}", result.stdout);
     }
-    if !outcome.response.stderr.is_empty() {
-        eprint!("{}", outcome.response.stderr);
+    if !result.stderr.is_empty() {
+        eprint!("{}", result.stderr);
     }
-    exit(outcome.response.exit_code);
+    exit(result.exit_code);
 }
 
 fn cmd_emit(rest: &[String]) {
