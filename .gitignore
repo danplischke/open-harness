@@ -1,2 +1,8 @@
 /target
 **/*.rs.bk
+
+# Generated language-binding artifacts (regenerate with bindings/build.sh)
+/bindings/python/open_harness.py
+/bindings/python/*.so
+__pycache__/
+*.pyc

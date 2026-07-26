@@ -14,6 +14,11 @@ pub mod kinds;
 pub mod manifest;
 pub mod model;
 
+// Generates the uniffi scaffolding for the language bindings (feature-gated so
+// the default build never pulls uniffi).
+#[cfg(feature = "ffi")]
+uniffi::setup_scaffolding!();
+
 pub use adapters::{Harness, Support};
 pub use dispatch::{dispatch, DispatchOutcome};
 pub use event::NormEvent;

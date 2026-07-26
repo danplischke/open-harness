@@ -82,12 +82,24 @@ Capabilities declare a `kind`; each kind plugs into the same `Kind` trait
   environments that block MCP. (An MCP-server→shell bridge is tracked in #19.)
 - **command / permission** — planned; see the issue tracker.
 
+## Embedding
+
+The core is a Rust library (`open_harness::api`) exposed to other languages via
+uniffi — feature-gated so the default build never depends on it. Python works
+today:
+
+```sh
+bash bindings/build.sh    # build the FFI cdylib, generate + run the Python example
+```
+
+See [`bindings/README.md`](./bindings/README.md). TypeScript/`napi` is planned.
+
 ## Scope & honesty
 
 - The 8 proprietary harnesses aren't installed here, so their native *runtime*
   isn't exercised; their conventions are encoded from docs. Codex and Cursor
   exact field names are `MEDIUM CONFIDENCE` (flagged in code).
 - Deferred: timeouts/sandboxing, registry/signing, the remaining capability
-  kinds, `uniffi`/`napi` bindings, Windows exec. See `FEASIBILITY.md`.
+  kinds, the TypeScript/`napi` binding, Windows exec. See `FEASIBILITY.md`.
 
 License: MIT.

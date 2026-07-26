@@ -9,13 +9,26 @@ license = "MIT"
 name = "oh-dispatch"
 path = "src/main.rs"
 
+# uniffi binding generator — only built with `--features ffi`.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["ffi"]
+
 [lib]
 name = "open_harness"
 path = "src/lib.rs"
+# cdylib for the language bindings; lib keeps the rlib for the CLI + tests.
+crate-type = ["lib", "cdylib"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+uniffi = { version = "0.28", features = ["cli"], optional = true }
+
+[features]
+# Opt-in FFI surface (uniffi). Off by default so the core build stays lean.
+ffi = ["dep:uniffi"]
 
 [profile.dev]
 opt-level = 0

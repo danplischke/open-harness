@@ -21,6 +21,7 @@ use std::path::PathBuf;
 
 /// Errors from the stable API. Kept as a small, flat enum so it maps to a
 /// uniffi/napi error type.
+#[cfg_attr(feature = "ffi", derive(uniffi::Error), uniffi(flat_error))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiError {
     Manifest(String),
@@ -47,6 +48,7 @@ impl fmt::Display for ApiError {
 impl std::error::Error for ApiError {}
 
 /// One thing to install to realize a capability on a harness.
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanArtifact {
     /// `"file"` (path + contents) or `"registration"` (native config snippet in `contents`).
@@ -56,6 +58,7 @@ pub struct PlanArtifact {
 }
 
 /// The result of planning a capability for one harness.
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     pub harness: String,
@@ -68,6 +71,7 @@ pub struct Plan {
 }
 
 /// The result of running the hook dispatcher for one native event.
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchResult {
     pub exit_code: i32,
@@ -200,5 +204,60 @@ fn to_plan(h: Harness, p: crate::kind::KindPlan) -> Plan {
         detail,
         artifacts,
         notes: p.notes,
+    }
+}
+
+// ---- FFI surface (uniffi) --------------------------------------------------
+//
+// Thin wrappers over the `&str` API above, taking owned `String`s as uniffi
+// requires. Rust callers use the ergonomic `&str` functions; the bindings call
+// these. Feature-gated so the default build never depends on uniffi.
+#[cfg(feature = "ffi")]
+mod ffi {
+    use super::{ApiError, DispatchResult, Plan};
+
+    #[uniffi::export]
+    pub fn protocol_version() -> String {
+        super::protocol_version()
+    }
+
+    #[uniffi::export]
+    pub fn harnesses() -> Vec<String> {
+        super::harnesses()
+    }
+
+    #[uniffi::export]
+    pub fn kinds() -> Vec<String> {
+        super::kinds()
+    }
+
+    #[uniffi::export]
+    pub fn plan(manifest_json: String, dir: String, harness: String) -> Result<Plan, ApiError> {
+        super::plan(&manifest_json, &dir, &harness)
+    }
+
+    #[uniffi::export]
+    pub fn plan_all(manifest_json: String, dir: String) -> Result<Vec<Plan>, ApiError> {
+        super::plan_all(&manifest_json, &dir)
+    }
+
+    #[uniffi::export]
+    pub fn dispatch(
+        harness: String,
+        event_id: String,
+        native_stdin_json: String,
+        capabilities_dir: String,
+    ) -> Result<DispatchResult, ApiError> {
+        super::dispatch(&harness, &event_id, &native_stdin_json, &capabilities_dir)
+    }
+
+    #[uniffi::export]
+    pub fn validate_decision(decision_json: String) -> Result<(), ApiError> {
+        super::validate_decision(&decision_json)
+    }
+
+    #[uniffi::export]
+    pub fn negotiate(capability_protocol: Option<String>) -> Result<(), ApiError> {
+        super::negotiate(capability_protocol)
     }
 }
