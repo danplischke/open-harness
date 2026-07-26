@@ -30,7 +30,7 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `capabilities/secret-guard/` | A real **Python** blocking capability |
 | `capabilities/audit-note/` | A real **Node/TS** non-blocking capability |
-| `tests/conformance.rs` | 25 tests: harness contracts, protocol validation, kind plans |
+| `tests/conformance.rs` | 30 tests: harness contracts, protocol validation, kind plans |
 
 ## The contract (this is the whole point)
 
@@ -58,7 +58,7 @@ actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JS
 ## Try it
 
 ```sh
-cargo test                            # 25 conformance tests
+cargo test                            # 30 conformance tests
 cargo run -- matrix                   # support grid across 10 harnesses
 cargo run -- check                    # per-capability installability
 bash examples/demo.sh                 # deny across all four signal families
@@ -75,7 +75,11 @@ Capabilities declare a `kind`; each kind plugs into the same `Kind` trait
 - **rule** (generative) — one glob-scoped rule → each harness's native spelling
   (Cursor `alwaysApply`+`globs`, Copilot `applyTo`, Windsurf `trigger`, Cline /
   Claude `paths`), degrading the activation modes a harness lacks with a loud note.
-- **command / tool / permission** — planned; see the issue tracker.
+- **tool** (generative) — one tool → each harness's native **MCP** config
+  (`mcpServers` vs `servers`, JSON vs Codex TOML, OpenCode `type:local`, `url` vs
+  `httpUrl`), **or** an **MCP-free** shell delivery (`provider: exec`) for
+  environments that block MCP. (An MCP-server→shell bridge is tracked in #19.)
+- **command / permission** — planned; see the issue tracker.
 
 ## Scope & honesty
 

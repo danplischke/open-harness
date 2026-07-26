@@ -561,3 +561,124 @@ fn rule_unsupported_on_agents_md_only_harnesses() {
         );
     }
 }
+
+// ---- tools kind: MCP config divergence, and an MCP-free CLI delivery ------
+
+fn cap_from(value: serde_json::Value) -> LoadedCapability {
+    LoadedCapability {
+        manifest: serde_json::from_value(value).unwrap(),
+        dir: std::path::PathBuf::from("."),
+    }
+}
+
+fn tool_cap(id: &str) -> LoadedCapability {
+    caps()
+        .into_iter()
+        .find(|c| c.manifest.id == id)
+        .unwrap_or_else(|| panic!("{id} tool capability present"))
+}
+
+#[test]
+fn tool_mcp_generates_key_and_format_divergences() {
+    let cap = tool_cap("web-search");
+    assert_eq!(cap.manifest.kind, KindId::Tool);
+    let k = kind_impl(cap.manifest.kind);
+    let file = |h| match k.plan(&cap, h).artifacts.into_iter().next() {
+        Some(Artifact::File { path, contents }) => (path, contents),
+        other => panic!("{:?}: expected a File", other),
+    };
+
+    let (p, c) = file(Harness::Claude);
+    assert_eq!(p, ".mcp.json");
+    assert!(c.contains("\"mcpServers\"") && c.contains("@example/web-search-mcp"));
+
+    // The key divergence: VS Code / Copilot use `servers`, not `mcpServers`.
+    let (p, c) = file(Harness::Copilot);
+    assert_eq!(p, ".vscode/mcp.json");
+    assert!(c.contains("\"servers\"") && !c.contains("\"mcpServers\""));
+
+    // Codex is TOML.
+    let (p, c) = file(Harness::Codex);
+    assert_eq!(p, ".codex/config.toml");
+    assert!(c.contains("[mcp_servers.web-search]") && c.contains("command = \"npx\""));
+
+    // OpenCode: type:local, command-as-array, `environment` not `env`.
+    let (_p, c) = file(Harness::OpenCode);
+    assert!(c.contains("\"type\": \"local\"") && c.contains("\"environment\""));
+}
+
+#[test]
+fn tool_mcp_http_transport_field_diverges() {
+    let cap = cap_from(json!({
+        "id": "remote", "name": "Remote", "description": "d", "kind": "tool",
+        "tool": { "provider": "mcp", "delivery": "mcp",
+                  "server": { "transport": "http", "url": "https://mcp.example.com",
+                              "headers": { "Authorization": "Bearer x" } } }
+    }));
+    let k = kind_impl(KindId::Tool);
+    let contents = |h| match k.plan(&cap, h).artifacts.into_iter().next() {
+        Some(Artifact::File { contents, .. }) => contents,
+        _ => panic!("expected a File"),
+    };
+    // Gemini spells streamable HTTP as `httpUrl`; Claude uses `type:http`+`url`.
+    assert!(contents(Harness::Gemini).contains("\"httpUrl\""));
+    let claude = contents(Harness::Claude);
+    assert!(claude.contains("\"type\": \"http\"") && !claude.contains("httpUrl"));
+    // Cursor infers remote from `url`, with no `type`.
+    let cursor = contents(Harness::Cursor);
+    assert!(cursor.contains("\"url\"") && !cursor.contains("\"type\""));
+}
+
+#[test]
+fn tool_exec_delivers_cli_mcp_free_everywhere() {
+    let cap = tool_cap("repo-grep");
+    let k = kind_impl(cap.manifest.kind);
+    // Works even on harnesses with no MCP at all (Aider) — that's the point.
+    for h in [Harness::Claude, Harness::Aider] {
+        let plan = k.plan(&cap, h);
+        assert!(
+            matches!(plan.installability, Installability::Clean),
+            "{}",
+            h.id()
+        );
+        match plan.artifacts.first() {
+            Some(Artifact::File { path, contents }) => {
+                assert_eq!(path, ".open-harness/tools/repo-grep.md");
+                assert!(contents.contains("no MCP") && contents.contains("rg --json"));
+            }
+            other => panic!("{}: expected a File, got {other:?}", h.id()),
+        }
+    }
+}
+
+#[test]
+fn tool_mcp_over_cli_is_bridged_and_flagged() {
+    let cap = cap_from(json!({
+        "id": "search", "name": "Search", "description": "d", "kind": "tool",
+        "tool": { "provider": "mcp", "delivery": "cli",
+                  "server": { "transport": "stdio", "command": "npx", "args": ["-y", "x"] },
+                  "tools": ["query"] }
+    }));
+    let plan = kind_impl(KindId::Tool).plan(&cap, Harness::Claude);
+    assert!(matches!(plan.installability, Installability::Degraded(_)));
+    assert!(plan
+        .notes
+        .iter()
+        .any(|n| n.contains("#19") && n.contains("still runs")));
+    assert!(matches!(
+        plan.artifacts.first(),
+        Some(Artifact::File { .. })
+    ));
+}
+
+#[test]
+fn tool_mcp_unsupported_on_aider() {
+    // web-search resolves delivery=auto -> mcp; Aider has no MCP.
+    let cap = tool_cap("web-search");
+    assert!(matches!(
+        kind_impl(KindId::Tool)
+            .plan(&cap, Harness::Aider)
+            .installability,
+        Installability::Unsupported(_)
+    ));
+}

@@ -91,6 +91,7 @@ pub fn kind_impl(id: KindId) -> Box<dyn Kind> {
         KindId::Hook => Box::new(crate::kinds::hook::HookKind),
         KindId::Skill => Box::new(crate::kinds::skill::SkillKind),
         KindId::Rule => Box::new(crate::kinds::rule::RuleKind),
+        KindId::Tool => Box::new(crate::kinds::tool::ToolKind),
         other => Box::new(Unimplemented(other)),
     }
 }

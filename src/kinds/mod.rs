@@ -3,3 +3,4 @@
 pub mod hook;
 pub mod rule;
 pub mod skill;
+pub mod tool;
