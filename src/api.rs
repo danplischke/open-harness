@@ -97,10 +97,16 @@ pub fn harnesses() -> Vec<String> {
 
 /// The capability kinds currently implemented.
 pub fn kinds() -> Vec<String> {
-    [KindId::Hook, KindId::Skill, KindId::Rule, KindId::Tool]
-        .iter()
-        .map(|k| k.as_str().to_string())
-        .collect()
+    [
+        KindId::Hook,
+        KindId::Skill,
+        KindId::Rule,
+        KindId::Tool,
+        KindId::Command,
+    ]
+    .iter()
+    .map(|k| k.as_str().to_string())
+    .collect()
 }
 
 /// Plan a capability (given as its `capability.json` text) for one harness.

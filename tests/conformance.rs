@@ -693,7 +693,11 @@ fn api_lists_harnesses_and_kinds() {
     assert_eq!(hs.len(), 10);
     assert!(hs.contains(&"claude-code".to_string()));
     let ks = api::kinds();
-    assert!(ks.contains(&"hook".to_string()) && ks.contains(&"tool".to_string()));
+    assert!(
+        ks.contains(&"hook".to_string())
+            && ks.contains(&"tool".to_string())
+            && ks.contains(&"command".to_string())
+    );
     assert_eq!(api::protocol_version(), "hook@1");
 }
 
@@ -751,4 +755,78 @@ fn api_returns_errors_not_panics() {
         Err(api::ApiError::Event(_))
     ));
     assert!(api::negotiate(Some("hook@2".to_string())).is_err());
+}
+
+// ---- commands kind: one command -> each harness's native file + arg syntax -
+
+fn command_cap() -> LoadedCapability {
+    caps()
+        .into_iter()
+        .find(|c| c.manifest.id == "review-pr")
+        .expect("review-pr command capability present")
+}
+
+#[test]
+fn command_generates_native_format_per_harness() {
+    let cap = command_cap();
+    assert_eq!(cap.manifest.kind, KindId::Command);
+    let k = kind_impl(cap.manifest.kind);
+    let file = |h| match k.plan(&cap, h).artifacts.into_iter().next() {
+        Some(Artifact::File { path, contents }) => (path, contents),
+        other => panic!("{:?}: expected a File", other),
+    };
+
+    // Markdown+YAML with $ARGUMENTS on the dollar family.
+    let (p, c) = file(Harness::Claude);
+    assert_eq!(p, ".claude/commands/review-pr.md");
+    assert!(c.contains("description:") && c.contains("$ARGUMENTS"));
+
+    // Gemini is TOML with a {{args}} prompt.
+    let (p, c) = file(Harness::Gemini);
+    assert_eq!(p, ".gemini/commands/review-pr.toml");
+    assert!(c.contains("prompt = ") && c.contains("{{args}}"));
+
+    let (p, c) = file(Harness::Copilot);
+    assert_eq!(p, ".github/prompts/review-pr.prompt.md");
+    assert!(c.contains("$ARGUMENTS"));
+
+    assert_eq!(file(Harness::OpenCode).0, ".opencode/commands/review-pr.md");
+
+    // Codex custom prompts are global -> degraded (but still emitted).
+    assert!(matches!(
+        k.plan(&cap, Harness::Codex).installability,
+        Installability::Degraded(_)
+    ));
+}
+
+#[test]
+fn command_positional_args_degrade_on_gemini() {
+    let cap = cap_from(json!({
+        "id": "deploy", "name": "Deploy", "description": "d", "kind": "command",
+        "command": { "body": "deploy service {{arg1}} to {{arg2}}" }
+    }));
+    let k = kind_impl(KindId::Command);
+
+    // The dollar family substitutes positional args.
+    let claude = match k.plan(&cap, Harness::Claude).artifacts.into_iter().next() {
+        Some(Artifact::File { contents, .. }) => contents,
+        _ => panic!("expected a File"),
+    };
+    assert!(claude.contains("$1") && claude.contains("$2"));
+
+    // Gemini has no positional args -> degraded, still emitted with a note.
+    let g = k.plan(&cap, Harness::Gemini);
+    assert!(matches!(g.installability, Installability::Degraded(_)));
+    assert!(!g.notes.is_empty());
+    assert!(matches!(g.artifacts.first(), Some(Artifact::File { .. })));
+}
+
+#[test]
+fn command_unsupported_on_aider() {
+    assert!(matches!(
+        kind_impl(KindId::Command)
+            .plan(&command_cap(), Harness::Aider)
+            .installability,
+        Installability::Unsupported(_)
+    ));
 }
