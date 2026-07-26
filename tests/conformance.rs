@@ -420,3 +420,144 @@ fn skill_roundtrip_import() {
     assert_eq!(imported.allowed_tools, vec!["Read".to_string()]);
     assert!(imported.body.contains("Conventional Commits"));
 }
+
+// ---- rules kind: same "glob-scoped rule" concept, five native spellings ---
+
+fn rule_cap() -> LoadedCapability {
+    caps()
+        .into_iter()
+        .find(|c| c.manifest.id == "rpc-conventions")
+        .expect("rpc-conventions rule capability present")
+}
+
+fn inline_rule(activation: &str) -> LoadedCapability {
+    let manifest: open_harness::manifest::Manifest = serde_json::from_value(json!({
+        "id": "naming",
+        "name": "Naming",
+        "description": "Use descriptive identifiers.",
+        "kind": "rule",
+        "rule": { "activation": activation, "body": "Prefer descriptive names." }
+    }))
+    .unwrap();
+    LoadedCapability {
+        manifest,
+        dir: std::path::PathBuf::from("."),
+    }
+}
+
+#[test]
+fn rule_kind_generates_each_native_spelling_for_a_glob_rule() {
+    let cap = rule_cap();
+    assert_eq!(cap.manifest.kind, KindId::Rule);
+    let k = kind_impl(cap.manifest.kind);
+    let csv = "src/rpc/**/*.rs,src/rpc/**/*.ts";
+
+    // (harness, expected path, expected frontmatter substring)
+    let cases: [(Harness, &str, &str); 5] = [
+        (
+            Harness::Cursor,
+            ".cursor/rules/rpc-conventions.mdc",
+            "alwaysApply: false",
+        ),
+        (
+            Harness::Copilot,
+            ".github/instructions/rpc-conventions.instructions.md",
+            "applyTo: src/rpc/**/*.rs,src/rpc/**/*.ts",
+        ),
+        (
+            Harness::Windsurf,
+            ".windsurf/rules/rpc-conventions.md",
+            "trigger: glob",
+        ),
+        (Harness::Cline, ".clinerules/rpc-conventions.md", "paths:"),
+        (
+            Harness::Claude,
+            ".claude/rules/rpc-conventions.md",
+            "paths:",
+        ),
+    ];
+    for (h, path, needle) in cases {
+        let plan = k.plan(&cap, h);
+        assert!(
+            matches!(plan.installability, Installability::Clean),
+            "{}",
+            h.id()
+        );
+        match plan.artifacts.first() {
+            Some(Artifact::File { path: p, contents }) => {
+                assert_eq!(p, path, "{}", h.id());
+                assert!(
+                    contents.contains(needle),
+                    "{}: missing {needle}\n{contents}",
+                    h.id()
+                );
+            }
+            other => panic!("{}: expected a File artifact, got {other:?}", h.id()),
+        }
+    }
+    // Cursor and Copilot spell globs as a comma string.
+    let cursor = k.plan(&cap, Harness::Cursor);
+    if let Some(Artifact::File { contents, .. }) = cursor.artifacts.first() {
+        assert!(contents.contains(&format!("globs: {csv}")));
+    }
+    // Cline spells them as a YAML array.
+    let cline = k.plan(&cap, Harness::Cline);
+    if let Some(Artifact::File { contents, .. }) = cline.artifacts.first() {
+        assert!(contents.contains("- \"src/rpc/**/*.rs\""));
+    }
+}
+
+#[test]
+fn rule_agent_requested_degrades_where_unsupported() {
+    let cap = inline_rule("agent_requested");
+    let k = kind_impl(KindId::Rule);
+    // Native on Cursor and Windsurf.
+    assert!(matches!(
+        k.plan(&cap, Harness::Cursor).installability,
+        Installability::Clean
+    ));
+    assert!(matches!(
+        k.plan(&cap, Harness::Windsurf).installability,
+        Installability::Clean
+    ));
+    // Degraded (with a note) on the three that have no model-decision mode.
+    for h in [Harness::Copilot, Harness::Cline, Harness::Claude] {
+        let plan = k.plan(&cap, h);
+        assert!(
+            matches!(plan.installability, Installability::Degraded(_)),
+            "{}",
+            h.id()
+        );
+        assert!(
+            !plan.notes.is_empty(),
+            "{} should carry a degradation note",
+            h.id()
+        );
+        // Still emitted, never silently dropped.
+        assert!(matches!(
+            plan.artifacts.first(),
+            Some(Artifact::File { .. })
+        ));
+    }
+}
+
+#[test]
+fn rule_unsupported_on_agents_md_only_harnesses() {
+    let cap = rule_cap();
+    let k = kind_impl(KindId::Rule);
+    for h in [
+        Harness::Gemini,
+        Harness::OpenCode,
+        Harness::Pi,
+        Harness::Aider,
+    ] {
+        assert!(
+            matches!(
+                k.plan(&cap, h).installability,
+                Installability::Unsupported(_)
+            ),
+            "{} has no structured rules dir",
+            h.id()
+        );
+    }
+}
