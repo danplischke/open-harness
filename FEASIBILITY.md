@@ -190,12 +190,14 @@ adapter surfaces this via `platform_note`. Not a blocker; a work item.
 ### Deferred (not in this spike)
 Since the spike, the runtime was hardened (timeouts, output caps, error
 taxonomy, fail policy — #3), all six capability kinds landed (#6–#11), execution
-went cross-platform with a Windows CI matrix (#4), and Codex/Cursor were
-validated against docs (#5). Still deferred: capability **sandboxing** and
-process-group kill; **registry signing** (a real supply-chain surface once
-capabilities are distributable); the **TypeScript/napi** binding; the MCP→CLI
-bridge runtime (#19); and a **live** (not doc-derived) capture against a real
-Codex/Cursor install once available.
+went cross-platform with a Windows CI matrix (#4), Codex/Cursor were validated
+against docs (#5), the sync/composition layer shipped (#16), and **profiles +
+sources + a resolved lockfile** landed (#15 — local & git personal-repo sync,
+pinned + reproducible). Still deferred: **registry** sources + signing and
+transitive **dependency** resolution (the rest of #15/#17); capability
+**sandboxing** and process-group kill; the **TypeScript/napi** binding; the
+MCP→CLI bridge runtime (#19); and a **live** (not doc-derived) capture against a
+real Codex/Cursor install once available.
 
 ---
 

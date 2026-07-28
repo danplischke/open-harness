@@ -115,10 +115,22 @@ pub struct Manifest {
     /// the capability is killed and its failure policy applied if exceeded.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// Package version (semver-ish string). Recorded in the profile lockfile so
+    /// a resolved capability set is pinned + reproducible. Defaults to `0.0.0`.
+    #[serde(default = "default_version")]
+    pub version: String,
+    /// Other capability ids this one expects to be composed alongside. The
+    /// resolver warns if a declared dependency is absent from the profile.
+    #[serde(default)]
+    pub dependencies: Vec<String>,
     /// Kind-specific configuration (e.g. the `skill` block). Each kind parses
     /// what it needs from here; unknown keys are ignored.
     #[serde(flatten)]
     pub config: serde_json::Map<String, serde_json::Value>,
+}
+
+fn default_version() -> String {
+    "0.0.0".to_string()
 }
 
 /// A manifest plus the directory it was loaded from (the cwd used when the

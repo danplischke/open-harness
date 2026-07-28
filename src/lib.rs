@@ -13,6 +13,7 @@ pub mod kind;
 pub mod kinds;
 pub mod manifest;
 pub mod model;
+pub mod profile;
 pub mod runtime;
 pub mod sync;
 
@@ -30,6 +31,7 @@ pub use model::{
     merge, negotiate, parse_decision, validate_decision, Decision, NativeResponse, Verdict,
     PROTOCOL, PROTOCOL_VERSION,
 };
+pub use profile::{resolve, Lock, Profile, Resolved, Source};
 pub use runtime::{RunError, RunLimits};
 pub use sync::{
     apply, check, plan_sync, ApplyReport, ChangeAction, DesiredFile, DriftKind, DriftReport,

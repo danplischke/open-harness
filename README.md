@@ -31,6 +31,7 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `src/api.rs` | Stable embeddable API (JSON-string boundary) the CLI + bindings call |
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
+| `src/profile.rs` | Profiles + sources (local / git / registry) → resolved `open-harness.lock` |
 | `capabilities/secret-guard/` | A real **Python** blocking capability |
 | `capabilities/audit-note/` | A real **Node/TS** non-blocking capability |
 | `tests/conformance.rs` | 69 tests: harness contracts, protocol, kind plans, composition, runtime, API |
@@ -127,8 +128,31 @@ When several capabilities target the **same file** — two permission policies o
 cargo run -- sync --into /tmp/proj --harness opencode   # compose safe-shell + strict-ci → one policy
 ```
 
-(Composition is the L4 "apply a profile" layer, #16. Profiles/lockfile sourcing
-from git & personal repos is #15.)
+## Profiles & sources
+
+A **profile** names a set of **sources** and target harnesses; resolving it
+composes capabilities from a **local path**, a **git repo** (personal-repo sync
+— cloned, then pinned to a commit), or a **registry** (stubbed, reported), and
+writes a reproducible `open-harness.lock` pinning every capability (id + version
++ fingerprint) and every git source's exact SHA. `sync --profile` resolves, then
+converges the composed set — sourcing (L4, #15) feeding the sync layer (#16).
+
+```jsonc
+// open-harness.json
+{ "name": "my-setup", "harnesses": ["claude-code", "cursor"],
+  "sources": [
+    { "local": { "path": "capabilities" } },
+    { "git": { "url": "https://github.com/me/my-caps", "rev": "main", "subdir": "capabilities" } }
+  ] }
+```
+
+```sh
+cargo run -- resolve --profile open-harness.json      # resolve sources → write open-harness.lock
+cargo run -- sync    --profile open-harness.json --into /tmp/proj   # resolve, then converge
+```
+
+(Registry sources and transitive dependency resolution are the remaining #15
+follow-ups; a `version`/`dependencies` package format and the lockfile are here.)
 
 ## Embedding
 

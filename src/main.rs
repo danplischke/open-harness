@@ -14,6 +14,7 @@ use open_harness::adapters::{Harness, Support, ALL};
 use open_harness::event::{Boundary, NormEvent, Phase, SubjectKind, ToolClass};
 use open_harness::kind::{kind_impl, Artifact, Installability};
 use open_harness::manifest::{discover, LoadedCapability};
+use open_harness::profile::{self, Lock, Profile, Resolved};
 use open_harness::sync::{self, ApplyReport, ChangeAction, Deferred, DriftKind, DriftReport};
 use std::io::Read;
 use std::path::PathBuf;
@@ -26,12 +27,13 @@ fn main() {
     match cmd {
         "run" => cmd_run(&rest),
         "emit" => cmd_emit(&rest),
+        "resolve" => cmd_resolve(&rest),
         "sync" => cmd_sync(&rest),
         "check" => cmd_check(&rest),
         "matrix" => cmd_matrix(),
         _ => {
             eprintln!(
-                "oh-dispatch <run|emit|sync|check|matrix> [--harness H] [--event E] [--capabilities DIR] [--into DIR] [--dry-run] [--uninstall] [--ci] [--timeout-ms N] [--max-output-kb N] [--explain]"
+                "oh-dispatch <run|emit|resolve|sync|check|matrix> [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR] [--dry-run] [--uninstall] [--ci] [--timeout-ms N] [--max-output-kb N] [--explain]"
             );
             exit(2);
         }
@@ -42,6 +44,7 @@ struct Opts {
     harness: Option<String>,
     event: Option<String>,
     capabilities: PathBuf,
+    profile: Option<PathBuf>,
     into: Option<PathBuf>,
     dry_run: bool,
     uninstall: bool,
@@ -56,6 +59,7 @@ fn parse_opts(rest: &[String]) -> Opts {
         harness: None,
         event: None,
         capabilities: PathBuf::from("capabilities"),
+        profile: None,
         into: None,
         dry_run: false,
         uninstall: false,
@@ -79,6 +83,10 @@ fn parse_opts(rest: &[String]) -> Opts {
                 if let Some(p) = rest.get(i + 1) {
                     o.capabilities = PathBuf::from(p);
                 }
+                i += 2;
+            }
+            "--profile" => {
+                o.profile = rest.get(i + 1).map(PathBuf::from);
                 i += 2;
             }
             "--timeout-ms" => {
@@ -217,6 +225,69 @@ fn cmd_emit(rest: &[String]) {
     }
 }
 
+/// Resolve a profile file: load it (and any lockfile next to it), resolve every
+/// source, rewrite the lockfile, and print the composed set + warnings. The
+/// profile file's directory is the workdir (roots relative paths + the git cache).
+fn resolve_profile(path: &std::path::Path) -> Resolved {
+    let profile = Profile::load(path).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        exit(2);
+    });
+    let workdir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let lock_path = workdir.join(profile::LOCK_NAME);
+    let existing = std::fs::read_to_string(&lock_path)
+        .ok()
+        .and_then(|t| Lock::from_json(&t).ok());
+
+    let resolved = profile::resolve(&profile, workdir, existing.as_ref()).unwrap_or_else(|e| {
+        eprintln!("resolve failed: {e}");
+        exit(1);
+    });
+    if let Err(e) = resolved.lock.write(&lock_path) {
+        eprintln!("could not write {}: {e}", lock_path.display());
+    }
+    for w in &resolved.warnings {
+        eprintln!("warning: {w}");
+    }
+    resolved
+}
+
+fn cmd_resolve(rest: &[String]) {
+    let o = parse_opts(rest);
+    let Some(profile_path) = o.profile.clone() else {
+        eprintln!("resolve requires --profile <file>");
+        exit(2);
+    };
+    let resolved = resolve_profile(&profile_path);
+    let workdir = profile_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    println!(
+        "profile '{}' → {} capabilities across {} harness(es)",
+        resolved.profile,
+        resolved.capabilities.len(),
+        resolved.harnesses.len()
+    );
+    for s in &resolved.lock.sources {
+        let at = s
+            .rev
+            .as_deref()
+            .map(|r| &r[..r.len().min(12)])
+            .unwrap_or("-");
+        println!(
+            "  [{}] {} @ {}  ({} capabilities)",
+            s.kind,
+            s.origin,
+            at,
+            s.capabilities.len()
+        );
+        for c in &s.capabilities {
+            println!("      · {} {} [{}]", c.id, c.version, c.kind);
+        }
+    }
+    println!("\nlockfile: {}", workdir.join(profile::LOCK_NAME).display());
+}
+
 fn cmd_sync(rest: &[String]) {
     let o = parse_opts(rest);
     let Some(into) = o.into.clone() else {
@@ -234,12 +305,24 @@ fn cmd_sync(rest: &[String]) {
         return;
     }
 
-    let caps = load_caps(&o);
-    if caps.is_empty() {
-        eprintln!("no capabilities found under {}", o.capabilities.display());
-        exit(1);
-    }
-    let harnesses = select_harnesses(&o);
+    // Profile mode (#15): resolve sources + harnesses from the profile; else the
+    // ad-hoc `--capabilities` / `--harness` mode.
+    let (caps, harnesses) = if let Some(profile_path) = o.profile.clone() {
+        let resolved = resolve_profile(&profile_path);
+        if resolved.harnesses.is_empty() {
+            eprintln!("profile '{}' targets no harnesses", resolved.profile);
+            exit(1);
+        }
+        (resolved.capabilities, resolved.harnesses)
+    } else {
+        let caps = load_caps(&o);
+        if caps.is_empty() {
+            eprintln!("no capabilities found under {}", o.capabilities.display());
+            exit(1);
+        }
+        (caps, select_harnesses(&o))
+    };
+
     let plan = sync::plan_sync(&caps, &harnesses);
     let report = sync::apply(&into, &plan, o.dry_run).unwrap_or_else(|e| {
         eprintln!("sync failed: {e}");

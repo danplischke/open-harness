@@ -6,3 +6,4 @@
 /bindings/python/*.so
 __pycache__/
 *.pyc
+examples/open-harness.lock

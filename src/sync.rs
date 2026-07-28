@@ -381,7 +381,7 @@ impl Lockfile {
 
 /// FNV-1a 64-bit — a small, portable, deterministic content fingerprint
 /// (stable across platforms/toolchains, unlike `DefaultHasher`).
-fn fingerprint(s: &str) -> String {
+pub(crate) fn fingerprint(s: &str) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.as_bytes() {
         h ^= *b as u64;
