@@ -1,0 +1,6 @@
+{
+  "hook_event_name": "PreToolUse",
+  "tool_name": "shell",
+  "tool_input": { "command": ["bash", "-lc", "echo AKIAIOSFODNN7EXAMPLE"] },
+  "cwd": "/Users/me/project"
+}

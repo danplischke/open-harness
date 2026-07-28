@@ -139,11 +139,15 @@ fn decode_translates_divergent_native_field_names() {
     );
     assert_eq!(claude.tool.unwrap().name, "Bash");
 
+    // Cursor's beforeShellExecution carries the command as a top-level string
+    // (verified) — normalized to a `shell` tool whose input holds the command.
     let cursor = Harness::Cursor.decode(
-        &json!({"toolName": "Bash", "toolInput": {"command": "ls"}}),
+        &json!({"command": "ls", "hook_event_name": "beforeShellExecution"}),
         &ev,
     );
-    assert_eq!(cursor.tool.unwrap().name, "Bash");
+    let ctool = cursor.tool.unwrap();
+    assert_eq!(ctool.name, "shell");
+    assert_eq!(ctool.input["command"], json!("ls"));
 
     let windsurf = Harness::Windsurf.decode(
         &json!({"tool": {"name": "Bash", "args": {"command": "ls"}}}),
@@ -159,6 +163,8 @@ fn deny_styles_are_grouped_correctly() {
     assert_eq!(Harness::Claude.deny_style(), DenyStyle::Exit2);
     assert_eq!(Harness::Windsurf.deny_style(), DenyStyle::Exit2);
     assert_eq!(Harness::Cursor.deny_style(), DenyStyle::CursorJson);
+    // Verified (#5): Codex signals via stdout, not exit 2.
+    assert_eq!(Harness::Codex.deny_style(), DenyStyle::CodexJson);
     assert_eq!(Harness::Cline.deny_style(), DenyStyle::ClineJson);
     assert_eq!(Harness::OpenCode.deny_style(), DenyStyle::InProcess);
 }
@@ -1424,4 +1430,125 @@ fn parse_decision_tolerates_bom_and_crlf() {
     let out = "\u{feff}{\"decision\":\"deny\",\"reason\":\"x\"}\r\n";
     let decision = parse_decision(out).expect("BOM/CRLF-wrapped decision must parse");
     assert_eq!(decision.decision, Verdict::Deny);
+}
+
+// ---- fixture-driven adapter validation (#5): Codex + Cursor ----------------
+
+/// Load a recorded native payload from `tests/fixtures/`.
+fn fixture(rel: &str) -> serde_json::Value {
+    let path = format!("tests/fixtures/{rel}");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {path}: {e}"))
+}
+
+/// Cursor's `beforeShellExecution` carries the command as a top-level string —
+/// verified, and different from the old `toolName`/`toolInput` assumption.
+#[test]
+fn cursor_shell_fixture_decodes_to_canonical() {
+    let native = fixture("cursor/beforeShellExecution.stdin.json");
+    let p = Harness::Cursor.decode(&native, &NormEvent::tool(Phase::Pre, ToolClass::Shell));
+    let tool = p.tool.expect("shell event has a tool");
+    assert_eq!(tool.name, "shell");
+    assert!(tool.input["command"]
+        .as_str()
+        .unwrap()
+        .contains("AKIAIOSFODNN7EXAMPLE"));
+    assert_eq!(p.cwd.as_deref(), Some("/Users/me/project"));
+}
+
+/// Cursor's read/MCP events each have their own payload shape.
+#[test]
+fn cursor_read_and_mcp_fixtures_decode_event_specifically() {
+    let read = Harness::Cursor.decode(
+        &fixture("cursor/beforeReadFile.stdin.json"),
+        &NormEvent::tool(Phase::Pre, ToolClass::FileRead),
+    );
+    let rt = read.tool.unwrap();
+    assert_eq!(rt.name, "read");
+    assert_eq!(rt.input["file_path"], json!("/Users/me/project/.env"));
+    assert!(rt.input["content"].as_str().unwrap().contains("ghp_"));
+
+    let mcp = Harness::Cursor.decode(
+        &fixture("cursor/beforeMCPExecution.stdin.json"),
+        &NormEvent::tool(Phase::Pre, ToolClass::Mcp),
+    );
+    let mt = mcp.tool.unwrap();
+    assert_eq!(mt.name, "search_web");
+    assert_eq!(mt.input["query"], json!("how to rotate an API key"));
+}
+
+/// Cursor's deny is a `permission` object with `continue:false` (verified).
+#[test]
+fn cursor_deny_uses_permission_object() {
+    let deny = Decision {
+        decision: Verdict::Deny,
+        reason: "secret".into(),
+        context_append: None,
+        modified_input: None,
+    };
+    let r = Harness::Cursor.encode(&deny, &NormEvent::tool(Phase::Pre, ToolClass::Shell));
+    assert_eq!(r.exit_code, 0);
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(v["permission"], json!("deny"));
+    assert_eq!(v["continue"], json!(false));
+    assert_eq!(v["agentMessage"], json!("secret"));
+}
+
+/// The Codex correctness fix: a deny is a stdout `permissionDecision` object,
+/// NOT exit code 2 as the old adapter assumed.
+#[test]
+fn codex_denies_via_stdout_permission_decision_not_exit2() {
+    let native = fixture("codex/preToolUse.stdin.json");
+    let ev = NormEvent::tool(Phase::Pre, ToolClass::Shell);
+    let p = Harness::Codex.decode(&native, &ev);
+    assert_eq!(p.tool.as_ref().unwrap().name, "shell");
+
+    let deny = Decision {
+        decision: Verdict::Deny,
+        reason: "blocked secret".into(),
+        context_append: None,
+        modified_input: None,
+    };
+    let r = Harness::Codex.encode(&deny, &ev);
+    assert_eq!(r.exit_code, 0, "Codex denies via stdout, not exit 2");
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(v["permissionDecision"], json!("deny"));
+    assert_eq!(v["permissionDecisionReason"], json!("blocked secret"));
+}
+
+/// Codex registers via `hooks.json` (JSON), not a TOML `[[hooks…]]` table, and
+/// the shell-only + opt-in caveats are surfaced.
+#[test]
+fn codex_registration_is_hooks_json() {
+    let reg =
+        Harness::Codex.emit_registration(&[NormEvent::tool(Phase::Pre, ToolClass::Shell)], "guard");
+    assert!(reg.contains("hooks.json"), "Codex registers via hooks.json");
+    assert!(reg.contains("\"PreToolUse\""));
+    assert!(reg.contains("codex_hooks = true"), "notes the opt-in");
+    assert!(
+        !reg.contains("[[hooks"),
+        "not the TOML array-of-tables form"
+    );
+    assert!(
+        reg.contains("shell tool only"),
+        "surfaces the shell-only caveat"
+    );
+}
+
+/// The recorded Cursor shell payload, run through the dispatcher and the real
+/// secret-guard capability, is blocked via Cursor's native permission object.
+#[test]
+fn cursor_shell_fixture_blocks_a_secret_end_to_end() {
+    let native = fixture("cursor/beforeShellExecution.stdin.json");
+    let out = open_harness::dispatch(
+        Harness::Cursor,
+        &NormEvent::tool(Phase::Pre, ToolClass::Shell),
+        &caps(),
+        &native,
+    );
+    assert!(
+        out.response.stdout.contains("\"permission\":\"deny\""),
+        "the secret in the recorded Cursor command must be blocked: {}",
+        out.response.stdout
+    );
 }

@@ -33,7 +33,8 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
 | `capabilities/secret-guard/` | A real **Python** blocking capability |
 | `capabilities/audit-note/` | A real **Node/TS** non-blocking capability |
-| `tests/conformance.rs` | 63 tests: harness contracts, protocol, kind plans, composition, runtime, API |
+| `tests/conformance.rs` | 69 tests: harness contracts, protocol, kind plans, composition, runtime, API |
+| `tests/fixtures/` | Recorded Codex + Cursor native payloads (adapter validation, with sources) |
 | `.github/workflows/ci.yml` | CI: build + test on Linux/macOS/Windows; fmt + clippy on Linux |
 
 ## The contract (this is the whole point)
@@ -62,7 +63,7 @@ actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JS
 ## Try it
 
 ```sh
-cargo test                            # 63 conformance tests
+cargo test                            # 69 conformance tests
 cargo run -- matrix                   # support grid across 10 harnesses
 cargo run -- check                    # per-capability installability
 bash examples/demo.sh                 # deny across all four signal families
@@ -144,8 +145,12 @@ See [`bindings/README.md`](./bindings/README.md). TypeScript/`napi` is planned.
 ## Scope & honesty
 
 - The 8 proprietary harnesses aren't installed here, so their native *runtime*
-  isn't exercised; their conventions are encoded from docs. Codex and Cursor
-  exact field names are `MEDIUM CONFIDENCE` (flagged in code).
+  isn't exercised; their conventions are encoded from docs. Codex and Cursor —
+  previously `MEDIUM CONFIDENCE` — were validated against primary docs and their
+  adapters corrected (Cursor's per-event snake_case payloads; Codex's stdout
+  `permissionDecision` deny, `hooks.json` registration, shell-only PreToolUse),
+  with recorded payloads under [`tests/fixtures/`](./tests/fixtures/). The one
+  part still modeled rather than captured is Codex's exact stdin field names.
 - The hook runtime is hardened (`src/runtime.rs`): per-capability timeout with
   kill-on-exceed, stdout/stderr caps, a classified error taxonomy surfaced via
   `--explain`, and per-binding failure policy (`auto`/`fail_closed`/`fail_open`/

@@ -34,10 +34,14 @@ here, so their *native runtime* is not exercised. What is exercised for real is
 the part a library actually owns: the event model, the dispatcher, the
 stdio contract, decode/encode translation, and composition. Each harness's
 native convention is encoded from its **documented** contract. Claude Code,
-Gemini, Windsurf, Cline are high-confidence; **Codex and Cursor exact field
-names are modeled from docs and marked `MEDIUM CONFIDENCE` in code** — the
-*shape* of each divergence (which is what determines feasibility) is robust
-regardless.
+Gemini, Windsurf, Cline are high-confidence; **Codex and Cursor** (once
+`MEDIUM CONFIDENCE`) have since been validated against primary docs and their
+adapters corrected — Cursor's per-event snake_case payloads and `permission`
+response, Codex's stdout `permissionDecision` deny (not exit-2), `hooks.json`
+registration, and shell-only PreToolUse — with recorded payloads under
+`tests/fixtures/`. Only Codex's exact stdin field names remain modeled rather
+than captured. The *shape* of each divergence (which is what determines
+feasibility) was robust regardless.
 
 ---
 
@@ -184,11 +188,14 @@ adapter surfaces this via `platform_note`. Not a blocker; a work item.
   adapter + matrix + dispatcher spine.
 
 ### Deferred (not in this spike)
-Timeouts/resource limits on capability processes; capability sandboxing and
-registry signing (a real supply-chain surface once capabilities are
-distributable); the non-hook capability kinds (rules/commands/permissions);
-Windows exec; and live validation against the two `MEDIUM CONFIDENCE` harnesses
-(Codex, Cursor) once installable.
+Since the spike, the runtime was hardened (timeouts, output caps, error
+taxonomy, fail policy — #3), all six capability kinds landed (#6–#11), execution
+went cross-platform with a Windows CI matrix (#4), and Codex/Cursor were
+validated against docs (#5). Still deferred: capability **sandboxing** and
+process-group kill; **registry signing** (a real supply-chain surface once
+capabilities are distributable); the **TypeScript/napi** binding; the MCP→CLI
+bridge runtime (#19); and a **live** (not doc-derived) capture against a real
+Codex/Cursor install once available.
 
 ---
 

@@ -9,9 +9,14 @@
 //!      or a generated plugin/extension.
 //!
 //! Confidence: Claude Code, Gemini, Windsurf, and Cline conventions are well
-//! documented. Codex and Cursor exact field names are modeled from docs and
-//! marked `MEDIUM CONFIDENCE`; the *shape* of the divergence is what matters for
-//! the feasibility verdict, and that is robust.
+//! documented. Codex and Cursor were validated against primary docs and their
+//! adapters corrected (#5) — see `tests/fixtures/{codex,cursor}/` for the
+//! recorded payloads and sources. Cursor sends per-event snake_case payloads
+//! (not a uniform `tool_name`/`tool_input`) and reads a `permission` object;
+//! Codex signals a deny via a stdout `permissionDecision` object (not exit 2),
+//! loads `hooks.json`, and fires PreToolUse for the shell tool only. The one
+//! remaining model (not a verified capture) is Codex's exact stdin field names,
+//! taken to mirror Claude's `tool_name`/`tool_input`.
 
 use crate::event::{Boundary, NormEvent, Phase, SubjectKind, TaskKind, ToolClass};
 use crate::model::{CanonicalPayload, Decision, NativeResponse, ToolInfo, Verdict, PROTOCOL};
@@ -32,10 +37,13 @@ pub enum Support {
 /// How this harness reads a capability's decision back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DenyStyle {
-    /// Non-zero exit blocks; reason goes to stderr. (Claude, Codex, Gemini, Windsurf.)
+    /// Non-zero exit blocks; reason goes to stderr. (Claude, Gemini, Windsurf.)
     Exit2,
     /// stdout JSON `{"permission":"deny", ...}`. (Cursor.)
     CursorJson,
+    /// stdout JSON `{"permissionDecision":"deny","permissionDecisionReason":...}`.
+    /// (Codex — verified against docs; it is *not* exit-2 like Claude.)
+    CodexJson,
     /// stdout JSON `{"cancel":true, ...}`. (Cline.)
     ClineJson,
     /// In-process: the generated shim reads the canonical decision and applies
@@ -109,15 +117,21 @@ impl Harness {
     pub fn platform_note(&self) -> Option<&'static str> {
         match self {
             Harness::Cline => Some("hooks are macOS/Linux only (no Windows support)"),
+            // Verified: Codex's PreToolUse fires for the shell (Bash) tool only;
+            // apply_patch/Edit/Write/Read/web-fetch/MCP calls bypass it. Hooks are
+            // also off by default (`[features].codex_hooks = true` to enable).
+            Harness::Codex => Some(
+                "PreToolUse fires for the shell tool only (file/MCP/web tools bypass it); enable with [features].codex_hooks = true",
+            ),
             _ => None,
         }
     }
 
     pub fn deny_style(&self) -> DenyStyle {
         match self {
-            Harness::Claude | Harness::Codex | Harness::Gemini | Harness::Windsurf => {
-                DenyStyle::Exit2
-            }
+            Harness::Claude | Harness::Gemini | Harness::Windsurf => DenyStyle::Exit2,
+            // Codex signals via a stdout `permissionDecision` object, not exit 2.
+            Harness::Codex => DenyStyle::CodexJson,
             Harness::Cursor => DenyStyle::CursorJson,
             Harness::Cline => DenyStyle::ClineJson,
             Harness::OpenCode | Harness::Pi => DenyStyle::InProcess,
@@ -225,12 +239,11 @@ impl Harness {
     pub fn decode(&self, native: &Value, ev: &NormEvent) -> CanonicalPayload {
         let tool = match ev.subject {
             SubjectKind::Tool => Some(match self {
-                // Cursor uses camelCase.  MEDIUM CONFIDENCE on exact keys.
-                Harness::Cursor => ToolInfo {
-                    name: str_at(native, "toolName"),
-                    input: native.get("toolInput").cloned().unwrap_or(Value::Null),
-                },
-                // Windsurf nests the tool under `tool: { name, args }`. MEDIUM CONFIDENCE.
+                // Cursor: per-event payloads, snake_case — verified against docs.
+                // beforeShellExecution: {command, cwd, …}; beforeMCPExecution:
+                // {tool_name, tool_input, …}; beforeReadFile: {file_path, content}.
+                Harness::Cursor => decode_cursor_tool(native, ev),
+                // Windsurf nests the tool under `tool: { name, args }`.
                 Harness::Windsurf => ToolInfo {
                     name: native
                         .get("tool")
@@ -244,7 +257,8 @@ impl Harness {
                         .cloned()
                         .unwrap_or(Value::Null),
                 },
-                // Claude / Codex / Gemini / Cline convention.
+                // Claude / Codex / Gemini / Cline share the `tool_name`/`tool_input`
+                // convention. (Codex PreToolUse carries the shell tool only.)
                 _ => ToolInfo {
                     name: str_at(native, "tool_name"),
                     input: native.get("tool_input").cloned().unwrap_or(Value::Null),
@@ -296,10 +310,29 @@ impl Harness {
                 }
             }
             DenyStyle::CursorJson => {
+                // Verified response shape: {continue, permission, userMessage,
+                // agentMessage}. permission ∈ allow|deny|ask.
                 let v = if denied {
-                    json!({"permission": "deny", "agentMessage": reason_or(d, "blocked")})
+                    json!({"continue": false, "permission": "deny", "agentMessage": reason_or(d, "blocked")})
                 } else {
-                    json!({"permission": "allow"})
+                    json!({"continue": true, "permission": "allow"})
+                };
+                NativeResponse {
+                    stdout: v.to_string(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                }
+            }
+            DenyStyle::CodexJson => {
+                // Verified: Codex reads a stdout `permissionDecision` object; a
+                // deny becomes a tool error the agent sees.
+                let v = if denied {
+                    json!({
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason_or(d, "blocked"),
+                    })
+                } else {
+                    json!({ "permissionDecision": "allow" })
                 };
                 NativeResponse {
                     stdout: v.to_string(),
@@ -384,13 +417,18 @@ impl Harness {
                 out.push_str(&format!("# file: settings.json\n{}\n", pretty(&v)));
             }
             Harness::Codex => {
-                out.push_str("# file: .codex/config.toml (or hooks.json)\n");
+                // Verified: Codex loads `~/.codex/hooks.json` (JSON) — an event →
+                // array-of-commands map — or an equivalent inline `[hooks]` table.
+                // Enable with `[features].codex_hooks = true`.
+                let mut hooks = serde_json::Map::new();
                 for (name, cev) in &targets {
-                    out.push_str(&format!(
-                        "[[hooks.{name}]]\nmatcher = \"*\"\n[[hooks.{name}.hooks]]\ntype = \"command\"\ncommand = \"{}\"\n\n",
-                        cmd(cev)
-                    ));
+                    hooks.insert(name.clone(), json!([{ "command": cmd(cev) }]));
                 }
+                let v = json!({ "hooks": Value::Object(hooks) });
+                out.push_str(
+                    "# enable first: [features].codex_hooks = true in ~/.codex/config.toml\n",
+                );
+                out.push_str(&format!("# file: ~/.codex/hooks.json\n{}\n", pretty(&v)));
             }
             Harness::Cursor | Harness::Windsurf => {
                 let mut hooks = serde_json::Map::new();
@@ -430,6 +468,53 @@ impl Harness {
 
 fn single(name: &'static str, ev: NormEvent) -> Support {
     Support::Native(name, ev)
+}
+
+/// Decode Cursor's per-event tool payload into the canonical `ToolInfo`. Cursor
+/// does not send a uniform `{tool_name, tool_input}` — each event has its own
+/// shape (verified against docs), so normalize by the event's tool class.
+fn decode_cursor_tool(native: &Value, ev: &NormEvent) -> ToolInfo {
+    match ev.tool_class {
+        // beforeShellExecution: the command is a top-level string.
+        Some(ToolClass::Shell) => ToolInfo {
+            name: "shell".to_string(),
+            input: json!({ "command": str_at(native, "command") }),
+        },
+        // beforeReadFile: file_path (+ content, so a redactor can inspect it).
+        Some(ToolClass::FileRead) => ToolInfo {
+            name: "read".to_string(),
+            input: json!({
+                "file_path": str_at(native, "file_path"),
+                "content": native.get("content").cloned().unwrap_or(Value::Null),
+            }),
+        },
+        // afterFileEdit: file_path + edits[{old_string,new_string}].
+        Some(ToolClass::FileEdit) | Some(ToolClass::FileWrite) => ToolInfo {
+            name: "edit".to_string(),
+            input: json!({
+                "file_path": str_at(native, "file_path"),
+                "edits": native.get("edits").cloned().unwrap_or(Value::Null),
+            }),
+        },
+        // beforeMCPExecution: a real tool_name/tool_input pair (snake_case).
+        Some(ToolClass::Mcp) => ToolInfo {
+            name: str_at(native, "tool_name"),
+            input: native.get("tool_input").cloned().unwrap_or(Value::Null),
+        },
+        // Generic/unknown: best-effort over the union of known fields.
+        _ => ToolInfo {
+            name: if native.get("tool_name").is_some() {
+                str_at(native, "tool_name")
+            } else {
+                str_at(native, "hook_event_name")
+            },
+            input: native
+                .get("tool_input")
+                .or_else(|| native.get("command"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        },
+    }
 }
 
 fn cursor_tool(ev: &NormEvent) -> Support {

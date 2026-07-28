@@ -1,0 +1,8 @@
+{
+  "conversation_id": "668320d2-2fd8-4888-b33c-2a466fec86e7",
+  "generation_id": "490b90b7-a2ce-4c2c-bb76-cb77b125df2f",
+  "content": "SECRET_TOKEN=ghp_0123456789abcdef0123456789abcdef0123",
+  "file_path": "/Users/me/project/.env",
+  "hook_event_name": "beforeReadFile",
+  "workspace_roots": ["/Users/me/project"]
+}
