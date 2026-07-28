@@ -11,7 +11,9 @@ use open_harness::event::{Boundary, NormEvent, Phase, SubjectKind, TaskKind, Too
 use open_harness::kind::{kind_impl, Artifact, Installability, KindId};
 use open_harness::manifest::{discover, LoadedCapability};
 use open_harness::model::{merge, negotiate, parse_decision, Decision, Verdict};
+use open_harness::sync::{self, plan_sync, ChangeAction, DeferReason, DriftKind, SyncPlan};
 use serde_json::json;
+use std::path::PathBuf;
 
 fn caps() -> Vec<LoadedCapability> {
     discover(std::path::Path::new("capabilities")).expect("capabilities/ should load")
@@ -916,4 +918,250 @@ fn permission_unsupported_where_no_committed_file() {
             h.id()
         );
     }
+}
+
+// ---- sync + composition (#16): compose a set, converge on disk, detect drift -
+
+fn tmp_project(tag: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let p = std::env::temp_dir().join(format!("oh-sync-{}-{tag}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&p);
+    std::fs::create_dir_all(&p).expect("create temp project");
+    p
+}
+
+fn desired<'a>(plan: &'a SyncPlan, path: &str) -> &'a open_harness::sync::DesiredFile {
+    plan.files
+        .iter()
+        .find(|f| f.path == path)
+        .unwrap_or_else(|| panic!("no desired file at {path}"))
+}
+
+fn only(ids: &[&str]) -> Vec<LoadedCapability> {
+    caps()
+        .into_iter()
+        .filter(|c| ids.contains(&c.manifest.id.as_str()))
+        .collect()
+}
+
+/// `.vscode/settings.json` is one real file that both Windsurf and Copilot
+/// target — composition merges them into a single file, keyed by path (not by
+/// harness), so neither clobbers the other.
+#[test]
+fn sync_composes_shared_file_across_harnesses() {
+    let plan = plan_sync(&caps(), &[Harness::Windsurf, Harness::Copilot]);
+    let f = desired(&plan, ".vscode/settings.json");
+    assert_eq!(f.harnesses, vec!["copilot", "windsurf"]); // sorted, both present
+    assert!(f.contents.contains("windsurf.cascadeCommandsAllowList")); // Windsurf's keys
+    assert!(f.contents.contains("chat.tools.terminal.autoApprove")); // Copilot's keys
+}
+
+/// Two permission capabilities that overlap on `git *` (allow vs ask) compose:
+/// on OpenCode's scalar verdict map the most-restrictive wins (ask > allow),
+/// and the clash is recorded as a conflict — the hook deny-wins rule, extended.
+#[test]
+fn sync_permission_merge_is_most_restrictive() {
+    let plan = plan_sync(&only(&["safe-shell", "strict-ci"]), &[Harness::OpenCode]);
+    let f = desired(&plan, "opencode.json");
+    assert_eq!(f.sources, vec!["safe-shell", "strict-ci"]);
+    let v: serde_json::Value = serde_json::from_str(&f.contents).unwrap();
+    assert_eq!(v["permission"]["bash"]["git *"], json!("ask")); // ask beats allow
+    assert_eq!(v["permission"]["bash"]["git push --force *"], json!("deny")); // unioned
+    assert!(
+        f.conflicts.iter().any(|c| c.contains("git *")),
+        "the verdict clash must be reported, got {:?}",
+        f.conflicts
+    );
+}
+
+/// Claude represents verdicts as array membership, so an overlapping pattern
+/// lands in both `allow` and `ask`; Claude's own precedence (ask/deny > allow)
+/// resolves it. We union honestly rather than silently pruning.
+#[test]
+fn sync_permission_merge_unions_claude_arrays() {
+    let plan = plan_sync(&only(&["safe-shell", "strict-ci"]), &[Harness::Claude]);
+    let v: serde_json::Value =
+        serde_json::from_str(&desired(&plan, ".claude/settings.json").contents).unwrap();
+    let has = |arr: &serde_json::Value, s: &str| arr.as_array().unwrap().iter().any(|e| e == s);
+    assert!(has(&v["permissions"]["allow"], "Bash(git *)")); // from safe-shell
+    assert!(has(&v["permissions"]["ask"], "Bash(git *)")); // from strict-ci
+    assert!(has(&v["permissions"]["deny"], "Bash(git push --force *)"));
+}
+
+/// The composition is a pure function of its inputs: same caps + harnesses →
+/// byte-identical desired files, in a stable order.
+#[test]
+fn sync_plan_is_deterministic() {
+    let a = plan_sync(&caps(), &ALL_HARNESSES);
+    let b = plan_sync(&caps(), &ALL_HARNESSES);
+    assert_eq!(a.files, b.files);
+    let mut sorted = a.files.clone();
+    sorted.sort_by(|x, y| x.path.cmp(&y.path));
+    assert_eq!(a.files, sorted, "files must be path-sorted");
+}
+
+const ALL_HARNESSES: [Harness; 10] = [
+    Harness::Claude,
+    Harness::Codex,
+    Harness::Gemini,
+    Harness::Cursor,
+    Harness::Windsurf,
+    Harness::Cline,
+    Harness::OpenCode,
+    Harness::Pi,
+    Harness::Aider,
+    Harness::Copilot,
+];
+
+/// Nothing is silently dropped: a hook becomes a deferred *registration*, a
+/// command whose only target is a global `~/…` path a *global-path*, and a rule
+/// with no home on the harness a *blocked* (unsupported) — all reported.
+#[test]
+fn sync_defers_registrations_global_paths_and_blocks() {
+    // Codex exercises all three: hooks (registration), commands (~/.codex global
+    // path), and rules (no structured rules dir -> unsupported).
+    let plan = plan_sync(&caps(), &[Harness::Codex]);
+    let reason = |r: DeferReason| {
+        plan.deferred
+            .iter()
+            .filter(|d| d.reason == r)
+            .map(|d| d.source.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        reason(DeferReason::Registration).contains(&"secret-guard"),
+        "hook must defer as a registration"
+    );
+    assert!(
+        reason(DeferReason::GlobalPath).contains(&"review-pr"),
+        "~/.codex/prompts command must defer as a global path"
+    );
+    assert!(
+        reason(DeferReason::Unsupported).contains(&"rpc-conventions"),
+        "a rule with no Codex target must be blocked"
+    );
+}
+
+/// A TOML target can't be structurally merged; two producers with different
+/// contents keep the first (by id order) and record a loud conflict.
+#[test]
+fn sync_non_json_conflict_keeps_first_loudly() {
+    // On Codex, `.codex/config.toml` is produced by both the permission kind
+    // (coarse approval policy) and the tool kind (mcp_servers) — different TOML.
+    let plan = plan_sync(&caps(), &[Harness::Codex]);
+    let f = desired(&plan, ".codex/config.toml");
+    assert!(
+        !f.conflicts.is_empty(),
+        "non-mergeable TOML clash must be reported"
+    );
+    assert!(
+        f.contents.contains("approval_policy"),
+        "first producer by id order (permission) wins"
+    );
+}
+
+/// `apply` writes the composed set; a follow-up `check` sees no drift; a second
+/// `apply` is a pure no-op (idempotent convergence).
+#[test]
+fn sync_apply_is_idempotent_and_checks_clean() {
+    let root = tmp_project("idem");
+    let plan = plan_sync(&caps(), &[Harness::Claude]);
+
+    let first = sync::apply(&root, &plan, false).unwrap();
+    assert!(first.mutated());
+    assert_eq!(first.count(ChangeAction::Create), plan.files.len());
+
+    let drift = sync::check(&root, &plan).unwrap();
+    assert!(!drift.has_drift(), "freshly synced project must be in sync");
+
+    let second = sync::apply(&root, &plan, false).unwrap();
+    assert!(!second.mutated(), "re-apply must be a no-op");
+    assert_eq!(second.count(ChangeAction::Unchanged), plan.files.len());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `check` distinguishes a modified file from a missing one and flags drift —
+/// the CI failure condition.
+#[test]
+fn sync_check_detects_missing_and_modified() {
+    let root = tmp_project("drift");
+    let plan = plan_sync(&caps(), &[Harness::Claude]);
+    sync::apply(&root, &plan, false).unwrap();
+
+    std::fs::write(root.join(".claude/settings.json"), "tampered").unwrap();
+    std::fs::remove_file(root.join(".claude/skills/commit-style/SKILL.md")).unwrap();
+
+    let drift = sync::check(&root, &plan).unwrap();
+    assert!(drift.has_drift());
+    assert_eq!(drift.count(DriftKind::Modified), 1);
+    assert_eq!(drift.count(DriftKind::Missing), 1);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `dry_run` computes the full report but touches nothing on disk.
+#[test]
+fn sync_dry_run_writes_nothing() {
+    let root = tmp_project("dry");
+    let plan = plan_sync(&caps(), &[Harness::Claude]);
+    let report = sync::apply(&root, &plan, true).unwrap();
+    assert!(report.dry_run);
+    assert!(report.count(ChangeAction::Create) >= 1);
+    assert!(!root.join(".claude/settings.json").exists());
+    assert!(!root.join(sync::LOCK_REL).exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Removing a capability from the set prunes the file it owned on the next
+/// `apply`, but never touches a file open-harness didn't write.
+#[test]
+fn sync_prunes_removed_capabilities_and_spares_unmanaged() {
+    let root = tmp_project("prune");
+    sync::apply(&root, &plan_sync(&caps(), &[Harness::Claude]), false).unwrap();
+    std::fs::write(root.join("UNMANAGED.txt"), "hand-written").unwrap();
+    assert!(root.join(".claude/settings.json").exists());
+
+    // Narrow the set to a single capability: the rest must be pruned.
+    let narrow = plan_sync(&only(&["commit-style"]), &[Harness::Claude]);
+    let report = sync::apply(&root, &narrow, false).unwrap();
+    assert!(report.count(ChangeAction::Prune) >= 1);
+
+    assert!(
+        !root.join(".claude/settings.json").exists(),
+        "the removed capability's file must be pruned"
+    );
+    assert!(
+        root.join(".claude/skills/commit-style/SKILL.md").exists(),
+        "the kept capability's file must remain"
+    );
+    assert!(
+        root.join("UNMANAGED.txt").exists(),
+        "an unmanaged file must never be pruned"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `uninstall` removes every managed file and the lockfile, leaving unmanaged
+/// files untouched — a clean uninstall.
+#[test]
+fn sync_uninstall_is_clean() {
+    let root = tmp_project("uninstall");
+    sync::apply(&root, &plan_sync(&caps(), &[Harness::Claude]), false).unwrap();
+    std::fs::write(root.join("UNMANAGED.txt"), "hand-written").unwrap();
+
+    let report = sync::uninstall(&root, false).unwrap();
+    assert!(report.count(ChangeAction::Prune) >= 1);
+    assert!(!root.join(".claude/settings.json").exists());
+    assert!(
+        !root.join(sync::LOCK_REL).exists(),
+        "lockfile must be cleared"
+    );
+    assert!(
+        root.join("UNMANAGED.txt").exists(),
+        "uninstall must spare unmanaged files"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }

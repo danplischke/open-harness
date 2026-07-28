@@ -29,9 +29,10 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 | `src/dispatch.rs` | Single-entrypoint dispatcher: fan-out, merge, fail-closed |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `src/api.rs` | Stable embeddable API (JSON-string boundary) the CLI + bindings call |
+| `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
 | `capabilities/secret-guard/` | A real **Python** blocking capability |
 | `capabilities/audit-note/` | A real **Node/TS** non-blocking capability |
-| `tests/conformance.rs` | 40 tests: harness contracts, protocol validation, kind plans, API |
+| `tests/conformance.rs` | 51 tests: harness contracts, protocol validation, kind plans, composition, API |
 
 ## The contract (this is the whole point)
 
@@ -59,11 +60,15 @@ actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JS
 ## Try it
 
 ```sh
-cargo test                            # 40 conformance tests
+cargo test                            # 51 conformance tests
 cargo run -- matrix                   # support grid across 10 harnesses
 cargo run -- check                    # per-capability installability
 bash examples/demo.sh                 # deny across all four signal families
 cargo run -- emit --harness cursor    # native registration (note the fan-out)
+cargo run -- sync --into /tmp/proj --dry-run   # compose the set → files (preview)
+cargo run -- sync --into /tmp/proj             # install; re-run = no-op (idempotent)
+cargo run -- check --into /tmp/proj --ci       # drift detection, non-zero on drift
+cargo run -- sync --into /tmp/proj --uninstall # clean removal (managed files only)
 ```
 
 ## Capability kinds
@@ -90,6 +95,37 @@ Capabilities declare a `kind`; each kind plugs into the same `Kind` trait
   Cline/Aider/Pi. The honest-degradation showcase — five incompatible models.
 
 All six capability kinds are now implemented.
+
+## Sync & composition
+
+`emit` prints one capability's config; `sync` **installs a whole set** into a
+project and keeps it converged. It plans every capability across the target
+harnesses, groups the artifacts by their real on-disk path, and writes them
+idempotently — a second `sync` is a no-op, removing a capability **prunes** the
+file it owned, and `--uninstall` cleanly removes everything (managed files only;
+a hand-written file is never touched). Every write is tracked in a lockfile
+(`.open-harness/sync.lock.json`), so `check --into DIR --ci` fails CI when the
+installed config drifts (missing / modified / stale) from the source.
+
+When several capabilities target the **same file** — two permission policies on
+`opencode.json`, or Windsurf + Copilot both on `.vscode/settings.json` — they are
+**composed**, not clobbered, by documented, deterministic rules:
+
+- **JSON** deep-merges: objects recurse, arrays union, and a verdict clash takes
+  the **most restrictive** (`deny` > `ask` > `allow` — the hook deny-wins rule,
+  extended to permissions). Every resolution is reported as a conflict.
+- **Non-JSON** (Markdown / TOML) can't be merged structurally: identical content
+  is idempotent, differing content keeps the first producer (by id order) and is
+  loudly flagged.
+- Nothing is silently dropped — hook **registrations** and **global (`~/…`)
+  paths** are reported as manual steps, **Unsupported** targets as blocked.
+
+```sh
+cargo run -- sync --into /tmp/proj --harness opencode   # compose safe-shell + strict-ci → one policy
+```
+
+(Composition is the L4 "apply a profile" layer, #16. Profiles/lockfile sourcing
+from git & personal repos is #15.)
 
 ## Embedding
 

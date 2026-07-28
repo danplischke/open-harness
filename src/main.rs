@@ -4,13 +4,17 @@
 //!   run     Act as a harness's single native hook entrypoint (reads native
 //!           JSON on stdin, runs capabilities, writes the native response).
 //!   emit    Print the native registration config for a harness (or `all`).
-//!   check   Per-capability installability across every harness.
+//!   sync    Install/converge the composed capability set into a project tree
+//!           (`--into DIR`), with `--dry-run` and `--uninstall`.
+//!   check   Per-capability installability, or drift vs a synced project
+//!           (`--into DIR [--ci]`).
 //!   matrix  The raw (event × harness) support grid — the feasibility finding.
 
 use open_harness::adapters::{Harness, Support, ALL};
 use open_harness::event::{Boundary, NormEvent, Phase, SubjectKind, ToolClass};
 use open_harness::kind::{kind_impl, Artifact, Installability};
 use open_harness::manifest::{discover, LoadedCapability};
+use open_harness::sync::{self, ApplyReport, ChangeAction, Deferred, DriftKind, DriftReport};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::exit;
@@ -22,11 +26,12 @@ fn main() {
     match cmd {
         "run" => cmd_run(&rest),
         "emit" => cmd_emit(&rest),
+        "sync" => cmd_sync(&rest),
         "check" => cmd_check(&rest),
         "matrix" => cmd_matrix(),
         _ => {
             eprintln!(
-                "oh-dispatch <run|emit|check|matrix> [--harness H] [--event E] [--capabilities DIR] [--explain]"
+                "oh-dispatch <run|emit|sync|check|matrix> [--harness H] [--event E] [--capabilities DIR] [--into DIR] [--dry-run] [--uninstall] [--ci] [--explain]"
             );
             exit(2);
         }
@@ -37,6 +42,10 @@ struct Opts {
     harness: Option<String>,
     event: Option<String>,
     capabilities: PathBuf,
+    into: Option<PathBuf>,
+    dry_run: bool,
+    uninstall: bool,
+    ci: bool,
     explain: bool,
 }
 
@@ -45,6 +54,10 @@ fn parse_opts(rest: &[String]) -> Opts {
         harness: None,
         event: None,
         capabilities: PathBuf::from("capabilities"),
+        into: None,
+        dry_run: false,
+        uninstall: false,
+        ci: false,
         explain: false,
     };
     let mut i = 0;
@@ -64,6 +77,22 @@ fn parse_opts(rest: &[String]) -> Opts {
                 }
                 i += 2;
             }
+            "--into" => {
+                o.into = rest.get(i + 1).map(PathBuf::from);
+                i += 2;
+            }
+            "--dry-run" => {
+                o.dry_run = true;
+                i += 1;
+            }
+            "--uninstall" => {
+                o.uninstall = true;
+                i += 1;
+            }
+            "--ci" => {
+                o.ci = true;
+                i += 1;
+            }
             "--explain" => {
                 o.explain = true;
                 i += 1;
@@ -72,6 +101,18 @@ fn parse_opts(rest: &[String]) -> Opts {
         }
     }
     o
+}
+
+/// The target harness set for the generative commands (`emit`/`sync`/`check`):
+/// a single `--harness`, or every harness (`all` / unset).
+fn select_harnesses(o: &Opts) -> Vec<Harness> {
+    match o.harness.as_deref() {
+        None | Some("all") => ALL.to_vec(),
+        Some(id) => vec![Harness::from_id(id).unwrap_or_else(|| {
+            eprintln!("unknown harness {id}");
+            exit(2)
+        })],
+    }
 }
 
 fn load_caps(o: &Opts) -> Vec<LoadedCapability> {
@@ -127,13 +168,7 @@ fn cmd_emit(rest: &[String]) {
         eprintln!("no capabilities found under {}", o.capabilities.display());
         exit(1);
     }
-    let harnesses: Vec<Harness> = match o.harness.as_deref() {
-        None | Some("all") => ALL.to_vec(),
-        Some(id) => vec![Harness::from_id(id).unwrap_or_else(|| {
-            eprintln!("unknown harness {id}");
-            exit(2)
-        })],
-    };
+    let harnesses = select_harnesses(&o);
     for cap in &caps {
         for h in &harnesses {
             let plan = kind_impl(cap.manifest.kind).plan(cap, *h);
@@ -159,8 +194,61 @@ fn cmd_emit(rest: &[String]) {
     }
 }
 
+fn cmd_sync(rest: &[String]) {
+    let o = parse_opts(rest);
+    let Some(into) = o.into.clone() else {
+        eprintln!("sync requires --into <project-dir>");
+        exit(2);
+    };
+
+    // Uninstall short-circuits: it reads the lockfile, not the capabilities.
+    if o.uninstall {
+        let report = sync::uninstall(&into, o.dry_run).unwrap_or_else(|e| {
+            eprintln!("uninstall failed: {e}");
+            exit(1);
+        });
+        print_apply_report(&report, "uninstall", &into);
+        return;
+    }
+
+    let caps = load_caps(&o);
+    if caps.is_empty() {
+        eprintln!("no capabilities found under {}", o.capabilities.display());
+        exit(1);
+    }
+    let harnesses = select_harnesses(&o);
+    let plan = sync::plan_sync(&caps, &harnesses);
+    let report = sync::apply(&into, &plan, o.dry_run).unwrap_or_else(|e| {
+        eprintln!("sync failed: {e}");
+        exit(1);
+    });
+    print_apply_report(&report, "sync", &into);
+}
+
 fn cmd_check(rest: &[String]) {
     let o = parse_opts(rest);
+
+    // With `--into`, `check` is drift detection against a synced project.
+    if let Some(into) = o.into.clone() {
+        let caps = load_caps(&o);
+        if caps.is_empty() {
+            eprintln!("no capabilities found under {}", o.capabilities.display());
+            exit(1);
+        }
+        let harnesses = select_harnesses(&o);
+        let plan = sync::plan_sync(&caps, &harnesses);
+        let report = sync::check(&into, &plan).unwrap_or_else(|e| {
+            eprintln!("check failed: {e}");
+            exit(1);
+        });
+        print_drift_report(&report, &into);
+        if o.ci && report.has_drift() {
+            eprintln!("\ndrift detected (--ci): exiting non-zero");
+            exit(1);
+        }
+        return;
+    }
+
     let caps = load_caps(&o);
     if caps.is_empty() {
         eprintln!("no capabilities found under {}", o.capabilities.display());
@@ -190,6 +278,130 @@ fn cmd_check(rest: &[String]) {
         }
         println!();
     }
+}
+
+// ---- sync / check reporting ----------------------------------------------
+
+fn print_apply_report(report: &ApplyReport, verb: &str, into: &std::path::Path) {
+    let tag = if report.dry_run { " (dry-run)" } else { "" };
+    println!("{verb}{tag} → {}", into.display());
+    for c in &report.changes {
+        let mark = match c.action {
+            ChangeAction::Create => "＋ create   ",
+            ChangeAction::Update => "~ update   ",
+            ChangeAction::Unchanged => "· unchanged",
+            ChangeAction::Prune => "－ prune    ",
+        };
+        println!(
+            "  {mark} {}{}",
+            c.path,
+            provenance(&c.harnesses, &c.sources)
+        );
+    }
+    if report.changes.is_empty() {
+        println!("  (no managed files)");
+    }
+    println!(
+        "\n  {} created, {} updated, {} unchanged, {} pruned",
+        report.count(ChangeAction::Create),
+        report.count(ChangeAction::Update),
+        report.count(ChangeAction::Unchanged),
+        report.count(ChangeAction::Prune),
+    );
+    if !report.conflicts.is_empty() {
+        println!("\n  composition conflicts resolved:");
+        for (_path, msgs) in &report.conflicts {
+            for m in msgs {
+                println!("    ⚠ {m}");
+            }
+        }
+    }
+    print_deferred(&report.deferred);
+}
+
+fn print_drift_report(report: &DriftReport, into: &std::path::Path) {
+    println!("drift check → {}", into.display());
+    for i in &report.items {
+        let mark = match i.kind {
+            DriftKind::Ok => "· ok      ",
+            DriftKind::Missing => "✗ missing ",
+            DriftKind::Modified => "✗ modified",
+            DriftKind::Stale => "✗ stale   ",
+        };
+        println!(
+            "  {mark} {}{}",
+            i.path,
+            provenance(&i.harnesses, &i.sources)
+        );
+    }
+    if report.items.is_empty() {
+        println!("  (nothing planned or managed)");
+    }
+    println!(
+        "\n  {} ok, {} missing, {} modified, {} stale",
+        report.count(DriftKind::Ok),
+        report.count(DriftKind::Missing),
+        report.count(DriftKind::Modified),
+        report.count(DriftKind::Stale),
+    );
+    print_deferred(&report.deferred);
+    println!(
+        "\n  {}",
+        if report.has_drift() {
+            "DRIFT"
+        } else {
+            "in sync"
+        }
+    );
+}
+
+/// The deferred/blocked artifacts, grouped by reason — always shown so nothing
+/// looks silently dropped.
+fn print_deferred(deferred: &[Deferred]) {
+    if deferred.is_empty() {
+        return;
+    }
+    let mut registration = Vec::new();
+    let mut global = Vec::new();
+    let mut blocked = Vec::new();
+    for d in deferred {
+        match d.reason {
+            sync::DeferReason::Registration => registration.push(d),
+            sync::DeferReason::GlobalPath => global.push(d),
+            sync::DeferReason::Unsupported => blocked.push(d),
+        }
+    }
+    if !registration.is_empty() {
+        println!(
+            "\n  manual: {} hook registration(s) to wire into a native entrypoint (see `emit`)",
+            registration.len()
+        );
+        for d in &registration {
+            println!("    → {} on {} [{}]", d.source, d.harness, d.kind);
+        }
+    }
+    if !global.is_empty() {
+        println!(
+            "\n  manual: {} global-path target(s) outside the project",
+            global.len()
+        );
+        for d in &global {
+            println!("    → {} on {}: {}", d.source, d.harness, d.detail);
+        }
+    }
+    if !blocked.is_empty() {
+        println!("\n  blocked: {} unsupported target(s)", blocked.len());
+        for d in &blocked {
+            println!("    → {} on {}: {}", d.source, d.harness, d.detail);
+        }
+    }
+}
+
+fn provenance(harnesses: &[String], sources: &[String]) -> String {
+    if harnesses.is_empty() && sources.is_empty() {
+        return String::new();
+    }
+    format!("  [{} · {}]", harnesses.join(","), sources.join("+"))
 }
 
 fn cmd_matrix() {
