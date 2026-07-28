@@ -13,9 +13,10 @@
 //! is read up to a byte cap; overflow is a first-class error rather than a
 //! truncated-JSON parse failure.
 
-use crate::manifest::LoadedCapability;
+use crate::manifest::{LoadedCapability, RunSpec};
 use crate::model::{CanonicalPayload, Decision};
 use std::io::{Read, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -116,14 +117,16 @@ pub fn run_capability(
 
     let input = serde_json::to_string(payload).map_err(|e| RunError::Io(e.to_string()))?;
 
-    let mut child = Command::new(&run.command)
-        .args(&run.args)
+    // Resolve a concrete (program, argv) for this OS — no shebang reliance.
+    let (program, argv) = resolve_program(run);
+    let mut child = Command::new(&program)
+        .args(&argv)
         .current_dir(&cap.dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| RunError::Spawn(format!("{}: {e}", run.command)))?;
+        .map_err(|e| RunError::Spawn(format!("{program}: {e}")))?;
 
     // Service the three pipes on their own threads so neither a silent child
     // (that never reads stdin) nor a chatty one (that floods stdout) deadlocks.
@@ -199,6 +202,127 @@ type Reader = std::thread::JoinHandle<(Vec<u8>, bool)>;
 /// Join a reader thread, mapping a panic to an empty/overflowed-false result.
 fn join_reader(t: Option<Reader>) -> Option<(Vec<u8>, bool)> {
     t.map(|h| h.join().unwrap_or_else(|_| (Vec::new(), false)))
+}
+
+// ---- cross-platform interpreter resolution (#4) ---------------------------
+
+/// Resolve a capability's `run` into a concrete `(program, argv)` for the
+/// current OS — **no `#!` shebang required** (Windows has none). Order:
+///   1. explicit `interpreter` → run `command` (the script) through it;
+///   2. else infer the interpreter from the script extension (`.py`, `.js`, …);
+///   3. else run `command` directly, remapping known interpreter aliases across
+///      platforms (`python3` → `python` on Windows) and leaving anything else
+///      (compiled binaries, `./guard`) untouched.
+pub fn resolve_program(run: &RunSpec) -> (String, Vec<String>) {
+    if let Some(logical) = run.interpreter.as_deref() {
+        return (resolve_interpreter(logical), script_argv(run));
+    }
+    if let Some(logical) = interpreter_for_ext(&run.command) {
+        return (resolve_interpreter(logical), script_argv(run));
+    }
+    let program = match interpreter_candidates(&run.command) {
+        Some(cands) => first_on_path(&cands).unwrap_or_else(|| run.command.clone()),
+        None => run.command.clone(), // pass through; Command does PATH resolution
+    };
+    (program, run.args.clone())
+}
+
+/// argv when `command` is a script: the script followed by the declared args.
+fn script_argv(run: &RunSpec) -> Vec<String> {
+    let mut argv = Vec::with_capacity(run.args.len() + 1);
+    argv.push(run.command.clone());
+    argv.extend(run.args.iter().cloned());
+    argv
+}
+
+/// Resolve a *logical* interpreter to a concrete executable path (best-first,
+/// per-OS), falling back to the first candidate / the name itself.
+fn resolve_interpreter(logical: &str) -> String {
+    match interpreter_candidates(logical) {
+        Some(cands) => first_on_path(&cands).unwrap_or_else(|| cands[0].clone()),
+        None => which(logical).unwrap_or_else(|| logical.to_string()),
+    }
+}
+
+/// Concrete candidate executables for a logical interpreter, best-first, per-OS.
+/// `None` for anything that isn't a recognized interpreter.
+fn interpreter_candidates(logical: &str) -> Option<Vec<String>> {
+    let list = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect());
+    match logical {
+        "python" | "python3" => {
+            if cfg!(windows) {
+                list(&["python", "python3", "py"])
+            } else {
+                list(&["python3", "python"])
+            }
+        }
+        "node" | "nodejs" => list(&["node"]),
+        "deno" => list(&["deno"]),
+        "bun" => list(&["bun"]),
+        "ruby" => list(&["ruby"]),
+        "bash" => {
+            if cfg!(windows) {
+                list(&["bash"])
+            } else {
+                list(&["bash", "sh"])
+            }
+        }
+        "sh" => {
+            if cfg!(windows) {
+                list(&["sh", "bash"])
+            } else {
+                list(&["sh"])
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Infer a logical interpreter from a script's file extension.
+fn interpreter_for_ext(command: &str) -> Option<&'static str> {
+    let ext = Path::new(command)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "py" => Some("python"),
+        "js" | "cjs" | "mjs" => Some("node"),
+        "ts" => Some("node"),
+        "rb" => Some("ruby"),
+        "sh" | "bash" => Some("bash"),
+        _ => None,
+    }
+}
+
+/// The first candidate found on `PATH` (its full path), or `None`.
+fn first_on_path(cands: &[String]) -> Option<String> {
+    cands.iter().find_map(|c| which(c))
+}
+
+/// A minimal `which`: resolve `program` to a full path via `PATH`, honoring
+/// `PATHEXT` on Windows. A name containing a path separator is treated as a path.
+fn which(program: &str) -> Option<String> {
+    if program.contains('/') || program.contains('\\') {
+        let p = Path::new(program);
+        return p.is_file().then(|| program.to_string());
+    }
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let direct = dir.join(program);
+        if direct.is_file() {
+            return Some(direct.to_string_lossy().into_owned());
+        }
+        if cfg!(windows) {
+            let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".into());
+            for ext in exts.split(';').filter(|e| !e.is_empty()) {
+                let cand = dir.join(format!("{program}{ext}"));
+                if cand.is_file() {
+                    return Some(cand.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Read a stream, keeping at most `cap` bytes but draining the rest so the child

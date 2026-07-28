@@ -1172,10 +1172,13 @@ use open_harness::runtime::RunLimits;
 
 // (reuses the `cap_from` helper defined for the tools-kind tests)
 
-fn shell_hook(id: &str, script: &str, extra: serde_json::Value) -> LoadedCapability {
+/// A hook capability that runs a Python one-liner. `python3` is resolved to the
+/// platform interpreter (`python` on Windows), so these fixtures are
+/// cross-platform — no `sh`/`sleep`/`printf` assumptions.
+fn py_hook(id: &str, script: &str, extra: serde_json::Value) -> LoadedCapability {
     let mut m = json!({
         "id": id,
-        "run": { "command": "sh", "args": ["-c", script] },
+        "run": { "command": "python3", "args": ["-c", script] },
         "events": [{ "phase": "pre", "subject": "tool", "tool_class": "any" }],
     });
     // merge extra top-level keys (e.g. timeout_ms) and binding overrides.
@@ -1195,14 +1198,14 @@ fn native() -> serde_json::Value {
     json!({ "tool_name": "Bash", "tool_input": { "command": "ls" } })
 }
 
-/// Spawn a capability that hangs (`sleep` directly, so the killed process is the
-/// direct child), with the given timeout and binding overrides.
+/// A capability that hangs (a 30s Python sleep), so the killed process is the
+/// direct child, cross-platform. `timeout_ms` defaults to 300ms.
 fn hang_cap(id: &str, overrides: serde_json::Value) -> LoadedCapability {
     let mut m = json!({
         "id": id,
-        "run": { "command": "sleep", "args": ["30"] },
+        "run": { "command": "python3", "args": ["-c", "import time; time.sleep(30)"] },
         "events": [{ "phase": "pre", "subject": "tool", "tool_class": "any" }],
-        "timeout_ms": 150,
+        "timeout_ms": 300,
     });
     if let (Some(mo), Some(oo)) = (m.as_object_mut(), overrides.as_object()) {
         for (k, v) in oo {
@@ -1253,17 +1256,22 @@ fn runtime_timeout_fail_open_allows() {
 #[test]
 fn runtime_error_taxonomy_classes() {
     let cases = [
-        ("nonzero", "exit 3", json!({}), "non-zero-exit"),
-        ("badjson", "echo not-json", json!({}), "bad-json"),
+        (
+            "nonzero",
+            "import sys; sys.exit(3)",
+            json!({}),
+            "non-zero-exit",
+        ),
+        ("badjson", "print('nope')", json!({}), "bad-json"),
         (
             "proto",
-            "echo '{\"decision\":\"allow\"}'",
+            "print('{\"decision\":\"allow\"}')",
             json!({ "protocol": "hook@2" }),
             "protocol-mismatch",
         ),
     ];
     for (id, script, extra, class) in cases {
-        let caps = vec![shell_hook(id, script, extra)];
+        let caps = vec![py_hook(id, script, extra)];
         let out = open_harness::dispatch(Harness::Claude, &blocking_tool(), &caps, &native());
         assert_eq!(out.response.exit_code, 2, "{id} should fail closed");
         assert!(
@@ -1290,13 +1298,13 @@ fn runtime_spawn_error_is_classified() {
 /// stdout beyond the cap is an `output-cap` error, not a truncated-JSON parse.
 #[test]
 fn runtime_output_cap_is_enforced() {
-    let caps = vec![shell_hook(
+    let caps = vec![py_hook(
         "flood",
-        "printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'",
+        "import sys; sys.stdout.write('x' * 100)",
         json!({}),
     )];
     let limits = RunLimits {
-        timeout_ms: 2_000,
+        timeout_ms: 5_000,
         max_output_bytes: 8,
         poll_interval_ms: 5,
     };
@@ -1318,9 +1326,9 @@ fn runtime_output_cap_is_enforced() {
 /// (there is nothing to veto) but is still reported.
 #[test]
 fn runtime_non_blocking_error_degrades_to_allow() {
-    let caps = vec![shell_hook(
+    let caps = vec![py_hook(
         "post-badjson",
-        "echo nope",
+        "print('nope')",
         json!({ "events": [{ "phase": "post", "subject": "tool", "tool_class": "any" }] }),
     )];
     let ev = NormEvent::tool(Phase::Post, ToolClass::Shell);
@@ -1329,14 +1337,16 @@ fn runtime_non_blocking_error_degrades_to_allow() {
     assert!(out.errored.iter().any(|e| e.contains("bad-json")));
 }
 
-/// Independent capabilities run concurrently: two ~300ms sleepers finish in far
-/// less than the ~600ms serial sum, and the merge order stays deterministic.
+/// Independent capabilities run concurrently: two ~500ms sleepers finish well
+/// under the ~1s serial sum, and the merge order stays deterministic.
 #[test]
 fn runtime_runs_concurrently_and_merges_deterministically() {
     let mk = |id: &str, ctx: &str| {
-        shell_hook(
+        py_hook(
             id,
-            &format!("sleep 0.3; printf '{{\"decision\":\"allow\",\"context_append\":\"{ctx}\"}}'"),
+            &format!(
+                "import time,sys; time.sleep(0.5); sys.stdout.write('{{\"decision\":\"allow\",\"context_append\":\"{ctx}\"}}')"
+            ),
             json!({}),
         )
     };
@@ -1346,10 +1356,72 @@ fn runtime_runs_concurrently_and_merges_deterministically() {
     let elapsed = start.elapsed();
     assert_eq!(out.ran.len(), 2);
     assert!(
-        elapsed < std::time::Duration::from_millis(500),
-        "two 300ms capabilities ran serially ({elapsed:?}); expected concurrent"
+        elapsed < std::time::Duration::from_millis(900),
+        "two 500ms capabilities ran serially ({elapsed:?}); expected concurrent"
     );
     // OpenCode passes the canonical decision through; context is merged in
     // manifest order regardless of which subprocess finished first.
     assert!(out.response.stdout.contains("A\\nB") || out.response.stdout.contains("A\nB"));
+}
+
+// ---- cross-platform execution (#4): interpreter resolution, BOM tolerance ----
+
+use open_harness::runtime::resolve_program;
+
+fn run_spec(v: serde_json::Value) -> open_harness::manifest::RunSpec {
+    serde_json::from_value(v).expect("valid run spec")
+}
+
+/// A script with no interpreter and no shebang is run through the interpreter
+/// inferred from its extension — `.py` → python, cross-platform.
+#[test]
+fn resolve_infers_interpreter_from_extension() {
+    let (program, argv) = resolve_program(&run_spec(json!({ "command": "guard.py" })));
+    assert!(
+        program.to_lowercase().contains("python"),
+        "expected a python interpreter, got {program}"
+    );
+    assert_eq!(argv, vec!["guard.py".to_string()]);
+}
+
+/// An explicit `interpreter` runs `command` (the script) through it, ahead of
+/// any extension inference.
+#[test]
+fn resolve_honors_explicit_interpreter() {
+    let (program, argv) = resolve_program(&run_spec(
+        json!({ "command": "hook.txt", "interpreter": "node" }),
+    ));
+    assert!(program.to_lowercase().contains("node"), "got {program}");
+    assert_eq!(argv, vec!["hook.txt".to_string()]);
+}
+
+/// A bare interpreter alias is remapped across platforms (`python3` resolves to
+/// the platform python) while its args are preserved.
+#[test]
+fn resolve_remaps_known_interpreter_alias() {
+    let (program, argv) = resolve_program(&run_spec(
+        json!({ "command": "python3", "args": ["guard.py"] }),
+    ));
+    assert!(program.to_lowercase().contains("python"), "got {program}");
+    assert_eq!(argv, vec!["guard.py".to_string()]);
+}
+
+/// A non-interpreter command (a compiled binary / relative path) passes through
+/// untouched — resolution never rewrites it.
+#[test]
+fn resolve_passes_through_plain_binary() {
+    let (program, argv) = resolve_program(&run_spec(
+        json!({ "command": "./guard", "args": ["--check"] }),
+    ));
+    assert_eq!(program, "./guard");
+    assert_eq!(argv, vec!["--check".to_string()]);
+}
+
+/// A decision emitted with a UTF-8 BOM and CRLF (Windows PowerShell) still
+/// parses — the contract is line-ending and BOM tolerant.
+#[test]
+fn parse_decision_tolerates_bom_and_crlf() {
+    let out = "\u{feff}{\"decision\":\"deny\",\"reason\":\"x\"}\r\n";
+    let decision = parse_decision(out).expect("BOM/CRLF-wrapped decision must parse");
+    assert_eq!(decision.decision, Verdict::Deny);
 }

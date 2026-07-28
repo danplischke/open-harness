@@ -124,7 +124,9 @@ pub fn validate_decision(v: &Value) -> Result<(), String> {
 /// Parse a capability's stdout into a validated Decision. Empty output means
 /// allow. Validation runs before deserialization so errors are descriptive.
 pub fn parse_decision(stdout: &str) -> Result<Decision, String> {
-    let trimmed = stdout.trim();
+    // Tolerate a UTF-8 BOM (Windows PowerShell / `Out-File` prepend one) and any
+    // CRLF whitespace before/after the JSON document.
+    let trimmed = stdout.strip_prefix('\u{feff}').unwrap_or(stdout).trim();
     if trimmed.is_empty() {
         return Ok(Decision::allow());
     }

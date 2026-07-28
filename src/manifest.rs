@@ -8,10 +8,16 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RunSpec {
-    /// Interpreter or binary, e.g. `python3`, `node`, `./guard` (a compiled bin).
+    /// Interpreter/binary, e.g. `python3`, `node`, `./guard` (a compiled bin) —
+    /// or, when `interpreter` is set, the **script** to run through it.
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Optional logical interpreter (`python` / `node` / `bash` / …). When set,
+    /// `command` is the script and the runtime resolves the interpreter per-OS,
+    /// so the capability never relies on a `#!` shebang (Windows has none).
+    #[serde(default)]
+    pub interpreter: Option<String>,
 }
 
 /// What the dispatcher does when a bound capability *fails to produce a

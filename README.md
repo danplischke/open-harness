@@ -33,7 +33,8 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
 | `capabilities/secret-guard/` | A real **Python** blocking capability |
 | `capabilities/audit-note/` | A real **Node/TS** non-blocking capability |
-| `tests/conformance.rs` | 58 tests: harness contracts, protocol, kind plans, composition, runtime, API |
+| `tests/conformance.rs` | 63 tests: harness contracts, protocol, kind plans, composition, runtime, API |
+| `.github/workflows/ci.yml` | CI: build + test on Linux/macOS/Windows; fmt + clippy on Linux |
 
 ## The contract (this is the whole point)
 
@@ -61,7 +62,7 @@ actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JS
 ## Try it
 
 ```sh
-cargo test                            # 58 conformance tests
+cargo test                            # 63 conformance tests
 cargo run -- matrix                   # support grid across 10 harnesses
 cargo run -- check                    # per-capability installability
 bash examples/demo.sh                 # deny across all four signal families
@@ -150,7 +151,11 @@ See [`bindings/README.md`](./bindings/README.md). TypeScript/`napi` is planned.
   `--explain`, and per-binding failure policy (`auto`/`fail_closed`/`fail_open`/
   `pass_through`). Only the direct child is killed today — a process-group kill
   for forking capabilities needs a `libc`/`nix` dep and is deferred.
+- Execution is **cross-platform**: interpreters are resolved per-OS (no `#!`
+  reliance — `python3`→`python` on Windows, `PATHEXT` honored) and the Python +
+  Node capabilities are exercised on Linux/macOS/Windows in CI. `platform_note`
+  surfaces per-harness caveats (e.g. Cline hooks are Unix-only).
 - Deferred: sandboxing + process-group kill, registry/signing, the MCP→CLI
-  bridge (#19), the TypeScript/`napi` binding, Windows exec. See `FEASIBILITY.md`.
+  bridge (#19), the TypeScript/`napi` binding. See `FEASIBILITY.md`.
 
 License: MIT.
