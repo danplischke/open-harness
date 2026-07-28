@@ -201,8 +201,9 @@ that lets an OpenCode/Pi plugin host the core in-process). Still deferred:
 capability **sandboxing** and process-group kill; **registry** sources + a
 registry root of trust and key **revocation**; transitive **dependency**
 resolution; **npm publish + prebuilt binaries** for the Node addon's full
-platform matrix; the MCP→CLI bridge runtime (#19); and a **live** (not
-doc-derived) capture against a real Codex/Cursor install once available.
+platform matrix; the MCP→CLI bridge's **streamable-HTTP transport** (#19 shipped
+stdio + `oh mcp call`); and a **live** (not doc-derived) capture against a real
+Codex/Cursor install once available.
 
 ---
 

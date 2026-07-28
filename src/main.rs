@@ -14,6 +14,7 @@ use open_harness::adapters::{Harness, Support, ALL};
 use open_harness::event::{Boundary, NormEvent, Phase, SubjectKind, ToolClass};
 use open_harness::kind::{kind_impl, Artifact, Installability};
 use open_harness::manifest::{discover, LoadedCapability, PermissionPolicy};
+use open_harness::mcp::{self, ServerSpec};
 use open_harness::profile::{self, Lock, Profile, Resolved};
 use open_harness::sync::{self, ApplyReport, ChangeAction, Deferred, DriftKind, DriftReport};
 use open_harness::trust::{self, TrustStore};
@@ -32,13 +33,14 @@ fn main() {
         "sign" => cmd_sign(&rest),
         "verify" => cmd_verify(&rest),
         "trust" => cmd_trust(&rest),
+        "mcp" => cmd_mcp(&rest),
         "resolve" => cmd_resolve(&rest),
         "sync" => cmd_sync(&rest),
         "check" => cmd_check(&rest),
         "matrix" => cmd_matrix(),
         _ => {
             eprintln!(
-                "oh-dispatch <run|emit|keygen|sign|verify|trust|resolve|sync|check|matrix> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--key FILE] [--trust FILE] [--label L] [--out FILE] [--require-signed] [--deny-network] [--deny-exec]\\\n  [--dry-run] [--uninstall] [--ci] [--timeout-ms N] [--max-output-kb N] [--explain]"
+                "oh-dispatch <run|emit|keygen|sign|verify|trust|mcp|resolve|sync|check|matrix> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--key FILE] [--trust FILE] [--label L] [--out FILE] [--require-signed] [--deny-network] [--deny-exec]\\\n  [--id ID] [--command CMD] [--mcp-arg A]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nmcp: oh-dispatch mcp <list|call> (--id ID | --command CMD [--mcp-arg A]...) [--tool NAME] [--json '<args>']"
             );
             exit(2);
         }
@@ -66,6 +68,12 @@ struct Opts {
     require_signed: bool,
     deny_network: bool,
     deny_exec: bool,
+    // MCP→CLI bridge (#19)
+    id: Option<String>,
+    mcp_command: Option<String>,
+    mcp_args: Vec<String>,
+    tool: Option<String>,
+    json_args: Option<String>,
 }
 
 fn parse_opts(rest: &[String]) -> Opts {
@@ -89,6 +97,11 @@ fn parse_opts(rest: &[String]) -> Opts {
         require_signed: false,
         deny_network: false,
         deny_exec: false,
+        id: None,
+        mcp_command: None,
+        mcp_args: Vec::new(),
+        tool: None,
+        json_args: None,
     };
     let mut i = 0;
     while i < rest.len() {
@@ -142,6 +155,28 @@ fn parse_opts(rest: &[String]) -> Opts {
             "--deny-exec" => {
                 o.deny_exec = true;
                 i += 1;
+            }
+            "--id" => {
+                o.id = rest.get(i + 1).cloned();
+                i += 2;
+            }
+            "--command" => {
+                o.mcp_command = rest.get(i + 1).cloned();
+                i += 2;
+            }
+            "--mcp-arg" => {
+                if let Some(a) = rest.get(i + 1) {
+                    o.mcp_args.push(a.clone());
+                }
+                i += 2;
+            }
+            "--tool" => {
+                o.tool = rest.get(i + 1).cloned();
+                i += 2;
+            }
+            "--json" => {
+                o.json_args = rest.get(i + 1).cloned();
+                i += 2;
             }
             "--timeout-ms" => {
                 o.timeout_ms = rest.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -277,6 +312,79 @@ fn cmd_emit(rest: &[String]) {
             }
         }
     }
+}
+
+// ---- MCP→CLI bridge (#19) --------------------------------------------------
+
+fn cmd_mcp(rest: &[String]) {
+    let sub = rest.first().map(|s| s.as_str()).unwrap_or("");
+    let o = parse_opts(&rest[rest.len().min(1)..]);
+
+    let spec = mcp_server_spec(&o).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        exit(2);
+    });
+    let mut client = mcp::Client::start(&spec).unwrap_or_else(|e| {
+        eprintln!("mcp: {e}");
+        exit(1);
+    });
+
+    match sub {
+        "list" => {
+            let tools = client.list_tools().unwrap_or_else(|e| {
+                eprintln!("mcp list: {e}");
+                exit(1);
+            });
+            for t in &tools {
+                println!("{}\t{}", t.name, t.description);
+            }
+        }
+        "call" => {
+            let Some(tool) = o.tool.clone() else {
+                eprintln!("mcp call requires --tool NAME");
+                exit(2);
+            };
+            let args: serde_json::Value = match &o.json_args {
+                Some(s) if !s.trim().is_empty() => serde_json::from_str(s).unwrap_or_else(|e| {
+                    eprintln!("invalid --json args: {e}");
+                    exit(2);
+                }),
+                _ => serde_json::json!({}),
+            };
+            let result = client.call_tool(&tool, args).unwrap_or_else(|e| {
+                eprintln!("mcp call: {e}");
+                exit(1);
+            });
+            // Print the text content if present, else the raw result JSON.
+            println!("{}", mcp::result_text(&result));
+        }
+        _ => {
+            eprintln!("mcp: expected `list` or `call`");
+            exit(2);
+        }
+    }
+}
+
+/// Build the MCP server spec from `--command`/`--mcp-arg`, or from a capability
+/// (`--id` resolved under `--capabilities`).
+fn mcp_server_spec(o: &Opts) -> Result<ServerSpec, String> {
+    if let Some(command) = &o.mcp_command {
+        return Ok(ServerSpec {
+            command: command.clone(),
+            args: o.mcp_args.clone(),
+            env: Vec::new(),
+            cwd: None,
+        });
+    }
+    if let Some(id) = &o.id {
+        let caps = discover(&o.capabilities)?;
+        let cap = caps
+            .into_iter()
+            .find(|c| &c.manifest.id == id)
+            .ok_or_else(|| format!("no capability '{id}' under {}", o.capabilities.display()))?;
+        return mcp::server_from_capability(&cap);
+    }
+    Err("mcp requires --command CMD or --id CAPABILITY".to_string())
 }
 
 // ---- trust & signing (#17) -------------------------------------------------

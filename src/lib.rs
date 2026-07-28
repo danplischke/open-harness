@@ -12,6 +12,7 @@ pub mod event;
 pub mod kind;
 pub mod kinds;
 pub mod manifest;
+pub mod mcp;
 pub mod model;
 pub mod profile;
 pub mod runtime;

@@ -1,0 +1,17 @@
+{
+  "id": "echo-bridge",
+  "name": "Echo bridge",
+  "description": "A demo MCP server (echo, add) exposed through the shell via the open-harness MCP→CLI bridge, for orgs whose harness MCP client is disabled.",
+  "kind": "tool",
+  "tool": {
+    "provider": "mcp",
+    "delivery": "cli",
+    "server": {
+      "transport": "stdio",
+      "command": "python3",
+      "args": ["server.py"]
+    },
+    "tools": ["echo", "add"],
+    "usage": "oh mcp call --id echo-bridge --tool echo --json '{\"text\":\"hi\"}'"
+  }
+}

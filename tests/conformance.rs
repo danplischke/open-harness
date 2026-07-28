@@ -669,14 +669,19 @@ fn tool_mcp_over_cli_is_bridged_and_flagged() {
     }));
     let plan = kind_impl(KindId::Tool).plan(&cap, Harness::Claude);
     assert!(matches!(plan.installability, Installability::Degraded(_)));
-    assert!(plan
-        .notes
+    // The honest caveat rides on every bridge (note + artifact).
+    assert!(plan.notes.iter().any(|n| n.contains("still runs")));
+    // A real bridge emits a wrapper script + an instructions artifact.
+    let paths: Vec<&str> = plan
+        .artifacts
         .iter()
-        .any(|n| n.contains("#19") && n.contains("still runs")));
-    assert!(matches!(
-        plan.artifacts.first(),
-        Some(Artifact::File { .. })
-    ));
+        .filter_map(|a| match a {
+            Artifact::File { path, .. } => Some(path.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(paths.iter().any(|p| p.ends_with("search-bridge.sh")));
+    assert!(paths.iter().any(|p| p.ends_with("search.md")));
 }
 
 #[test]
@@ -689,6 +694,52 @@ fn tool_mcp_unsupported_on_aider() {
             .installability,
         Installability::Unsupported(_)
     ));
+}
+
+/// #19: a `provider: mcp`, `delivery: cli` tool emits a real bridge — a shell
+/// wrapper + an instructions artifact naming each tool + the "server still runs"
+/// caveat (in the artifact and the notes).
+#[test]
+fn tool_mcp_cli_bridge_emits_wrapper_instructions_and_caveat() {
+    let cap = tool_cap("echo-bridge");
+    let plan = kind_impl(KindId::Tool).plan(&cap, Harness::Claude);
+    assert!(
+        matches!(plan.installability, Installability::Degraded(_)),
+        "the bridge is an approximation of native MCP → Degraded"
+    );
+
+    let files: Vec<(String, String)> = plan
+        .artifacts
+        .iter()
+        .filter_map(|a| match a {
+            Artifact::File { path, contents } => Some((path.clone(), contents.clone())),
+            _ => None,
+        })
+        .collect();
+
+    // A runnable shell wrapper backed by `oh mcp call`.
+    let (_, wrapper) = files
+        .iter()
+        .find(|(p, _)| p.ends_with("echo-bridge-bridge.sh"))
+        .expect("a bridge wrapper script");
+    assert!(wrapper.contains("oh mcp call") && wrapper.contains("--id echo-bridge"));
+
+    // Instructions naming each tool + the caveat.
+    let (_, md) = files
+        .iter()
+        .find(|(p, _)| p.ends_with(".md"))
+        .expect("an instructions artifact");
+    assert!(
+        md.contains("`echo`") && md.contains("`add`"),
+        "names each tool"
+    );
+    assert!(
+        md.contains("still starts the MCP server"),
+        "states the caveat"
+    );
+
+    // The caveat is also in the plan notes.
+    assert!(plan.notes.iter().any(|n| n.contains("still runs")));
 }
 
 // ---- the stable embeddable API (the surface bindings call) ----------------

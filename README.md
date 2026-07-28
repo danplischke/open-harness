@@ -28,6 +28,7 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 | `src/adapters.rs` | 10 harness adapters: event mapping, deny signal, registration format |
 | `src/dispatch.rs` | Single-entrypoint dispatcher: concurrent fan-out, merge, policy-driven fail-closed |
 | `src/runtime.rs` | Hardened execution: per-capability timeout, output cap, error taxonomy |
+| `src/mcp.rs` | Minimal MCP client (stdio JSON-RPC) — the MCP→CLI bridge runtime |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `src/api.rs` | Stable embeddable API (JSON-string boundary) the CLI + bindings call |
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
@@ -66,7 +67,8 @@ actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JS
 ## Try it
 
 ```sh
-cargo test                            # 86 tests (conformance + profile + trust)
+cargo test                            # 90 tests (conformance + profile + trust + mcp)
+cargo run -- mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'   # MCP→CLI bridge
 cargo run -- matrix                   # support grid across 10 harnesses
 cargo run -- check                    # per-capability installability
 bash examples/demo.sh                 # deny across all four signal families
@@ -90,7 +92,10 @@ Capabilities declare a `kind`; each kind plugs into the same `Kind` trait
 - **tool** (generative) — one tool → each harness's native **MCP** config
   (`mcpServers` vs `servers`, JSON vs Codex TOML, OpenCode `type:local`, `url` vs
   `httpUrl`), **or** an **MCP-free** shell delivery (`provider: exec`) for
-  environments that block MCP. (An MCP-server→shell bridge is tracked in #19.)
+  environments that block MCP, **or** — for an MCP *server* where the harness's
+  MCP client is disabled — an **MCP→CLI bridge**: a shell wrapper backed by
+  `oh mcp call` (a minimal MCP client) plus instructions, with a loud "the server
+  still runs" caveat on every artifact.
 - **command** (generative) — one slash-command → each harness's native file:
   Markdown+YAML with `$ARGUMENTS`/`$N` (Claude/Codex/OpenCode/Cursor/Copilot/
   Windsurf/Cline) vs Gemini's `.toml` with `{{args}}`; positional args degrade

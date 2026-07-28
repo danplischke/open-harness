@@ -8,11 +8,11 @@
 //!     artifact so the agent calls it through the (allowlisted) shell — **no MCP
 //!     at all**. This is the answer for orgs that block MCP.
 //!
-//! For an MCP *server* under `cli` delivery, a true bridge needs the open-harness
-//! MCP→CLI proxy runtime (tracked in #19); here we emit the documentation and a
-//! loud Degraded note rather than pretend the proxy exists. And a bridge only
-//! helps when the block is on the harness's MCP *client*, not on the server
-//! process/egress — the emitted note says so.
+//! For an MCP *server* under `cli` delivery, the real bridge (#19) is emitted: a
+//! shell **wrapper** the agent invokes plus an **instructions** artifact naming
+//! each tool, backed by `oh mcp call` (a minimal MCP client, `src/mcp.rs`). A
+//! bridge only helps when the block is on the harness's MCP *client*, not on the
+//! server process/egress — every emitted artifact says so.
 
 use crate::adapters::Harness;
 use crate::kind::{Artifact, Installability, Kind, KindId, KindPlan};
@@ -165,26 +165,62 @@ fn emit_cli(cap: &LoadedCapability, cfg: &ToolConfig) -> KindPlan {
             }
         }
         Provider::Mcp => {
-            // Bridging an MCP server to the shell needs the proxy runtime (#19).
-            let tools = if cfg.tools.is_empty() {
-                "<tool>".to_string()
+            // A real MCP→CLI bridge (#19): a wrapper the agent runs via the
+            // shell, backed by `oh mcp call` (which speaks MCP to the server).
+            if cfg.server.is_none() {
+                return KindPlan::unsupported(
+                    "delivery=cli with provider=mcp requires a `server` spec to bridge",
+                );
+            }
+            let wrapper_path = format!(".open-harness/tools/{id}-bridge.sh");
+            let wrapper = format!(
+                "#!/usr/bin/env sh\n\
+                 # open-harness MCP→CLI bridge for capability `{id}`.\n\
+                 # Usage: {id}-bridge.sh <tool-name> ['<json-args>']\n\
+                 # Needs `oh` on PATH; set OPEN_HARNESS_CAPS to the capabilities dir.\n\
+                 set -eu\n\
+                 CAPS=\"${{OPEN_HARNESS_CAPS:-capabilities}}\"\n\
+                 exec oh mcp call --capabilities \"$CAPS\" --id {id} --tool \"$1\" --json \"${{2:-{{}}}}\"\n"
+            );
+
+            let tool_lines = if cfg.tools.is_empty() {
+                format!("(list tools at call time: `oh mcp list --id {id}`)")
             } else {
-                cfg.tools.join(", ")
+                cfg.tools
+                    .iter()
+                    .map(|t| {
+                        format!("- `{t}`: `.open-harness/tools/{id}-bridge.sh {t} '<json-args>'`")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
             };
             let contents = format!(
-                "# Tool bridge: {name}\n\n{desc}\n\nExposed through the shell so it works where the MCP client is \
-                 disabled. Tools: {tools}.\n\n```sh\noh mcp call {id} <tool> --json '<args>'\n```\n\n\
-                 > NOTE: this bridges the *call path* to the shell. The MCP server still runs, so it does not \
-                 address a policy that blocks the server process or its network egress.\n"
+                "# Tool bridge: {name}\n\n{desc}\n\n\
+                 The MCP tools below are exposed through the **shell** so they work where the harness's MCP \
+                 client is disabled. Each call runs `oh mcp call`, which speaks MCP to the server and returns \
+                 the result on stdout — no MCP client/config needed.\n\n\
+                 Invoke via your shell / Bash tool:\n\n{tool_lines}\n\n\
+                 Allowlist hint — add to the harness's shell permissions:\n\
+                 `.open-harness/tools/{id}-bridge.sh *`\n\n\
+                 > NOTE: this bridges the *call path* to the shell — `oh mcp call` still starts the MCP \
+                 server. It does NOT remove the server process or its network egress; it only removes the \
+                 need for the harness's MCP client/config. If the policy blocks the server itself, this \
+                 bridge does not help.\n"
             );
             KindPlan {
                 installability: Installability::Degraded(
-                    "MCP→CLI bridge needs the open-harness proxy runtime (#19); emitted as documentation only"
-                        .into(),
+                    "bridged to the shell via `oh mcp call`; the MCP server still runs (see the note)".into(),
                 ),
-                artifacts: vec![Artifact::File { path, contents }],
+                artifacts: vec![
+                    Artifact::File {
+                        path: wrapper_path,
+                        contents: wrapper,
+                    },
+                    Artifact::File { path, contents },
+                ],
                 notes: vec![
-                    "MCP→CLI bridge runtime tracked in #19; the MCP server still runs".into(),
+                    format!("allowlist `.open-harness/tools/{id}-bridge.sh` in the harness's shell permissions"),
+                    "the MCP server still runs — this bridges the call path, not the server/egress".into(),
                 ],
             }
         }
