@@ -26,13 +26,14 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 |---|---|
 | `src/event.rs` | Normalized event model: `(phase, subject, tool_class?)` |
 | `src/adapters.rs` | 10 harness adapters: event mapping, deny signal, registration format |
-| `src/dispatch.rs` | Single-entrypoint dispatcher: fan-out, merge, fail-closed |
+| `src/dispatch.rs` | Single-entrypoint dispatcher: concurrent fan-out, merge, policy-driven fail-closed |
+| `src/runtime.rs` | Hardened execution: per-capability timeout, output cap, error taxonomy |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `src/api.rs` | Stable embeddable API (JSON-string boundary) the CLI + bindings call |
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
 | `capabilities/secret-guard/` | A real **Python** blocking capability |
 | `capabilities/audit-note/` | A real **Node/TS** non-blocking capability |
-| `tests/conformance.rs` | 51 tests: harness contracts, protocol validation, kind plans, composition, API |
+| `tests/conformance.rs` | 58 tests: harness contracts, protocol, kind plans, composition, runtime, API |
 
 ## The contract (this is the whole point)
 
@@ -60,7 +61,7 @@ actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JS
 ## Try it
 
 ```sh
-cargo test                            # 51 conformance tests
+cargo test                            # 58 conformance tests
 cargo run -- matrix                   # support grid across 10 harnesses
 cargo run -- check                    # per-capability installability
 bash examples/demo.sh                 # deny across all four signal families
@@ -144,7 +145,12 @@ See [`bindings/README.md`](./bindings/README.md). TypeScript/`napi` is planned.
 - The 8 proprietary harnesses aren't installed here, so their native *runtime*
   isn't exercised; their conventions are encoded from docs. Codex and Cursor
   exact field names are `MEDIUM CONFIDENCE` (flagged in code).
-- Deferred: timeouts/sandboxing, registry/signing, the remaining capability
-  kinds, the TypeScript/`napi` binding, Windows exec. See `FEASIBILITY.md`.
+- The hook runtime is hardened (`src/runtime.rs`): per-capability timeout with
+  kill-on-exceed, stdout/stderr caps, a classified error taxonomy surfaced via
+  `--explain`, and per-binding failure policy (`auto`/`fail_closed`/`fail_open`/
+  `pass_through`). Only the direct child is killed today — a process-group kill
+  for forking capabilities needs a `libc`/`nix` dep and is deferred.
+- Deferred: sandboxing + process-group kill, registry/signing, the MCP→CLI
+  bridge (#19), the TypeScript/`napi` binding, Windows exec. See `FEASIBILITY.md`.
 
 License: MIT.

@@ -31,7 +31,7 @@ fn main() {
         "matrix" => cmd_matrix(),
         _ => {
             eprintln!(
-                "oh-dispatch <run|emit|sync|check|matrix> [--harness H] [--event E] [--capabilities DIR] [--into DIR] [--dry-run] [--uninstall] [--ci] [--explain]"
+                "oh-dispatch <run|emit|sync|check|matrix> [--harness H] [--event E] [--capabilities DIR] [--into DIR] [--dry-run] [--uninstall] [--ci] [--timeout-ms N] [--max-output-kb N] [--explain]"
             );
             exit(2);
         }
@@ -47,6 +47,8 @@ struct Opts {
     uninstall: bool,
     ci: bool,
     explain: bool,
+    timeout_ms: u64,
+    max_output_bytes: u64,
 }
 
 fn parse_opts(rest: &[String]) -> Opts {
@@ -59,6 +61,8 @@ fn parse_opts(rest: &[String]) -> Opts {
         uninstall: false,
         ci: false,
         explain: false,
+        timeout_ms: 0,
+        max_output_bytes: 0,
     };
     let mut i = 0;
     while i < rest.len() {
@@ -75,6 +79,18 @@ fn parse_opts(rest: &[String]) -> Opts {
                 if let Some(p) = rest.get(i + 1) {
                     o.capabilities = PathBuf::from(p);
                 }
+                i += 2;
+            }
+            "--timeout-ms" => {
+                o.timeout_ms = rest.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                i += 2;
+            }
+            "--max-output-kb" => {
+                o.max_output_bytes = rest
+                    .get(i + 1)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(|kb| kb * 1024)
+                    .unwrap_or(0);
                 i += 2;
             }
             "--into" => {
@@ -140,11 +156,18 @@ fn cmd_run(rest: &[String]) {
     let _ = std::io::stdin().read_to_string(&mut buf);
     let caps_dir = o.capabilities.display().to_string();
 
-    let result =
-        open_harness::api::dispatch(&harness, &event, &buf, &caps_dir).unwrap_or_else(|e| {
-            eprintln!("{e}");
-            exit(2)
-        });
+    let result = open_harness::api::dispatch_with_limits(
+        &harness,
+        &event,
+        &buf,
+        &caps_dir,
+        o.timeout_ms,
+        o.max_output_bytes,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("{e}");
+        exit(2)
+    });
 
     if o.explain {
         eprintln!(

@@ -2,15 +2,20 @@
 //! the native payload, runs every capability bound to the event (each as a
 //! subprocess speaking canonical JSON over stdio — hence language-agnostic),
 //! merges their decisions, and re-encodes for the harness.
+//!
+//! Execution is hardened by `runtime.rs` (timeout, output cap, error taxonomy);
+//! this module owns fan-out, per-binding **failure policy** resolution, and the
+//! deterministic merge. Independent capabilities run **concurrently** (each is
+//! its own subprocess), but results are collected in manifest order so the merge
+//! is deterministic regardless of completion order.
 
 use crate::adapters::Harness;
 use crate::event::NormEvent;
 use crate::kind::KindId;
 use crate::manifest::LoadedCapability;
-use crate::model::{merge, CanonicalPayload, Decision, NativeResponse, Verdict};
+use crate::model::{merge, Decision, NativeResponse, Verdict};
+use crate::runtime::{run_capability, RunError, RunLimits};
 use serde_json::Value;
-use std::io::Write;
-use std::process::{Command, Stdio};
 
 pub struct DispatchOutcome {
     pub response: NativeResponse,
@@ -19,38 +24,79 @@ pub struct DispatchOutcome {
     pub errored: Vec<String>,
 }
 
+/// Dispatch with the default runtime limits.
 pub fn dispatch(
     harness: Harness,
     ev: &NormEvent,
     caps: &[LoadedCapability],
     native_stdin: &Value,
 ) -> DispatchOutcome {
+    dispatch_with_limits(harness, ev, caps, native_stdin, &RunLimits::default())
+}
+
+/// Dispatch with explicit runtime limits (timeout / output cap).
+pub fn dispatch_with_limits(
+    harness: Harness,
+    ev: &NormEvent,
+    caps: &[LoadedCapability],
+    native_stdin: &Value,
+    limits: &RunLimits,
+) -> DispatchOutcome {
     let payload = harness.decode(native_stdin, ev);
+
+    // Fan out: run every bound hook capability concurrently, but keep the
+    // results index-aligned with `caps` so the downstream merge is order-stable.
+    let results: Vec<Option<Result<Decision, RunError>>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = caps
+            .iter()
+            .map(|cap| {
+                let runnable = cap.manifest.kind == KindId::Hook && cap.binds(ev);
+                let payload = &payload;
+                scope.spawn(move || {
+                    if runnable {
+                        Some(run_capability(cap, payload, limits))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or(Some(Err(RunError::Io("capability thread panicked".into()))))
+            })
+            .collect()
+    });
+
+    let blocking = ev.blocking();
     let mut decisions = Vec::new();
     let mut ran = Vec::new();
     let mut skipped = Vec::new();
     let mut errored = Vec::new();
 
-    for cap in caps {
-        // Only hook-kind capabilities have a runtime; others are generative.
-        if cap.manifest.kind != KindId::Hook || !cap.binds(ev) {
-            skipped.push(cap.manifest.id.clone());
-            continue;
-        }
-        match run_capability(cap, &payload) {
-            Ok(d) => {
+    for (cap, result) in caps.iter().zip(results) {
+        let id = &cap.manifest.id;
+        match result {
+            None => skipped.push(id.clone()),
+            Some(Ok(d)) => {
                 decisions.push(d);
-                ran.push(cap.manifest.id.clone());
+                ran.push(id.clone());
             }
-            Err(e) => {
-                errored.push(format!("{}: {e}", cap.manifest.id));
-                // Fail-closed on blocking events: a guard that crashes must not
-                // silently allow the action. On non-blocking events, degrade to
-                // allow (there is nothing to veto).
-                if ev.blocking() {
+            Some(Err(e)) => {
+                let policy = cap.fail_policy(ev);
+                let denies = policy.denies(blocking);
+                errored.push(format!(
+                    "{id}: [{}] {e} -> {} ({})",
+                    e.class(),
+                    if denies { "deny" } else { "allow" },
+                    policy.as_str()
+                ));
+                if denies {
                     decisions.push(Decision {
                         decision: Verdict::Deny,
-                        reason: format!("capability `{}` failed: {e}", cap.manifest.id),
+                        reason: format!("capability `{id}` failed ({}): {e}", e.class()),
                         context_append: None,
                         modified_input: None,
                     });
@@ -67,46 +113,4 @@ pub fn dispatch(
         skipped,
         errored,
     }
-}
-
-fn run_capability(cap: &LoadedCapability, payload: &CanonicalPayload) -> Result<Decision, String> {
-    // Refuse an incompatible protocol before spawning anything.
-    crate::model::negotiate(cap.manifest.protocol.as_deref())?;
-
-    let run = cap
-        .manifest
-        .run
-        .as_ref()
-        .ok_or("hook capability has no `run` entrypoint")?;
-
-    let input = serde_json::to_string(payload).map_err(|e| e.to_string())?;
-    let mut child = Command::new(&run.command)
-        .args(&run.args)
-        .current_dir(&cap.dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawn {}: {e}", run.command))?;
-
-    child
-        .stdin
-        .take()
-        .ok_or("no stdin handle")?
-        .write_all(input.as_bytes())
-        .map_err(|e| format!("write stdin: {e}"))?;
-
-    let out = child.wait_with_output().map_err(|e| format!("wait: {e}"))?;
-
-    if !out.status.success() {
-        return Err(format!(
-            "exit {}: {}",
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    // Validates against hook@1 before returning; malformed output fails closed
-    // on blocking events via the caller's error handling.
-    crate::model::parse_decision(&stdout)
 }

@@ -13,6 +13,7 @@ pub mod kind;
 pub mod kinds;
 pub mod manifest;
 pub mod model;
+pub mod runtime;
 pub mod sync;
 
 // Generates the uniffi scaffolding for the language bindings (feature-gated so
@@ -21,7 +22,7 @@ pub mod sync;
 uniffi::setup_scaffolding!();
 
 pub use adapters::{Harness, Support};
-pub use dispatch::{dispatch, DispatchOutcome};
+pub use dispatch::{dispatch, dispatch_with_limits, DispatchOutcome};
 pub use event::NormEvent;
 pub use kind::{kind_impl, Artifact, Installability, Kind, KindId, KindPlan};
 pub use manifest::{discover, LoadedCapability};
@@ -29,6 +30,7 @@ pub use model::{
     merge, negotiate, parse_decision, validate_decision, Decision, NativeResponse, Verdict,
     PROTOCOL, PROTOCOL_VERSION,
 };
+pub use runtime::{RunError, RunLimits};
 pub use sync::{
     apply, check, plan_sync, ApplyReport, ChangeAction, DesiredFile, DriftKind, DriftReport,
     SyncPlan,

@@ -128,13 +128,26 @@ pub fn plan_all(manifest_json: &str, dir: &str) -> Result<Vec<Plan>, ApiError> {
         .collect())
 }
 
-/// Run the hook dispatcher: a harness's native hook payload (JSON string, or
-/// empty for none) in, its native response out.
+/// Run the hook dispatcher with default runtime limits.
 pub fn dispatch(
     harness: &str,
     event_id: &str,
     native_stdin_json: &str,
     capabilities_dir: &str,
+) -> Result<DispatchResult, ApiError> {
+    dispatch_with_limits(harness, event_id, native_stdin_json, capabilities_dir, 0, 0)
+}
+
+/// Run the hook dispatcher with explicit runtime limits. `timeout_ms` /
+/// `max_output_bytes` of `0` mean "use the runtime default", so a host can
+/// override one without knowing the other.
+pub fn dispatch_with_limits(
+    harness: &str,
+    event_id: &str,
+    native_stdin_json: &str,
+    capabilities_dir: &str,
+    timeout_ms: u64,
+    max_output_bytes: u64,
 ) -> Result<DispatchResult, ApiError> {
     let h = harness_of(harness)?;
     let ev: NormEvent = event_id.parse().map_err(ApiError::Event)?;
@@ -145,7 +158,16 @@ pub fn dispatch(
     };
     let caps =
         crate::manifest::discover(std::path::Path::new(capabilities_dir)).map_err(ApiError::Io)?;
-    let out = crate::dispatch::dispatch(h, &ev, &caps, &native);
+
+    let mut limits = crate::runtime::RunLimits::default();
+    if timeout_ms > 0 {
+        limits.timeout_ms = timeout_ms;
+    }
+    if max_output_bytes > 0 {
+        limits.max_output_bytes = max_output_bytes as usize;
+    }
+
+    let out = crate::dispatch::dispatch_with_limits(h, &ev, &caps, &native, &limits);
     Ok(DispatchResult {
         exit_code: out.response.exit_code,
         stdout: out.response.stdout,
@@ -256,6 +278,25 @@ mod ffi {
         capabilities_dir: String,
     ) -> Result<DispatchResult, ApiError> {
         super::dispatch(&harness, &event_id, &native_stdin_json, &capabilities_dir)
+    }
+
+    #[uniffi::export]
+    pub fn dispatch_with_limits(
+        harness: String,
+        event_id: String,
+        native_stdin_json: String,
+        capabilities_dir: String,
+        timeout_ms: u64,
+        max_output_bytes: u64,
+    ) -> Result<DispatchResult, ApiError> {
+        super::dispatch_with_limits(
+            &harness,
+            &event_id,
+            &native_stdin_json,
+            &capabilities_dir,
+            timeout_ms,
+            max_output_bytes,
+        )
     }
 
     #[uniffi::export]

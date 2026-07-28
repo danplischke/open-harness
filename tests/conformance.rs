@@ -1165,3 +1165,191 @@ fn sync_uninstall_is_clean() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---- runtime hardening (#3): timeouts, output caps, taxonomy, fail policy ----
+
+use open_harness::runtime::RunLimits;
+
+// (reuses the `cap_from` helper defined for the tools-kind tests)
+
+fn shell_hook(id: &str, script: &str, extra: serde_json::Value) -> LoadedCapability {
+    let mut m = json!({
+        "id": id,
+        "run": { "command": "sh", "args": ["-c", script] },
+        "events": [{ "phase": "pre", "subject": "tool", "tool_class": "any" }],
+    });
+    // merge extra top-level keys (e.g. timeout_ms) and binding overrides.
+    if let (Some(mo), Some(eo)) = (m.as_object_mut(), extra.as_object()) {
+        for (k, v) in eo {
+            mo.insert(k.clone(), v.clone());
+        }
+    }
+    cap_from(m)
+}
+
+fn blocking_tool() -> NormEvent {
+    NormEvent::tool(Phase::Pre, ToolClass::Shell)
+}
+
+fn native() -> serde_json::Value {
+    json!({ "tool_name": "Bash", "tool_input": { "command": "ls" } })
+}
+
+/// Spawn a capability that hangs (`sleep` directly, so the killed process is the
+/// direct child), with the given timeout and binding overrides.
+fn hang_cap(id: &str, overrides: serde_json::Value) -> LoadedCapability {
+    let mut m = json!({
+        "id": id,
+        "run": { "command": "sleep", "args": ["30"] },
+        "events": [{ "phase": "pre", "subject": "tool", "tool_class": "any" }],
+        "timeout_ms": 150,
+    });
+    if let (Some(mo), Some(oo)) = (m.as_object_mut(), overrides.as_object()) {
+        for (k, v) in oo {
+            mo.insert(k.clone(), v.clone());
+        }
+    }
+    cap_from(m)
+}
+
+/// A hung capability is killed at its timeout and, being blocking, fails closed
+/// to a deny — the headline acceptance criterion.
+#[test]
+fn runtime_timeout_kills_and_fails_closed() {
+    let caps = vec![hang_cap("hang", json!({}))];
+    let start = std::time::Instant::now();
+    let out = open_harness::dispatch(Harness::Claude, &blocking_tool(), &caps, &native());
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(2),
+        "the 30s sleep must be killed at the 150ms timeout, not run to completion"
+    );
+    assert_eq!(out.response.exit_code, 2, "blocking timeout must deny");
+    assert!(
+        out.errored.iter().any(|e| e.contains("timeout")),
+        "taxonomy must surface the timeout: {:?}",
+        out.errored
+    );
+}
+
+/// The same timeout with a `fail_open` binding yields the policy-driven allow
+/// instead — the failure policy is honored.
+#[test]
+fn runtime_timeout_fail_open_allows() {
+    let caps = vec![hang_cap(
+        "hang",
+        json!({
+            "events": [{ "phase": "pre", "subject": "tool", "tool_class": "any", "on_error": "fail_open" }],
+        }),
+    )];
+    let out = open_harness::dispatch(Harness::Claude, &blocking_tool(), &caps, &native());
+    assert_eq!(
+        out.response.exit_code, 0,
+        "fail_open must allow despite the timeout"
+    );
+    assert!(out.errored.iter().any(|e| e.contains("timeout")));
+}
+
+/// Each failure mode carries its stable taxonomy class, surfaced in `errored`.
+#[test]
+fn runtime_error_taxonomy_classes() {
+    let cases = [
+        ("nonzero", "exit 3", json!({}), "non-zero-exit"),
+        ("badjson", "echo not-json", json!({}), "bad-json"),
+        (
+            "proto",
+            "echo '{\"decision\":\"allow\"}'",
+            json!({ "protocol": "hook@2" }),
+            "protocol-mismatch",
+        ),
+    ];
+    for (id, script, extra, class) in cases {
+        let caps = vec![shell_hook(id, script, extra)];
+        let out = open_harness::dispatch(Harness::Claude, &blocking_tool(), &caps, &native());
+        assert_eq!(out.response.exit_code, 2, "{id} should fail closed");
+        assert!(
+            out.errored.iter().any(|e| e.contains(class)),
+            "{id}: expected class `{class}` in {:?}",
+            out.errored
+        );
+    }
+}
+
+/// A missing interpreter is a classified spawn-error, not a panic.
+#[test]
+fn runtime_spawn_error_is_classified() {
+    let caps = vec![cap_from(json!({
+        "id": "nobin",
+        "run": { "command": "definitely-not-a-real-binary-oh-xyz" },
+        "events": [{ "phase": "pre", "subject": "tool", "tool_class": "any" }],
+    }))];
+    let out = open_harness::dispatch(Harness::Claude, &blocking_tool(), &caps, &native());
+    assert_eq!(out.response.exit_code, 2);
+    assert!(out.errored.iter().any(|e| e.contains("spawn-error")));
+}
+
+/// stdout beyond the cap is an `output-cap` error, not a truncated-JSON parse.
+#[test]
+fn runtime_output_cap_is_enforced() {
+    let caps = vec![shell_hook(
+        "flood",
+        "printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'",
+        json!({}),
+    )];
+    let limits = RunLimits {
+        timeout_ms: 2_000,
+        max_output_bytes: 8,
+        poll_interval_ms: 5,
+    };
+    let out = open_harness::dispatch_with_limits(
+        Harness::Claude,
+        &blocking_tool(),
+        &caps,
+        &native(),
+        &limits,
+    );
+    assert!(
+        out.errored.iter().any(|e| e.contains("output-cap")),
+        "expected output-cap in {:?}",
+        out.errored
+    );
+}
+
+/// On a non-blocking event, an errored capability degrades to allow by default
+/// (there is nothing to veto) but is still reported.
+#[test]
+fn runtime_non_blocking_error_degrades_to_allow() {
+    let caps = vec![shell_hook(
+        "post-badjson",
+        "echo nope",
+        json!({ "events": [{ "phase": "post", "subject": "tool", "tool_class": "any" }] }),
+    )];
+    let ev = NormEvent::tool(Phase::Post, ToolClass::Shell);
+    let out = open_harness::dispatch(Harness::Claude, &ev, &caps, &native());
+    assert_eq!(out.response.exit_code, 0, "post-phase error must not block");
+    assert!(out.errored.iter().any(|e| e.contains("bad-json")));
+}
+
+/// Independent capabilities run concurrently: two ~300ms sleepers finish in far
+/// less than the ~600ms serial sum, and the merge order stays deterministic.
+#[test]
+fn runtime_runs_concurrently_and_merges_deterministically() {
+    let mk = |id: &str, ctx: &str| {
+        shell_hook(
+            id,
+            &format!("sleep 0.3; printf '{{\"decision\":\"allow\",\"context_append\":\"{ctx}\"}}'"),
+            json!({}),
+        )
+    };
+    let caps = vec![mk("a", "A"), mk("b", "B")];
+    let start = std::time::Instant::now();
+    let out = open_harness::dispatch(Harness::OpenCode, &blocking_tool(), &caps, &native());
+    let elapsed = start.elapsed();
+    assert_eq!(out.ran.len(), 2);
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "two 300ms capabilities ran serially ({elapsed:?}); expected concurrent"
+    );
+    // OpenCode passes the canonical decision through; context is merged in
+    // manifest order regardless of which subprocess finished first.
+    assert!(out.response.stdout.contains("A\\nB") || out.response.stdout.contains("A\nB"));
+}

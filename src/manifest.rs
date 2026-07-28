@@ -14,6 +14,44 @@ pub struct RunSpec {
     pub args: Vec<String>,
 }
 
+/// What the dispatcher does when a bound capability *fails to produce a
+/// decision* (spawn error, timeout, non-zero exit, bad JSON, protocol mismatch).
+/// Chosen per binding so a hard guard and a soft advisor can share a runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailPolicy {
+    /// Fail-closed on blocking events (deny), fail-open otherwise. The default —
+    /// a crashing guard must never silently allow the action it was guarding.
+    #[default]
+    Auto,
+    /// Always treat an error as a deny, even on non-blocking events.
+    FailClosed,
+    /// Always treat an error as an allow — the capability contributes nothing.
+    FailOpen,
+    /// Like fail-open, but reported distinctly: "no opinion", not "allow".
+    PassThrough,
+}
+
+impl FailPolicy {
+    /// Resolve to the concrete action for an event of the given blocking-ness.
+    /// `true` = contribute a deny; `false` = contribute nothing.
+    pub fn denies(&self, blocking: bool) -> bool {
+        match self {
+            FailPolicy::Auto => blocking,
+            FailPolicy::FailClosed => true,
+            FailPolicy::FailOpen | FailPolicy::PassThrough => false,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FailPolicy::Auto => "auto",
+            FailPolicy::FailClosed => "fail-closed",
+            FailPolicy::FailOpen => "fail-open",
+            FailPolicy::PassThrough => "pass-through",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct EventBinding {
     pub phase: Phase,
@@ -29,6 +67,9 @@ pub struct EventBinding {
     /// harnesses that lack the event.
     #[serde(default)]
     pub required: bool,
+    /// What to do if this capability errors on this event. Defaults to `auto`.
+    #[serde(default)]
+    pub on_error: FailPolicy,
 }
 
 impl EventBinding {
@@ -64,6 +105,10 @@ pub struct Manifest {
     /// when present the dispatcher refuses a major-version mismatch.
     #[serde(default)]
     pub protocol: Option<String>,
+    /// Per-capability execution timeout (ms). Overrides the runtime default;
+    /// the capability is killed and its failure policy applied if exceeded.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
     /// Kind-specific configuration (e.g. the `skill` block). Each kind parses
     /// what it needs from here; unknown keys are ignored.
     #[serde(flatten)]
@@ -91,10 +136,10 @@ impl LoadedCapability {
         Ok(LoadedCapability { manifest, dir })
     }
 
-    /// Does this capability bind the given normalized event? A `tool.any`
-    /// binding matches any tool event; a specific class matches only its class.
-    pub fn binds(&self, ev: &NormEvent) -> bool {
-        self.manifest.events.iter().any(|b| {
+    /// The first binding that matches this event, if any. A `tool.any` binding
+    /// matches any tool event; a specific class matches only its class.
+    pub fn matching_binding(&self, ev: &NormEvent) -> Option<&EventBinding> {
+        self.manifest.events.iter().find(|b| {
             let be = b.event();
             if be.phase != ev.phase || be.subject != ev.subject {
                 return false;
@@ -106,6 +151,19 @@ impl LoadedCapability {
                 (Some(_), None) => false,
             }
         })
+    }
+
+    /// Does this capability bind the given normalized event?
+    pub fn binds(&self, ev: &NormEvent) -> bool {
+        self.matching_binding(ev).is_some()
+    }
+
+    /// The failure policy for this event — the matching binding's `on_error`,
+    /// or the `auto` default if unbound.
+    pub fn fail_policy(&self, ev: &NormEvent) -> FailPolicy {
+        self.matching_binding(ev)
+            .map(|b| b.on_error)
+            .unwrap_or_default()
     }
 }
 
