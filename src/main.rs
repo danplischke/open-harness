@@ -13,9 +13,10 @@
 use open_harness::adapters::{Harness, Support, ALL};
 use open_harness::event::{Boundary, NormEvent, Phase, SubjectKind, ToolClass};
 use open_harness::kind::{kind_impl, Artifact, Installability};
-use open_harness::manifest::{discover, LoadedCapability};
+use open_harness::manifest::{discover, LoadedCapability, PermissionPolicy};
 use open_harness::profile::{self, Lock, Profile, Resolved};
 use open_harness::sync::{self, ApplyReport, ChangeAction, Deferred, DriftKind, DriftReport};
+use open_harness::trust::{self, TrustStore};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::exit;
@@ -27,13 +28,17 @@ fn main() {
     match cmd {
         "run" => cmd_run(&rest),
         "emit" => cmd_emit(&rest),
+        "keygen" => cmd_keygen(&rest),
+        "sign" => cmd_sign(&rest),
+        "verify" => cmd_verify(&rest),
+        "trust" => cmd_trust(&rest),
         "resolve" => cmd_resolve(&rest),
         "sync" => cmd_sync(&rest),
         "check" => cmd_check(&rest),
         "matrix" => cmd_matrix(),
         _ => {
             eprintln!(
-                "oh-dispatch <run|emit|resolve|sync|check|matrix> [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR] [--dry-run] [--uninstall] [--ci] [--timeout-ms N] [--max-output-kb N] [--explain]"
+                "oh-dispatch <run|emit|keygen|sign|verify|trust|resolve|sync|check|matrix> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--key FILE] [--trust FILE] [--label L] [--out FILE] [--require-signed] [--deny-network] [--deny-exec]\\\n  [--dry-run] [--uninstall] [--ci] [--timeout-ms N] [--max-output-kb N] [--explain]"
             );
             exit(2);
         }
@@ -52,6 +57,15 @@ struct Opts {
     explain: bool,
     timeout_ms: u64,
     max_output_bytes: u64,
+    // trust & signing (#17)
+    capability_one: Option<PathBuf>,
+    key: Option<PathBuf>,
+    trust: Option<PathBuf>,
+    label: Option<String>,
+    out: Option<PathBuf>,
+    require_signed: bool,
+    deny_network: bool,
+    deny_exec: bool,
 }
 
 fn parse_opts(rest: &[String]) -> Opts {
@@ -67,6 +81,14 @@ fn parse_opts(rest: &[String]) -> Opts {
         explain: false,
         timeout_ms: 0,
         max_output_bytes: 0,
+        capability_one: None,
+        key: None,
+        trust: None,
+        label: None,
+        out: None,
+        require_signed: false,
+        deny_network: false,
+        deny_exec: false,
     };
     let mut i = 0;
     while i < rest.len() {
@@ -88,6 +110,38 @@ fn parse_opts(rest: &[String]) -> Opts {
             "--profile" => {
                 o.profile = rest.get(i + 1).map(PathBuf::from);
                 i += 2;
+            }
+            "--capability" => {
+                o.capability_one = rest.get(i + 1).map(PathBuf::from);
+                i += 2;
+            }
+            "--key" => {
+                o.key = rest.get(i + 1).map(PathBuf::from);
+                i += 2;
+            }
+            "--trust" => {
+                o.trust = rest.get(i + 1).map(PathBuf::from);
+                i += 2;
+            }
+            "--label" => {
+                o.label = rest.get(i + 1).cloned();
+                i += 2;
+            }
+            "--out" => {
+                o.out = rest.get(i + 1).map(PathBuf::from);
+                i += 2;
+            }
+            "--require-signed" => {
+                o.require_signed = true;
+                i += 1;
+            }
+            "--deny-network" => {
+                o.deny_network = true;
+                i += 1;
+            }
+            "--deny-exec" => {
+                o.deny_exec = true;
+                i += 1;
             }
             "--timeout-ms" => {
                 o.timeout_ms = rest.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -225,6 +279,169 @@ fn cmd_emit(rest: &[String]) {
     }
 }
 
+// ---- trust & signing (#17) -------------------------------------------------
+
+fn cmd_keygen(rest: &[String]) {
+    let o = parse_opts(rest);
+    let out = o
+        .out
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("openharness.key"));
+    let label = o.label.clone().unwrap_or_default();
+    let key = trust::generate_keyfile(&label).unwrap_or_else(|e| {
+        eprintln!("keygen failed: {e}");
+        exit(1);
+    });
+    key.write(&out).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        exit(1);
+    });
+    println!("wrote {} (ed25519)", out.display());
+    println!("  public key : {}", key.public_key);
+    println!("  fingerprint: {}", trust::fingerprint(&key.public_key));
+    eprintln!(
+        "keep the secret key private — do not commit {}",
+        out.display()
+    );
+}
+
+fn cmd_sign(rest: &[String]) {
+    let o = parse_opts(rest);
+    let Some(dir) = o.capability_one.clone() else {
+        eprintln!("sign requires --capability DIR");
+        exit(2);
+    };
+    let Some(keyf) = o.key.clone() else {
+        eprintln!("sign requires --key FILE");
+        exit(2);
+    };
+    let key = trust::Keyfile::load(&keyf).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        exit(1);
+    });
+    let sig = trust::sign(&dir, &key).unwrap_or_else(|e| {
+        eprintln!("sign failed: {e}");
+        exit(1);
+    });
+    sig.write(&dir).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        exit(1);
+    });
+    println!("signed {}", dir.display());
+    println!("  digest: {}", sig.digest);
+    println!("  signer: {}", trust::fingerprint(&key.public_key));
+}
+
+fn cmd_verify(rest: &[String]) {
+    let o = parse_opts(rest);
+    let Some(dir) = o.capability_one.clone() else {
+        eprintln!("verify requires --capability DIR");
+        exit(2);
+    };
+    let store = load_trust(&o);
+    let v = trust::verify(&dir, &store);
+    println!("{}: {}", dir.display(), v.status());
+    if let Ok(cap) = LoadedCapability::load(&dir.join("capability.json")) {
+        if !cap.manifest.permissions.is_empty() {
+            println!("  permissions: {}", cap.manifest.permissions.summary());
+        }
+    }
+    if !v.passes(o.require_signed) {
+        exit(1);
+    }
+}
+
+fn cmd_trust(rest: &[String]) {
+    let o = parse_opts(rest);
+    let Some(dir) = o.capability_one.clone() else {
+        eprintln!("trust requires --capability DIR (whose signer to trust)");
+        exit(2);
+    };
+    let Some(sig) = trust::Signature::load(&dir) else {
+        eprintln!("no {} in {}", trust::SIG_NAME, dir.display());
+        exit(1);
+    };
+    let trust_path = o
+        .trust
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("trust.json"));
+    let mut store = TrustStore::load(&trust_path).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        exit(1);
+    });
+    let label = o.label.clone().unwrap_or_default();
+    let fp = trust::fingerprint(&sig.public_key);
+    if store.add(&sig.public_key, &label) {
+        store.write(&trust_path).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            exit(1);
+        });
+        println!("trusted {fp} → {}", trust_path.display());
+    } else {
+        println!("already trusted: {fp}");
+    }
+}
+
+fn load_trust(o: &Opts) -> TrustStore {
+    match &o.trust {
+        Some(p) => TrustStore::load(p).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            exit(1);
+        }),
+        None => TrustStore::default(),
+    }
+}
+
+/// Whether the user opted into trust/permission checking on this invocation.
+fn trust_requested(o: &Opts) -> bool {
+    o.trust.is_some() || o.require_signed || o.deny_network || o.deny_exec
+}
+
+/// Verify a composed set, surface permission manifests, and gate. Only called
+/// when the user opts in (a trust store, `--require-signed`, or a deny flag).
+fn enforce_trust(caps: &[LoadedCapability], o: &Opts) {
+    let store = load_trust(o);
+    let policy = PermissionPolicy {
+        allow_network: !o.deny_network,
+        allow_exec: !o.deny_exec,
+    };
+    println!(
+        "trust check ({}):",
+        if o.require_signed {
+            "require-signed"
+        } else {
+            "advisory"
+        }
+    );
+    let mut failed = false;
+    for cap in caps {
+        let v = trust::verify(&cap.dir, &store);
+        let perms = &cap.manifest.permissions;
+        let extra = if perms.is_empty() {
+            String::new()
+        } else {
+            format!("  [perms: {}]", perms.summary())
+        };
+        println!("  {:<16} {}{extra}", cap.manifest.id, v.status());
+        if !v.passes(o.require_signed) {
+            eprintln!("    ✗ rejected ({})", v.status());
+            failed = true;
+        }
+        for viol in trust::permission_violations(perms, &policy) {
+            if o.require_signed {
+                eprintln!("    ✗ permission: {viol}");
+                failed = true;
+            } else {
+                eprintln!("    ⚠ permission: {viol}");
+            }
+        }
+    }
+    if failed {
+        eprintln!("\ntrust/permission gate failed");
+        exit(1);
+    }
+}
+
 /// Resolve a profile file: load it (and any lockfile next to it), resolve every
 /// source, rewrite the lockfile, and print the composed set + warnings. The
 /// profile file's directory is the workdir (roots relative paths + the git cache).
@@ -286,6 +503,11 @@ fn cmd_resolve(rest: &[String]) {
         }
     }
     println!("\nlockfile: {}", workdir.join(profile::LOCK_NAME).display());
+
+    if trust_requested(&o) {
+        println!();
+        enforce_trust(&resolved.capabilities, &o);
+    }
 }
 
 fn cmd_sync(rest: &[String]) {
@@ -322,6 +544,13 @@ fn cmd_sync(rest: &[String]) {
         }
         (caps, select_harnesses(&o))
     };
+
+    // Trust/permission gate (#17) — opt-in; a tampered/rejected capability here
+    // aborts the install before anything is written.
+    if trust_requested(&o) {
+        enforce_trust(&caps, &o);
+        println!();
+    }
 
     let plan = sync::plan_sync(&caps, &harnesses);
     let report = sync::apply(&into, &plan, o.dry_run).unwrap_or_else(|e| {

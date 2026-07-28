@@ -16,6 +16,7 @@ pub mod model;
 pub mod profile;
 pub mod runtime;
 pub mod sync;
+pub mod trust;
 
 // Generates the uniffi scaffolding for the language bindings (feature-gated so
 // the default build never pulls uniffi).
@@ -37,3 +38,4 @@ pub use sync::{
     apply, check, plan_sync, ApplyReport, ChangeAction, DesiredFile, DriftKind, DriftReport,
     SyncPlan,
 };
+pub use trust::{capability_digest, sign, verify, Keyfile, Signature, TrustStore, Verification};

@@ -7,3 +7,7 @@
 __pycache__/
 *.pyc
 examples/open-harness.lock
+
+# signing keys (secret) — never commit
+*.key
+openharness.key

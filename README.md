@@ -32,9 +32,11 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 | `src/api.rs` | Stable embeddable API (JSON-string boundary) the CLI + bindings call |
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
 | `src/profile.rs` | Profiles + sources (local / git / registry) → resolved `open-harness.lock` |
+| `src/trust.rs` | Signing + verification (ed25519 over a sha256 digest), trust store, permissions |
 | `capabilities/secret-guard/` | A real **Python** blocking capability |
 | `capabilities/audit-note/` | A real **Node/TS** non-blocking capability |
 | `tests/conformance.rs` | 69 tests: harness contracts, protocol, kind plans, composition, runtime, API |
+| `tests/profile.rs` + `tests/trust.rs` | Sourcing/lockfile (8) and signing/trust (9) tests |
 | `tests/fixtures/` | Recorded Codex + Cursor native payloads (adapter validation, with sources) |
 | `.github/workflows/ci.yml` | CI: build + test on Linux/macOS/Windows; fmt + clippy on Linux |
 
@@ -64,7 +66,7 @@ actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JS
 ## Try it
 
 ```sh
-cargo test                            # 69 conformance tests
+cargo test                            # 86 tests (conformance + profile + trust)
 cargo run -- matrix                   # support grid across 10 harnesses
 cargo run -- check                    # per-capability installability
 bash examples/demo.sh                 # deny across all four signal families
@@ -153,6 +155,33 @@ cargo run -- sync    --profile open-harness.json --into /tmp/proj   # resolve, t
 
 (Registry sources and transitive dependency resolution are the remaining #15
 follow-ups; a `version`/`dependencies` package format and the lockfile are here.)
+
+## Trust & signing
+
+Installing a capability runs someone else's code with your agent's privileges, so
+trust is built in (#17). A capability is content-addressed by a **sha256** digest
+over its file tree; the author signs that digest with an **ed25519** key into a
+detached `capability.sig`. On verify the digest is recomputed from disk (tamper
+caught before crypto) and the signature checked; the verdict is four-valued —
+`Trusted` (known key), `Untrusted` (valid but unknown key), `Invalid` (tampered /
+bad signature — **always rejected**), `Unsigned`. A `TrustStore` holds trusted
+keys (trust-on-first-use). Each capability also declares a **permission manifest**
+(`read` / `exec` / `network`) that is surfaced for consent and policy-checked.
+
+```sh
+cargo run -- keygen --out author.key --label "me"        # generate an ed25519 keypair
+cargo run -- sign   --capability caps/web --key author.key
+cargo run -- verify --capability caps/web --trust trust.json     # Untrusted until you trust the key
+cargo run -- trust  --capability caps/web --trust trust.json     # TOFU: add the signer
+cargo run -- sync   --profile open-harness.json --into /tmp/proj \
+                    --trust trust.json --require-signed --deny-network   # gated install
+```
+
+`--require-signed` refuses anything not `Trusted`; a tampered capability is
+rejected before anything is written. See [`SECURITY.md`](./SECURITY.md) for the
+full threat model and what is enforced vs deferred (sandboxing, revocation, a
+registry root of trust). This adds `ed25519-dalek` + `sha2` as core deps —
+integrity verification must always be available, so it is not feature-gated.
 
 ## Embedding
 

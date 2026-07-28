@@ -3,7 +3,7 @@
 
 use crate::event::{Boundary, NormEvent, Phase, SubjectKind, TaskKind, ToolClass};
 use crate::kind::KindId;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,6 +90,64 @@ impl EventBinding {
     }
 }
 
+/// A capability's declared permission manifest (#17) — what it expects to read,
+/// execute, and reach over the network. Surfaced for consent on install and
+/// checked against a [`PermissionPolicy`] (advisory).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Permissions {
+    /// Path globs the capability expects to read.
+    #[serde(default)]
+    pub read: Vec<String>,
+    /// Commands/binaries the capability expects to execute.
+    #[serde(default)]
+    pub exec: Vec<String>,
+    /// Network reach: `[]` = none, `["*"]` = any host, else specific hosts.
+    #[serde(default)]
+    pub network: Vec<String>,
+}
+
+impl Permissions {
+    pub fn is_empty(&self) -> bool {
+        self.read.is_empty() && self.exec.is_empty() && self.network.is_empty()
+    }
+    pub fn requests_network(&self) -> bool {
+        !self.network.is_empty()
+    }
+    pub fn network_summary(&self) -> String {
+        if self.network.is_empty() {
+            "none".to_string()
+        } else if self.network.iter().any(|h| h == "*") {
+            "any".to_string()
+        } else {
+            self.network.join(",")
+        }
+    }
+    pub fn summary(&self) -> String {
+        format!(
+            "read={:?} exec={:?} network={}",
+            self.read,
+            self.exec,
+            self.network_summary()
+        )
+    }
+}
+
+/// What the host permits capabilities to do. A violation is advisory by default.
+#[derive(Debug, Clone, Copy)]
+pub struct PermissionPolicy {
+    pub allow_network: bool,
+    pub allow_exec: bool,
+}
+
+impl Default for PermissionPolicy {
+    fn default() -> Self {
+        PermissionPolicy {
+            allow_network: true,
+            allow_exec: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
     pub id: String,
@@ -123,6 +181,10 @@ pub struct Manifest {
     /// resolver warns if a declared dependency is absent from the profile.
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// Declared permission manifest (read / exec / network). Surfaced for
+    /// consent and checked against the host policy (advisory).
+    #[serde(default)]
+    pub permissions: Permissions,
     /// Kind-specific configuration (e.g. the `skill` block). Each kind parses
     /// what it needs from here; unknown keys are ignored.
     #[serde(flatten)]

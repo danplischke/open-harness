@@ -1,0 +1,100 @@
+# Security & threat model
+
+open-harness distributes **runnable capabilities** — hooks that execute as
+subprocesses inside a developer's coding agent, and generated config that alters
+how that agent behaves. That is a supply-chain surface: installing a capability
+is running someone else's code with your agent's privileges. Trust is therefore
+a first-class part of the design (#17), not an afterthought.
+
+This document states what is protected, how, and — honestly — what is **not yet**
+enforced.
+
+## Assets & trust boundaries
+
+- **The developer's machine / agent privileges.** A hook capability runs with
+  whatever the agent can do (read the repo, run shell commands, reach the
+  network). This is the asset to protect.
+- **The capability author.** Identified by an ed25519 public key. Authenticity
+  means "this capability is the bytes that key signed."
+- **The integration surface.** `oh sync` writes files into a project and wires
+  registrations; it must never write outside the target tree or clobber
+  unmanaged files.
+
+Trust boundary: everything crossing from an **external source** (a git repo, a
+registry, a downloaded capability) into the **local install** is untrusted until
+verified.
+
+## The trust model
+
+### Content integrity — `sha256` digest
+`capability_digest` hashes every file in a capability directory individually,
+sorts the `(path, hash)` pairs, and hashes the list. Any changed byte, added, or
+renamed file changes the digest. It is deterministic and platform-independent
+(forward-slash paths, sorted), so it is stable across machines.
+
+### Authenticity — ed25519 signatures
+The author signs the digest with an **ed25519** private key. The detached
+`capability.sig` carries `{algorithm, public_key, digest, signature}`. On verify
+the digest is **recomputed from disk** (so tampering is caught before any crypto
+runs) and the signature is checked against the embedded public key with
+`ed25519-dalek`. We never roll our own crypto.
+
+### Trust — an explicit key store (TOFU)
+A valid signature only proves *who* signed, not that you *trust* them. A
+`TrustStore` lists trusted public keys. Verification is four-valued:
+
+| Verdict | Meaning | Passes gate? |
+|---|---|---|
+| `Trusted` | valid signature by a key in the store | always |
+| `Untrusted` | valid signature, key not in the store | only without `--require-signed` |
+| `Invalid` | tampered content or bad signature | **never** |
+| `Unsigned` | no signature | only without `--require-signed` |
+
+`oh trust --capability DIR` adds a signer's key to the store — an explicit
+trust-on-first-use consent step. `oh sync --require-signed` refuses anything not
+`Trusted`.
+
+### Least privilege — the permission manifest
+A capability declares what it expects to touch:
+
+```jsonc
+"permissions": { "read": ["src/**"], "exec": ["git"], "network": ["*"] }
+```
+
+`oh verify` / `oh sync` **surface** this for consent, and check it against a host
+policy (`--deny-network`, `--deny-exec`). Violations are advisory warnings by
+default and **hard failures under `--require-signed`**.
+
+## Threats & mitigations
+
+| Threat | Mitigation | Status |
+|---|---|---|
+| Tampering with a capability in transit / at rest | recomputed `sha256` digest, verified before crypto | **enforced** |
+| Impersonating an author | ed25519 signature over the digest | **enforced** |
+| Running unknown / unsigned code silently | four-valued verdict; `--require-signed` gate; TOFU consent | **enforced (opt-in)** |
+| Over-broad capability privileges | declared permission manifest, surfaced + policy-checked | **advisory / enforced under `--require-signed`** |
+| `sync` writing outside the project or clobbering user files | path-traversal guard (no `..`/absolute/`~`); prune only lockfile-managed paths | **enforced** |
+| A capability that forks grandchildren evading the timeout kill | only the direct child is killed today | **deferred** (needs process-group kill) |
+| Untrusted code doing anything at all once installed (sandboxing) | not sandboxed; runs with agent privileges | **deferred** |
+| Key compromise / revocation | no revocation list yet | **deferred** |
+| Rollback / downgrade to an old vulnerable version | the profile lockfile pins commit + digest; no signed-version-monotonicity yet | **partial** (pinning only) |
+| Malicious registry / key distribution | registry is a stub; no TUF-style root of trust | **deferred** |
+
+## What is enforced today vs deferred
+
+**Enforced:** content-digest integrity, ed25519 signature verification, the
+trust store + `--require-signed` gate, permission-manifest surfacing + policy
+checks, the `sync` path-traversal and prune-only-managed guarantees, and
+lockfile pinning (commit + digest) from #15.
+
+**Deferred (documented, not silently missing):** sandboxed / containerized
+execution; process-group kill for forking capabilities; key revocation; a
+registry with a real root of trust (TUF-style); and signed version
+monotonicity. These are tracked against M4/M5.
+
+## Reporting
+
+This is a feasibility spike, not a production release. If you find a security
+issue in the model or implementation, open an issue describing the scenario (or,
+for anything sensitive, contact the maintainer privately) rather than posting a
+working exploit.
