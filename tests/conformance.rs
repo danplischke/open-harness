@@ -830,3 +830,90 @@ fn command_unsupported_on_aider() {
         Installability::Unsupported(_)
     ));
 }
+
+// ---- permissions kind: faithful on 2, approximated on 5, unsupported on 3 --
+
+fn permission_cap() -> LoadedCapability {
+    caps()
+        .into_iter()
+        .find(|c| c.manifest.id == "safe-shell")
+        .expect("safe-shell permission capability present")
+}
+
+#[test]
+fn permission_maps_faithfully_to_claude_and_opencode() {
+    let cap = permission_cap();
+    assert_eq!(cap.manifest.kind, KindId::Permission);
+    let k = kind_impl(cap.manifest.kind);
+
+    let claude = match k.plan(&cap, Harness::Claude).artifacts.into_iter().next() {
+        Some(Artifact::File { path, contents }) => {
+            assert_eq!(path, ".claude/settings.json");
+            contents
+        }
+        _ => panic!("expected a File"),
+    };
+    assert!(claude.contains("\"Bash(git *)\"")); // allow
+    assert!(claude.contains("\"Bash(rm *)\"")); // deny
+    assert!(claude.contains("\"Read(./.env)\"")); // deny, non-shell tool
+    assert!(matches!(
+        k.plan(&cap, Harness::Claude).installability,
+        Installability::Clean
+    ));
+
+    let oc = match k.plan(&cap, Harness::OpenCode).artifacts.into_iter().next() {
+        Some(Artifact::File { path, contents }) => {
+            assert_eq!(path, "opencode.json");
+            contents
+        }
+        _ => panic!("expected a File"),
+    };
+    assert!(oc.contains("\"permission\"") && oc.contains("\"git *\": \"allow\""));
+    assert!(oc.contains("\"rm *\": \"deny\""));
+}
+
+#[test]
+fn permission_approximated_with_loss_reports() {
+    let cap = permission_cap();
+    let k = kind_impl(cap.manifest.kind);
+
+    // Codex collapses to a coarse approval policy (has denies -> on-request).
+    let codex = k.plan(&cap, Harness::Codex);
+    assert!(matches!(codex.installability, Installability::Degraded(_)));
+    assert!(!codex.notes.is_empty());
+    if let Some(Artifact::File { contents, .. }) = codex.artifacts.first() {
+        assert!(contents.contains("approval_policy = \"on-request\""));
+    }
+
+    // Gemini approximates shell allows via tools.allowed with command specificity.
+    let gemini = k.plan(&cap, Harness::Gemini);
+    assert!(matches!(gemini.installability, Installability::Degraded(_)));
+    if let Some(Artifact::File { contents, .. }) = gemini.artifacts.first() {
+        assert!(contents.contains("run_shell_command(git)"));
+    }
+
+    // Cursor / Windsurf / Copilot are shell-only approximations, all Degraded.
+    for h in [Harness::Cursor, Harness::Windsurf, Harness::Copilot] {
+        assert!(
+            matches!(k.plan(&cap, h).installability, Installability::Degraded(_)),
+            "{}",
+            h.id()
+        );
+    }
+}
+
+#[test]
+fn permission_unsupported_where_no_committed_file() {
+    let cap = permission_cap();
+    let k = kind_impl(cap.manifest.kind);
+    for h in [Harness::Pi, Harness::Cline, Harness::Aider] {
+        assert!(
+            matches!(
+                k.plan(&cap, h).installability,
+                Installability::Unsupported(_)
+            ),
+            "{} should be Unsupported (no committed permission file)",
+            h.id()
+        );
+    }
+}

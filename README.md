@@ -31,7 +31,7 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 | `src/api.rs` | Stable embeddable API (JSON-string boundary) the CLI + bindings call |
 | `capabilities/secret-guard/` | A real **Python** blocking capability |
 | `capabilities/audit-note/` | A real **Node/TS** non-blocking capability |
-| `tests/conformance.rs` | 37 tests: harness contracts, protocol validation, kind plans, API |
+| `tests/conformance.rs` | 40 tests: harness contracts, protocol validation, kind plans, API |
 
 ## The contract (this is the whole point)
 
@@ -59,7 +59,7 @@ actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JS
 ## Try it
 
 ```sh
-cargo test                            # 37 conformance tests
+cargo test                            # 40 conformance tests
 cargo run -- matrix                   # support grid across 10 harnesses
 cargo run -- check                    # per-capability installability
 bash examples/demo.sh                 # deny across all four signal families
@@ -84,7 +84,12 @@ Capabilities declare a `kind`; each kind plugs into the same `Kind` trait
   Markdown+YAML with `$ARGUMENTS`/`$N` (Claude/Codex/OpenCode/Cursor/Copilot/
   Windsurf/Cline) vs Gemini's `.toml` with `{{args}}`; positional args degrade
   on Gemini with a note.
-- **permission** — planned; see the issue tracker.
+- **permission** (generative) — one policy (per-tool/pattern `allow`/`ask`/`deny`)
+  → **faithful** on Claude/OpenCode, **approximated with a loss report** on
+  Codex/Gemini/Cursor/Windsurf/Copilot, and **Unsupported (with a reason)** on
+  Cline/Aider/Pi. The honest-degradation showcase — five incompatible models.
+
+All six capability kinds are now implemented.
 
 ## Embedding
 

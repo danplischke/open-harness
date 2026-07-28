@@ -103,6 +103,7 @@ pub fn kinds() -> Vec<String> {
         KindId::Rule,
         KindId::Tool,
         KindId::Command,
+        KindId::Permission,
     ]
     .iter()
     .map(|k| k.as_str().to_string())

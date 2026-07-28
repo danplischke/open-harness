@@ -93,21 +93,6 @@ pub fn kind_impl(id: KindId) -> Box<dyn Kind> {
         KindId::Rule => Box::new(crate::kinds::rule::RuleKind),
         KindId::Tool => Box::new(crate::kinds::tool::ToolKind),
         KindId::Command => Box::new(crate::kinds::command::CommandKind),
-        other => Box::new(Unimplemented(other)),
-    }
-}
-
-/// Placeholder for kinds not yet built, so `check`/`emit` degrade gracefully
-/// instead of panicking.
-struct Unimplemented(KindId);
-impl Kind for Unimplemented {
-    fn id(&self) -> KindId {
-        self.0
-    }
-    fn plan(&self, _cap: &LoadedCapability, _harness: Harness) -> KindPlan {
-        KindPlan::unsupported(format!(
-            "capability kind '{}' is not implemented yet",
-            self.0.as_str()
-        ))
+        KindId::Permission => Box::new(crate::kinds::permission::PermissionKind),
     }
 }
