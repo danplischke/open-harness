@@ -23,7 +23,7 @@ spike — exactly where it breaks.
   Cursor, Windsurf, Cline, OpenCode, Pi, Aider, Copilot — each encoding that
   harness's real (a) native event mapping, (b) deny signal, (c) registration format.
 - A **single-entrypoint dispatcher** (`src/dispatch.rs`): one native hook per
-  harness calls `oh-dispatch`, which fans out to capabilities, merges, re-encodes.
+  harness calls `oh`, which fans out to capabilities, merges, re-encodes.
 - Two **real capabilities in two languages** (`capabilities/`): a **Python**
   blocking secret-scanner and a **Node/TS** non-blocking context-injector.
 - A **16-test conformance suite** (`tests/conformance.rs`), all passing, that
@@ -45,7 +45,7 @@ feasibility) was robust regardless.
 
 ---
 
-## The support matrix (generated: `oh-dispatch matrix`)
+## The support matrix (generated: `oh matrix`)
 
 ```
 event \ harness   claude   codex   gemini  cursor    windsurf   cline   opencode  pi      aider  copilot
@@ -73,7 +73,7 @@ name in the payload. **Cursor and Windsurf split it by tool class**
 `PreToolUse` name cannot round-trip this. **Consequence:** the normalized event
 had to become `(phase, subject, tool_class)`, and one normalized `pre.tool.any`
 **registers on 3 (Cursor) / 4 (Windsurf) native events** — proven by
-`oh-dispatch emit --harness cursor` and the fan-out tests. This works, but it
+`oh emit --harness cursor` and the fan-out tests. This works, but it
 means "install a hook" is a 1→many operation the library must own.
 
 ### Finding 2 — Missing events / no target. *The hard ceiling; must be declarable.*
@@ -121,7 +121,7 @@ code, not a design problem.
 ### Finding 5 — In-process harnesses need a generated shim. *Feasible; one extra artifact.*
 OpenCode (JS plugin) and Pi (TS extension) don't exec a command — they call a
 function. Bridging them means **generating a tiny plugin/extension that spawns
-the capability over stdio** and applies the canonical decision. `oh-dispatch
+the capability over stdio** and applies the canonical decision. `oh
 emit --harness opencode` generates exactly this. So "8 harnesses" is really
 "6 exec-native + 2 shim-hosted," and both paths reach the same capability binary.
 
@@ -195,9 +195,13 @@ against docs (#5), the sync/composition layer shipped (#16), **profiles +
 sources + a resolved lockfile** landed (#15 — local & git personal-repo sync,
 pinned + reproducible), a **trust & signing model** landed (#17 — ed25519
 signatures over a sha256 content digest, a trust store, a permission manifest,
-and a written threat model in `SECURITY.md`), and **Node/TypeScript bindings**
+and a written threat model in `SECURITY.md`), **Node/TypeScript bindings**
 landed (#14 — a napi-rs native addon in `bindings/node/`, verified on Linux,
-that lets an OpenCode/Pi plugin host the core in-process). Still deferred:
+that lets an OpenCode/Pi plugin host the core in-process), an **MCP→CLI bridge**
+shipped (#19 — a stdio MCP client + `oh mcp call` + generated wrappers), and the
+**DevEx layer** landed (#18 — a unified `oh` CLI with `scaffold`/`init`/`doctor`,
+an mdBook docs site, and a support matrix generated from the adapters). Still
+deferred:
 capability **sandboxing** and process-group kill; **registry** sources + a
 registry root of trust and key **revocation**; transitive **dependency**
 resolution; **npm publish + prebuilt binaries** for the Node addon's full

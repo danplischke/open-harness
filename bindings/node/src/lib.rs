@@ -50,7 +50,7 @@ pub fn plan_all(manifest_json: String, dir: String) -> napi::Result<String> {
 
 /// Run the hook dispatcher (spawns capabilities over the stdio contract) →
 /// JSON `DispatchResult`. This is what an in-process OpenCode/Pi plugin calls
-/// to enforce hooks without shelling out to `oh-dispatch`.
+/// to enforce hooks without shelling out to `oh`.
 #[napi]
 pub fn dispatch(
     harness: String,

@@ -11,7 +11,7 @@ read files. None of that works in `wasm32-unknown-unknown` (no processes, no
 fs), so a native addon is the right vehicle — which is also where the harness
 plugin shims live. In particular, an **OpenCode / Pi plugin can host the core
 in-process** (see `opencode-plugin.example.mjs`) instead of shelling out to the
-`oh-dispatch` CLI for orchestration.
+`oh` CLI for orchestration.
 
 ## Build
 
@@ -20,7 +20,7 @@ bash build.sh            # cargo build --release + place open-harness.<platform>
 ```
 
 This is a standalone Cargo crate (it references Node's C-API symbols, so it must
-not be linked into the `oh-dispatch` binary); the repo's `cargo build` never
+not be linked into the `oh` binary); the repo's `cargo build` never
 touches it.
 
 ## Use

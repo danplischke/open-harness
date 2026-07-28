@@ -1,0 +1,10 @@
+[book]
+title = "open-harness"
+description = "Define an AI-coding-agent capability once; fan it out to every harness's native config."
+authors = ["open-harness contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "rust"
+git-repository-url = "https://github.com/danplischke/open-harness"

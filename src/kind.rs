@@ -36,6 +36,18 @@ impl KindId {
             KindId::Permission => "permission",
         }
     }
+
+    pub fn parse(s: &str) -> Option<KindId> {
+        Some(match s {
+            "hook" => KindId::Hook,
+            "skill" => KindId::Skill,
+            "rule" => KindId::Rule,
+            "command" => KindId::Command,
+            "tool" => KindId::Tool,
+            "permission" => KindId::Permission,
+            _ => return None,
+        })
+    }
 }
 
 /// Whether a capability of a given kind can be installed on a given harness.

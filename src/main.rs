@@ -1,21 +1,22 @@
-//! `oh-dispatch` — the CLI face of the spike.
+//! `oh` — the unified CLI.
 //!
-//! Subcommands:
-//!   run     Act as a harness's single native hook entrypoint (reads native
-//!           JSON on stdin, runs capabilities, writes the native response).
-//!   emit    Print the native registration config for a harness (or `all`).
-//!   sync    Install/converge the composed capability set into a project tree
-//!           (`--into DIR`), with `--dry-run` and `--uninstall`.
-//!   check   Per-capability installability, or drift vs a synced project
-//!           (`--into DIR [--ci]`).
-//!   matrix  The raw (event × harness) support grid — the feasibility finding.
+//! Authoring:  `init` (write a profile) · `scaffold` (a runnable capability
+//!   starter) · `add`/`remove` (edit a profile's sources) · `doctor` (check the
+//!   environment + capability health).
+//! Runtime:    `run` (a harness's single native hook entrypoint) · `mcp`
+//!   (list/call an MCP server's tools through the shell — the MCP→CLI bridge).
+//! Delivery:   `emit` (native registration config) · `resolve` (sources → lock)
+//!   · `sync` (install/converge into a project) · `check` (installability, or
+//!   drift vs a synced project with `--ci`).
+//! Trust:      `keygen` · `sign` · `verify` · `trust`.
+//! Reporting:  `matrix` (the event × harness support grid; `--markdown`).
 
-use open_harness::adapters::{Harness, Support, ALL};
-use open_harness::event::{Boundary, NormEvent, Phase, SubjectKind, ToolClass};
-use open_harness::kind::{kind_impl, Artifact, Installability};
+use open_harness::adapters::{Harness, ALL};
+use open_harness::kind::{kind_impl, Artifact, Installability, KindId};
 use open_harness::manifest::{discover, LoadedCapability, PermissionPolicy};
 use open_harness::mcp::{self, ServerSpec};
 use open_harness::profile::{self, Lock, Profile, Resolved};
+use open_harness::scaffold::{self, Lang};
 use open_harness::sync::{self, ApplyReport, ChangeAction, Deferred, DriftKind, DriftReport};
 use open_harness::trust::{self, TrustStore};
 use std::io::Read;
@@ -37,10 +38,15 @@ fn main() {
         "resolve" => cmd_resolve(&rest),
         "sync" => cmd_sync(&rest),
         "check" => cmd_check(&rest),
-        "matrix" => cmd_matrix(),
+        "matrix" => cmd_matrix(&rest),
+        "scaffold" => cmd_scaffold(&rest),
+        "init" => cmd_init(&rest),
+        "doctor" => cmd_doctor(&rest),
+        "add" => cmd_add(&rest),
+        "remove" => cmd_remove(&rest),
         _ => {
             eprintln!(
-                "oh-dispatch <run|emit|keygen|sign|verify|trust|mcp|resolve|sync|check|matrix> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--key FILE] [--trust FILE] [--label L] [--out FILE] [--require-signed] [--deny-network] [--deny-exec]\\\n  [--id ID] [--command CMD] [--mcp-arg A]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nmcp: oh-dispatch mcp <list|call> (--id ID | --command CMD [--mcp-arg A]...) [--tool NAME] [--json '<args>']"
+                "oh <init|scaffold|add|remove|doctor|run|emit|keygen|sign|verify|trust|mcp|resolve|sync|check|matrix> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--out FILE] [--require-signed] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]...) [--tool NAME] [--json '<args>']"
             );
             exit(2);
         }
@@ -74,6 +80,11 @@ struct Opts {
     mcp_args: Vec<String>,
     tool: Option<String>,
     json_args: Option<String>,
+    // authoring (#18)
+    scaffold_kind: Option<String>,
+    scaffold_lang: Option<String>,
+    local: Option<String>,
+    git: Option<String>,
 }
 
 fn parse_opts(rest: &[String]) -> Opts {
@@ -102,6 +113,10 @@ fn parse_opts(rest: &[String]) -> Opts {
         mcp_args: Vec::new(),
         tool: None,
         json_args: None,
+        scaffold_kind: None,
+        scaffold_lang: None,
+        local: None,
+        git: None,
     };
     let mut i = 0;
     while i < rest.len() {
@@ -176,6 +191,22 @@ fn parse_opts(rest: &[String]) -> Opts {
             }
             "--json" => {
                 o.json_args = rest.get(i + 1).cloned();
+                i += 2;
+            }
+            "--kind" => {
+                o.scaffold_kind = rest.get(i + 1).cloned();
+                i += 2;
+            }
+            "--lang" => {
+                o.scaffold_lang = rest.get(i + 1).cloned();
+                i += 2;
+            }
+            "--local" => {
+                o.local = rest.get(i + 1).cloned();
+                i += 2;
+            }
+            "--git" => {
+                o.git = rest.get(i + 1).cloned();
                 i += 2;
             }
             "--timeout-ms" => {
@@ -847,8 +878,258 @@ fn provenance(harnesses: &[String], sources: &[String]) -> String {
     format!("  [{} · {}]", harnesses.join(","), sources.join("+"))
 }
 
-fn cmd_matrix() {
-    let events = representative_events();
+// ---- authoring / DevEx (#18) ----------------------------------------------
+
+fn cmd_scaffold(rest: &[String]) {
+    let o = parse_opts(rest);
+    let kind_str = o.scaffold_kind.as_deref().unwrap_or("hook");
+    let Some(kind) = KindId::parse(kind_str) else {
+        eprintln!("unknown --kind '{kind_str}' (hook|skill|rule|command|tool|permission)");
+        exit(2);
+    };
+    let lang_str = o.scaffold_lang.as_deref().unwrap_or("python");
+    let Some(lang) = Lang::parse(lang_str) else {
+        eprintln!("unknown --lang '{lang_str}' (python|typescript|bash)");
+        exit(2);
+    };
+    let Some(id) = o.id.clone() else {
+        eprintln!("scaffold requires --id <capability-id>");
+        exit(2);
+    };
+    let into = o
+        .into
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("capabilities"));
+
+    let files = scaffold::scaffold(kind, lang, &id, &into).unwrap_or_else(|e| {
+        eprintln!("scaffold failed: {e}");
+        exit(1);
+    });
+    println!("scaffolded {} capability '{id}':", kind.as_str());
+    for f in &files {
+        println!("  + {f}");
+    }
+    if kind == KindId::Hook {
+        println!(
+            "\nrun it:  echo '{{}}' | oh run --harness claude-code --capabilities {} --event pre.tool.any",
+            into.display()
+        );
+    } else {
+        println!("\ncheck it: oh check --capabilities {}", into.display());
+    }
+}
+
+fn cmd_init(rest: &[String]) {
+    let o = parse_opts(rest);
+    let dir = o.into.clone().unwrap_or_else(|| PathBuf::from("."));
+    let path = dir.join("open-harness.json");
+    if path.exists() {
+        eprintln!("{} already exists", path.display());
+        exit(1);
+    }
+    let harnesses: Vec<String> = match o.harness.as_deref() {
+        None | Some("all") => vec!["claude-code".into(), "cursor".into()],
+        Some(id) => vec![id.to_string()],
+    };
+    let profile = serde_json::json!({
+        "name": "default",
+        "harnesses": harnesses,
+        "sources": [ { "local": { "path": "capabilities" } } ],
+    });
+    let text = serde_json::to_string_pretty(&profile).unwrap_or_default();
+    if let Err(e) = std::fs::write(&path, format!("{text}\n")) {
+        eprintln!("write {}: {e}", path.display());
+        exit(1);
+    }
+    println!("wrote {}", path.display());
+    println!("next: oh scaffold --kind hook --lang python --id my-guard");
+    println!("      oh sync --profile {} --into .", path.display());
+}
+
+fn cmd_doctor(rest: &[String]) {
+    let o = parse_opts(rest);
+    println!("open-harness doctor");
+    println!("\ninterpreters / tools on PATH:");
+    let mut missing = 0;
+    for (name, why) in [
+        ("python3", "Python capabilities"),
+        ("node", "TypeScript/Node capabilities"),
+        ("sh", "bash capabilities + MCP bridge wrappers"),
+        ("git", "git sources (personal-repo sync)"),
+    ] {
+        let found = which_on_path(name);
+        println!(
+            "  {:<8} {}",
+            name,
+            match &found {
+                Some(p) => format!("✓ {p}"),
+                None => {
+                    missing += 1;
+                    format!("✗ not found — needed for {why}")
+                }
+            }
+        );
+    }
+
+    println!("\ncapabilities under {}:", o.capabilities.display());
+    match discover(&o.capabilities) {
+        Ok(caps) if caps.is_empty() => println!("  (none found)"),
+        Ok(caps) => {
+            for cap in &caps {
+                // A capability is "healthy" if it plans on at least one harness.
+                let installable = ALL.iter().any(|&h| {
+                    matches!(
+                        kind_impl(cap.manifest.kind).plan(cap, h).installability,
+                        Installability::Clean | Installability::Degraded(_)
+                    )
+                });
+                println!(
+                    "  {} {:<16} [{}]",
+                    if installable { "✓" } else { "✗" },
+                    cap.manifest.id,
+                    cap.manifest.kind.as_str()
+                );
+            }
+        }
+        Err(e) => {
+            println!("  could not scan: {e}");
+            missing += 1;
+        }
+    }
+
+    if missing > 0 {
+        println!("\n{missing} issue(s) found.");
+        exit(1);
+    }
+    println!("\nall good.");
+}
+
+/// Minimal PATH lookup for `doctor` (honors PATHEXT on Windows).
+fn which_on_path(program: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let direct = dir.join(program);
+        if direct.is_file() {
+            return Some(direct.to_string_lossy().into_owned());
+        }
+        if cfg!(windows) {
+            for ext in std::env::var("PATHEXT")
+                .unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
+                .split(';')
+                .filter(|e| !e.is_empty())
+            {
+                let cand = dir.join(format!("{program}{ext}"));
+                if cand.is_file() {
+                    return Some(cand.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn cmd_add(rest: &[String]) {
+    let o = parse_opts(rest);
+    let Some(pf) = o.profile.clone() else {
+        eprintln!("add requires --profile FILE");
+        exit(2);
+    };
+    let source = if let Some(p) = &o.local {
+        serde_json::json!({ "local": { "path": p } })
+    } else if let Some(u) = &o.git {
+        serde_json::json!({ "git": { "url": u, "rev": "HEAD" } })
+    } else {
+        eprintln!("add requires --local PATH or --git URL");
+        exit(2);
+    };
+    let mut v = read_profile_value(&pf);
+    let sources = v.as_object_mut().and_then(|m| {
+        m.entry("sources")
+            .or_insert(serde_json::json!([]))
+            .as_array_mut()
+    });
+    match sources {
+        Some(arr) => arr.push(source),
+        None => {
+            eprintln!("profile `sources` is not an array");
+            exit(1);
+        }
+    }
+    if let Some(h) = &o.harness {
+        add_harness(&mut v, h);
+    }
+    write_profile_value(&pf, &v);
+    println!("added source to {}", pf.display());
+}
+
+fn cmd_remove(rest: &[String]) {
+    let o = parse_opts(rest);
+    let Some(pf) = o.profile.clone() else {
+        eprintln!("remove requires --profile FILE");
+        exit(2);
+    };
+    let (kind, target) = match (&o.local, &o.git) {
+        (Some(p), _) => ("local", p.clone()),
+        (_, Some(u)) => ("git", u.clone()),
+        _ => {
+            eprintln!("remove requires --local PATH or --git URL");
+            exit(2);
+        }
+    };
+    let mut v = read_profile_value(&pf);
+    if let Some(arr) = v.get_mut("sources").and_then(|s| s.as_array_mut()) {
+        let before = arr.len();
+        arr.retain(|s| {
+            let hit = match kind {
+                "local" => s.pointer("/local/path").and_then(|p| p.as_str()) == Some(&target),
+                _ => s.pointer("/git/url").and_then(|u| u.as_str()) == Some(&target),
+            };
+            !hit
+        });
+        let removed = before - arr.len();
+        write_profile_value(&pf, &v);
+        println!("removed {removed} source(s) from {}", pf.display());
+    }
+}
+
+fn read_profile_value(path: &std::path::Path) -> serde_json::Value {
+    match std::fs::read_to_string(path) {
+        Ok(t) => serde_json::from_str(&t).unwrap_or_else(|e| {
+            eprintln!("invalid profile {}: {e}", path.display());
+            exit(1);
+        }),
+        Err(_) => serde_json::json!({ "name": "default", "harnesses": [], "sources": [] }),
+    }
+}
+
+fn write_profile_value(path: &std::path::Path, v: &serde_json::Value) {
+    let text = serde_json::to_string_pretty(v).unwrap_or_default();
+    if let Err(e) = std::fs::write(path, format!("{text}\n")) {
+        eprintln!("write {}: {e}", path.display());
+        exit(1);
+    }
+}
+
+fn add_harness(v: &mut serde_json::Value, harness: &str) {
+    if let Some(arr) = v.as_object_mut().and_then(|m| {
+        m.entry("harnesses")
+            .or_insert(serde_json::json!([]))
+            .as_array_mut()
+    }) {
+        if !arr.iter().any(|h| h.as_str() == Some(harness)) {
+            arr.push(serde_json::json!(harness));
+        }
+    }
+}
+
+fn cmd_matrix(rest: &[String]) {
+    // The matrix is generated from the adapters (open_harness::matrix), the same
+    // source the docs table is generated from — never hand-maintained.
+    if rest.iter().any(|a| a == "--markdown") {
+        print!("{}", open_harness::matrix::markdown());
+        return;
+    }
+    let events = open_harness::matrix::representative_events();
     let width = 13;
     print!("{:<18}", "event \\ harness");
     for h in ALL {
@@ -859,12 +1140,11 @@ fn cmd_matrix() {
     for ev in &events {
         print!("{:<18}", ev.id());
         for h in ALL {
-            let cell = match h.support(ev) {
-                Support::Native(_, _) => "native".to_string(),
-                Support::Fanout(list) => format!("fanout×{}", list.len()),
-                Support::Unsupported(_) => "—".to_string(),
-            };
-            print!("{:<width$}", cell, width = width);
+            print!(
+                "{:<width$}",
+                open_harness::matrix::cell(h, ev),
+                width = width
+            );
         }
         println!();
     }
@@ -876,35 +1156,4 @@ fn short(id: &str) -> String {
         "claude-code" => "claude".to_string(),
         other => other.chars().take(11).collect(),
     }
-}
-
-fn representative_events() -> Vec<NormEvent> {
-    vec![
-        NormEvent::tool(Phase::Pre, ToolClass::Any),
-        NormEvent::tool(Phase::Pre, ToolClass::Shell),
-        NormEvent::tool(Phase::Post, ToolClass::Any),
-        NormEvent::simple(Phase::Pre, SubjectKind::Model),
-        NormEvent::simple(Phase::Pre, SubjectKind::Prompt),
-        NormEvent {
-            phase: Phase::Pre,
-            subject: SubjectKind::Session,
-            tool_class: None,
-            boundary: Some(Boundary::Start),
-            task_kind: None,
-        },
-        NormEvent {
-            phase: Phase::Pre,
-            subject: SubjectKind::Subagent,
-            tool_class: None,
-            boundary: Some(Boundary::Start),
-            task_kind: None,
-        },
-        NormEvent {
-            phase: Phase::Pre,
-            subject: SubjectKind::Task,
-            tool_class: None,
-            boundary: None,
-            task_kind: Some(open_harness::event::TaskKind::Start),
-        },
-    ]
 }

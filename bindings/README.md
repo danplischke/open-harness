@@ -39,7 +39,7 @@ spawns capabilities; `plan`/`verify` read files), none of which works in
 `wasm32-unknown-unknown`. This is also where the harness plugin shims live — an
 **OpenCode / Pi plugin can host the core in-process** (see
 `bindings/node/opencode-plugin.example.mjs`) instead of shelling out to the
-`oh-dispatch` CLI. The surface mirrors `open_harness::api` (`harnesses`, `kinds`,
+`oh` CLI. The surface mirrors `open_harness::api` (`harnesses`, `kinds`,
 `protocolVersion`, `plan`, `planAll`, `dispatch`, `dispatchWithLimits`,
 `validateDecision`, `verify`); complex results cross as JSON. Types in
 `index.d.ts`.

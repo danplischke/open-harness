@@ -4,9 +4,10 @@ version = "0.0.0-spike"
 edition = "2021"
 description = "Feasibility spike: cross-harness capability normalization + language-agnostic stdio hook contract"
 license = "MIT"
+default-run = "oh"
 
 [[bin]]
-name = "oh-dispatch"
+name = "oh"
 path = "src/main.rs"
 
 # uniffi binding generator — only built with `--features ffi`.

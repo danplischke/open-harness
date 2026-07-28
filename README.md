@@ -36,10 +36,11 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 | `src/trust.rs` | Signing + verification (ed25519 over a sha256 digest), trust store, permissions |
 | `capabilities/secret-guard/` | A real **Python** blocking capability |
 | `capabilities/audit-note/` | A real **Node/TS** non-blocking capability |
-| `tests/conformance.rs` | 69 tests: harness contracts, protocol, kind plans, composition, runtime, API |
-| `tests/profile.rs` + `tests/trust.rs` | Sourcing/lockfile (8) and signing/trust (9) tests |
-| `tests/fixtures/` | Recorded Codex + Cursor native payloads (adapter validation, with sources) |
-| `.github/workflows/ci.yml` | CI: build + test on Linux/macOS/Windows; fmt + clippy on Linux |
+| `src/scaffold.rs` + `src/matrix.rs` | `oh scaffold` capability starters; adapter-generated support matrix |
+| `tests/conformance.rs` | 70 tests: harness contracts, protocol, kind plans, composition, runtime, API |
+| `tests/{profile,trust,mcp,authoring}.rs` | Sourcing (8), signing (9), MCP bridge (3), scaffold/matrix (4) |
+| `docs/` | mdBook site (concepts, authoring guide, generated matrix); `docs/gen-matrix.sh` |
+| `.github/workflows/ci.yml` | CI: test on Linux/macOS/Windows; fmt+clippy; docs build + matrix drift gate |
 
 ## The contract (this is the whole point)
 
@@ -67,7 +68,9 @@ actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JS
 ## Try it
 
 ```sh
-cargo test                            # 90 tests (conformance + profile + trust + mcp)
+cargo test                            # 94 tests (conformance + profile + trust + mcp + authoring)
+cargo run -- scaffold --kind hook --lang python --id my-guard   # a runnable capability starter
+cargo run -- doctor                   # check interpreters + capability health
 cargo run -- mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'   # MCP→CLI bridge
 cargo run -- matrix                   # support grid across 10 harnesses
 cargo run -- check                    # per-capability installability

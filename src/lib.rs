@@ -3,7 +3,7 @@
 //! This crate deliberately has a small, binding-friendly API surface: the
 //! intent is that the same core is later exposed to Python/TypeScript via
 //! `uniffi`/`napi`, so hosts embed it rather than shelling out. For the spike,
-//! `oh-dispatch` (see `main.rs`) is the CLI face of the same functions.
+//! `oh` (see `main.rs`) is the CLI face of the same functions.
 
 pub mod adapters;
 pub mod api;
@@ -12,10 +12,12 @@ pub mod event;
 pub mod kind;
 pub mod kinds;
 pub mod manifest;
+pub mod matrix;
 pub mod mcp;
 pub mod model;
 pub mod profile;
 pub mod runtime;
+pub mod scaffold;
 pub mod sync;
 pub mod trust;
 

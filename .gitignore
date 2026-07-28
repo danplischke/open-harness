@@ -16,3 +16,6 @@ openharness.key
 bindings/node/target/
 bindings/node/*.node
 bindings/node/node_modules/
+
+# mdBook output
+docs/book/

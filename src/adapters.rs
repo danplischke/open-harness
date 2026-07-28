@@ -385,13 +385,7 @@ impl Harness {
                 }
             }
         }
-        let cmd = |cev: &NormEvent| {
-            format!(
-                "oh-dispatch run --harness {} --event {}",
-                self.id(),
-                cev.id()
-            )
-        };
+        let cmd = |cev: &NormEvent| format!("oh run --harness {} --event {}", self.id(), cev.id());
         let mut out = String::new();
         out.push_str(&format!(
             "# open-harness registration for capability `{capability_id}` on {}\n",
@@ -590,7 +584,7 @@ fn opencode_shim(targets: &[(String, NormEvent)], harness_id: &str) -> String {
          \x20 \"tool.execute.before\": async (input, output) => {{\n\
          \x20   const ev = EVENTS[\"tool.execute.before\"];\n\
          \x20   const payload = JSON.stringify({{ tool_name: input.tool, tool_input: input.args }});\n\
-         \x20   const r = spawnSync(\"oh-dispatch\", [\"run\",\"--harness\",\"{harness_id}\",\"--event\",ev], {{ input: payload }});\n\
+         \x20   const r = spawnSync(\"oh\", [\"run\",\"--harness\",\"{harness_id}\",\"--event\",ev], {{ input: payload }});\n\
          \x20   const decision = JSON.parse(r.stdout.toString() || '{{}}');\n\
          \x20   if (decision.decision === \"deny\") throw new Error(decision.reason || \"blocked by open-harness\");\n\
          \x20 }},\n\
@@ -611,7 +605,7 @@ fn pi_shim(targets: &[(String, NormEvent)], harness_id: &str) -> String {
          export default function (pi: any) {{\n\
          \x20 pi.on(\"tool_call\", async (event: any) => {{\n\
          \x20   const payload = JSON.stringify({{ tool_name: event.name, tool_input: event.args }});\n\
-         \x20   const r = spawnSync(\"oh-dispatch\", [\"run\",\"--harness\",\"{harness_id}\",\"--event\",\"{ev}\"], {{ input: payload }});\n\
+         \x20   const r = spawnSync(\"oh\", [\"run\",\"--harness\",\"{harness_id}\",\"--event\",\"{ev}\"], {{ input: payload }});\n\
          \x20   const decision = JSON.parse(r.stdout.toString() || \"{{}}\");\n\
          \x20   if (decision.decision === \"deny\") return {{ deny: true, reason: decision.reason }};\n\
          \x20 }});\n\

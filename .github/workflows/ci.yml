@@ -50,6 +50,27 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
 
+  # Docs (#18): the support matrix must be generated from the adapters (drift
+  # gate), and the mdBook site must build.
+  docs:
+    name: docs + matrix gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Regenerate the support matrix and check for drift
+        run: |
+          bash docs/gen-matrix.sh
+          git diff --exit-code docs/src/harness-matrix.md \
+            || (echo "::error::docs/src/harness-matrix.md is stale — run docs/gen-matrix.sh" && exit 1)
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: latest
+      - name: Build the docs site
+        run: mdbook build docs
+
   # Node addon (#14): build the napi native module and run the TS/JS example.
   # This proves the binding end-to-end; the cross-platform prebuilt-binary matrix
   # and npm publish are the remaining release-engineering piece.

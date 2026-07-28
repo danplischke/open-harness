@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BIN=./target/debug/oh-dispatch
+BIN=./target/debug/oh
 [ -x "$BIN" ] || cargo build
 
 SAFE='{"tool_name":"Bash","tool_input":{"command":"ls -la"}}'
