@@ -1,0 +1,23 @@
+# Standalone Node addon crate (#14). Kept separate from the root crate because a
+# napi cdylib references Node's C-API symbols (resolved at addon-load time) and
+# must not be linked into the `oh-dispatch` binary. Built on its own via
+# `build.sh`; the root `cargo build` never touches it.
+[package]
+name = "open-harness-node"
+version = "0.0.0-spike"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+name = "open_harness_node"
+crate-type = ["cdylib"]
+
+[dependencies]
+open-harness = { path = "../.." }
+napi = { version = "2", default-features = false, features = ["napi8"] }
+napi-derive = "2"
+serde_json = "1"
+
+[build-dependencies]
+napi-build = "2"

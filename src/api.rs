@@ -49,7 +49,7 @@ impl std::error::Error for ApiError {}
 
 /// One thing to install to realize a capability on a harness.
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PlanArtifact {
     /// `"file"` (path + contents) or `"registration"` (native config snippet in `contents`).
     pub kind: String,
@@ -59,7 +59,7 @@ pub struct PlanArtifact {
 
 /// The result of planning a capability for one harness.
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Plan {
     pub harness: String,
     /// `"clean"` | `"degraded"` | `"unsupported"`.
@@ -72,7 +72,7 @@ pub struct Plan {
 
 /// The result of running the hook dispatcher for one native event.
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DispatchResult {
     pub exit_code: i32,
     pub stdout: String,
@@ -188,6 +188,50 @@ pub fn validate_decision(decision_json: &str) -> Result<(), ApiError> {
 /// Negotiate a capability's declared protocol version against the dispatcher's.
 pub fn negotiate(capability_protocol: Option<String>) -> Result<(), ApiError> {
     crate::model::negotiate(capability_protocol.as_deref()).map_err(ApiError::Protocol)
+}
+
+/// The trust verdict for a capability directory, as flat data a host can act on.
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct VerifyResult {
+    /// Human-readable status, e.g. `"trusted (alice)"` / `"INVALID — tampered"`.
+    pub status: String,
+    /// A valid signature by a key in the trust store.
+    pub trusted: bool,
+    /// Passes when signatures are *not* required (Invalid never passes).
+    pub passes_lax: bool,
+    /// Passes under `--require-signed` (only Trusted).
+    pub passes_strict: bool,
+    /// The capability's declared permission manifest, summarized (empty if none).
+    pub permissions: String,
+}
+
+/// Verify a capability directory against an optional trust store (JSON string).
+pub fn verify(dir: &str, trust_json: Option<&str>) -> Result<VerifyResult, ApiError> {
+    let store = match trust_json {
+        Some(t) if !t.trim().is_empty() => {
+            crate::trust::TrustStore::from_json(t).map_err(ApiError::Json)?
+        }
+        _ => crate::trust::TrustStore::default(),
+    };
+    let path = std::path::Path::new(dir);
+    let v = crate::trust::verify(path, &store);
+    let permissions = crate::manifest::LoadedCapability::load(&path.join("capability.json"))
+        .map(|c| {
+            if c.manifest.permissions.is_empty() {
+                String::new()
+            } else {
+                c.manifest.permissions.summary()
+            }
+        })
+        .unwrap_or_default();
+    Ok(VerifyResult {
+        status: v.status(),
+        trusted: matches!(v, crate::trust::Verification::Trusted { .. }),
+        passes_lax: v.passes(false),
+        passes_strict: v.passes(true),
+        permissions,
+    })
 }
 
 // ---- internal helpers -----------------------------------------------------
@@ -307,5 +351,13 @@ mod ffi {
     #[uniffi::export]
     pub fn negotiate(capability_protocol: Option<String>) -> Result<(), ApiError> {
         super::negotiate(capability_protocol)
+    }
+
+    #[uniffi::export]
+    pub fn verify(
+        dir: String,
+        trust_json: Option<String>,
+    ) -> Result<super::VerifyResult, ApiError> {
+        super::verify(&dir, trust_json.as_deref())
     }
 }

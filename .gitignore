@@ -11,3 +11,8 @@ examples/open-harness.lock
 # signing keys (secret) — never commit
 *.key
 openharness.key
+
+# Node addon (bindings/node) build artifacts
+bindings/node/target/
+bindings/node/*.node
+bindings/node/node_modules/

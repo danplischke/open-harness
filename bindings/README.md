@@ -1,8 +1,10 @@
 # Language bindings
 
-The one Rust core is exposed to other languages via [uniffi](https://mozilla.github.io/uniffi-rs/).
-Bindings are **feature-gated** (`--features ffi`) so the default build and the CLI
-never depend on uniffi.
+The one Rust core is exposed to other languages: **Python** via
+[uniffi](https://mozilla.github.io/uniffi-rs/) and **Node/TypeScript** via
+[napi-rs](https://napi.rs/). Both keep the default `cargo build` and the CLI
+dependency-free — Python is feature-gated (`--features ffi`), and the Node addon
+is a separate crate (`bindings/node/`) that the root build never touches.
 
 ## Python (uniffi)
 
@@ -25,5 +27,23 @@ Arbitrary data (manifests, native payloads, decisions) crosses as JSON strings.
 
 ## TypeScript / Node (napi)
 
-Planned — tracked in the issue tracker. The same `api` facade is the target
-surface; a `napi-rs` (or WASM) binding will mirror it.
+```sh
+bash bindings/node/build.sh
+```
+
+Builds the `napi-rs` native addon (`open-harness.<platform>-<arch>.node`) and runs
+`bindings/node/example.mjs`. See [`bindings/node/README.md`](./node/README.md).
+
+Native, **not** WASM: the core is filesystem- and subprocess-oriented (`dispatch`
+spawns capabilities; `plan`/`verify` read files), none of which works in
+`wasm32-unknown-unknown`. This is also where the harness plugin shims live — an
+**OpenCode / Pi plugin can host the core in-process** (see
+`bindings/node/opencode-plugin.example.mjs`) instead of shelling out to the
+`oh-dispatch` CLI. The surface mirrors `open_harness::api` (`harnesses`, `kinds`,
+`protocolVersion`, `plan`, `planAll`, `dispatch`, `dispatchWithLimits`,
+`validateDecision`, `verify`); complex results cross as JSON. Types in
+`index.d.ts`.
+
+Remaining for #14: publishing to npm with prebuilt binaries for the full
+platform matrix (needs a token + the release build matrix; `build.sh` and the CI
+`node-addon` job are the scaffolding). Verified on Linux today.

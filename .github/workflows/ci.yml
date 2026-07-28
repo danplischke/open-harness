@@ -49,3 +49,25 @@ jobs:
         run: cargo fmt --check
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+
+  # Node addon (#14): build the napi native module and run the TS/JS example.
+  # This proves the binding end-to-end; the cross-platform prebuilt-binary matrix
+  # and npm publish are the remaining release-engineering piece.
+  node-addon:
+    name: node addon
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Set up Python (for the dispatched capabilities)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build addon + run example
+        working-directory: bindings/node
+        run: bash build.sh

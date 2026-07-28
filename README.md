@@ -185,15 +185,20 @@ integrity verification must always be available, so it is not feature-gated.
 
 ## Embedding
 
-The core is a Rust library (`open_harness::api`) exposed to other languages via
-uniffi — feature-gated so the default build never depends on it. Python works
-today:
+The core is a Rust library (`open_harness::api`) exposed to **Python** (uniffi)
+and **Node/TypeScript** (napi-rs). Both keep the default build dependency-free.
 
 ```sh
-bash bindings/build.sh    # build the FFI cdylib, generate + run the Python example
+bash bindings/build.sh         # Python: build the FFI cdylib, generate + run example.py
+bash bindings/node/build.sh    # Node:   build the napi addon + run example.mjs
 ```
 
-See [`bindings/README.md`](./bindings/README.md). TypeScript/`napi` is planned.
+The Node addon is **native, not WASM** — the core spawns capabilities and reads
+files, which WASM can't do — and it's the vehicle for **hosting the core
+in-process inside an OpenCode/Pi plugin** rather than shelling out (see
+`bindings/node/opencode-plugin.example.mjs`). See
+[`bindings/README.md`](./bindings/README.md). Publishing the npm package with a
+prebuilt-binary matrix is the remaining #14 follow-up.
 
 ## Scope & honesty
 

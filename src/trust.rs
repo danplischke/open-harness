@@ -280,6 +280,10 @@ pub struct TrustStore {
 }
 
 impl TrustStore {
+    pub fn from_json(text: &str) -> Result<TrustStore, String> {
+        serde_json::from_str(text).map_err(|e| format!("invalid trust store: {e}"))
+    }
+
     pub fn load(path: &Path) -> Result<TrustStore, String> {
         match std::fs::read_to_string(path) {
             Ok(t) => serde_json::from_str(&t).map_err(|e| format!("invalid trust store: {e}")),

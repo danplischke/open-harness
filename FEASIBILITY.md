@@ -193,13 +193,16 @@ taxonomy, fail policy — #3), all six capability kinds landed (#6–#11), execu
 went cross-platform with a Windows CI matrix (#4), Codex/Cursor were validated
 against docs (#5), the sync/composition layer shipped (#16), **profiles +
 sources + a resolved lockfile** landed (#15 — local & git personal-repo sync,
-pinned + reproducible), and a **trust & signing model** landed (#17 — ed25519
+pinned + reproducible), a **trust & signing model** landed (#17 — ed25519
 signatures over a sha256 content digest, a trust store, a permission manifest,
-and a written threat model in `SECURITY.md`). Still deferred: capability
-**sandboxing** and process-group kill; **registry** sources + a registry root of
-trust and key **revocation**; transitive **dependency** resolution; the
-**TypeScript/napi** binding; the MCP→CLI bridge runtime (#19); and a **live**
-(not doc-derived) capture against a real Codex/Cursor install once available.
+and a written threat model in `SECURITY.md`), and **Node/TypeScript bindings**
+landed (#14 — a napi-rs native addon in `bindings/node/`, verified on Linux,
+that lets an OpenCode/Pi plugin host the core in-process). Still deferred:
+capability **sandboxing** and process-group kill; **registry** sources + a
+registry root of trust and key **revocation**; transitive **dependency**
+resolution; **npm publish + prebuilt binaries** for the Node addon's full
+platform matrix; the MCP→CLI bridge runtime (#19); and a **live** (not
+doc-derived) capture against a real Codex/Cursor install once available.
 
 ---
 
