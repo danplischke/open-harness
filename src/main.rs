@@ -46,7 +46,7 @@ fn main() {
         "remove" => cmd_remove(&rest),
         _ => {
             eprintln!(
-                "oh <init|scaffold|add|remove|doctor|run|emit|keygen|sign|verify|trust|mcp|resolve|sync|check|matrix> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--out FILE] [--require-signed] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]...) [--tool NAME] [--json '<args>']"
+                "oh <init|scaffold|add|remove|doctor|run|emit|keygen|sign|verify|trust|mcp|resolve|sync|check|matrix> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--out FILE] [--require-signed] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]...) [--tool NAME] [--json '<args>']"
             );
             exit(2);
         }
@@ -83,6 +83,7 @@ struct Opts {
     // authoring (#18)
     scaffold_kind: Option<String>,
     scaffold_lang: Option<String>,
+    scaffold_project: bool,
     local: Option<String>,
     git: Option<String>,
 }
@@ -115,6 +116,7 @@ fn parse_opts(rest: &[String]) -> Opts {
         json_args: None,
         scaffold_kind: None,
         scaffold_lang: None,
+        scaffold_project: false,
         local: None,
         git: None,
     };
@@ -200,6 +202,10 @@ fn parse_opts(rest: &[String]) -> Opts {
             "--lang" => {
                 o.scaffold_lang = rest.get(i + 1).cloned();
                 i += 2;
+            }
+            "--project" => {
+                o.scaffold_project = true;
+                i += 1;
             }
             "--local" => {
                 o.local = rest.get(i + 1).cloned();
@@ -882,6 +888,34 @@ fn provenance(harnesses: &[String], sources: &[String]) -> String {
 
 fn cmd_scaffold(rest: &[String]) {
     let o = parse_opts(rest);
+    let Some(id) = o.id.clone() else {
+        eprintln!("scaffold requires --id <capability-id>");
+        exit(2);
+    };
+    let into = o
+        .into
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("capabilities"));
+
+    // `--project`: a TypeScript capability as a full npm package (uses
+    // @open-harness/node in-process for typed authoring + a dev-time test).
+    if o.scaffold_project {
+        let files = scaffold::scaffold_ts_project(&id, &into).unwrap_or_else(|e| {
+            eprintln!("scaffold failed: {e}");
+            exit(1);
+        });
+        println!("scaffolded TypeScript capability package '{id}':");
+        for f in &files {
+            println!("  + {f}");
+        }
+        println!("\ndevelop it:");
+        println!("  cd {}", into.join(&id).display());
+        println!("  npm install                 # typescript + @types/node");
+        println!("  npm link @open-harness/node # types + in-process test (see README)");
+        println!("  npm run build && npm test");
+        return;
+    }
+
     let kind_str = o.scaffold_kind.as_deref().unwrap_or("hook");
     let Some(kind) = KindId::parse(kind_str) else {
         eprintln!("unknown --kind '{kind_str}' (hook|skill|rule|command|tool|permission)");
@@ -892,14 +926,6 @@ fn cmd_scaffold(rest: &[String]) {
         eprintln!("unknown --lang '{lang_str}' (python|typescript|bash)");
         exit(2);
     };
-    let Some(id) = o.id.clone() else {
-        eprintln!("scaffold requires --id <capability-id>");
-        exit(2);
-    };
-    let into = o
-        .into
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("capabilities"));
 
     let files = scaffold::scaffold(kind, lang, &id, &into).unwrap_or_else(|e| {
         eprintln!("scaffold failed: {e}");

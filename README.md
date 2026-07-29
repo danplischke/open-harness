@@ -38,7 +38,7 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 | `capabilities/audit-note/` | A real **Node/TS** non-blocking capability |
 | `src/scaffold.rs` + `src/matrix.rs` | `oh scaffold` capability starters; adapter-generated support matrix |
 | `tests/conformance.rs` | 70 tests: harness contracts, protocol, kind plans, composition, runtime, API |
-| `tests/{profile,trust,mcp,authoring}.rs` | Sourcing (8), signing (9), MCP bridge (3), scaffold/matrix (4) |
+| `tests/{profile,trust,mcp,authoring}.rs` | Sourcing (8), signing (9), MCP bridge (3), scaffold/matrix (5) |
 | `docs/` | mdBook site (concepts, authoring guide, generated matrix); `docs/gen-matrix.sh` |
 | `.github/workflows/ci.yml` | CI: test on Linux/macOS/Windows; fmt+clippy; docs build + matrix drift gate |
 
@@ -68,8 +68,9 @@ actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JS
 ## Try it
 
 ```sh
-cargo test                            # 94 tests (conformance + profile + trust + mcp + authoring)
+cargo test                            # 95 tests (conformance + profile + trust + mcp + authoring)
 cargo run -- scaffold --kind hook --lang python --id my-guard   # a runnable capability starter
+cargo run -- scaffold --project --id my-cap    # a TypeScript capability as an npm package
 cargo run -- doctor                   # check interpreters + capability health
 cargo run -- mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'   # MCP→CLI bridge
 cargo run -- matrix                   # support grid across 10 harnesses

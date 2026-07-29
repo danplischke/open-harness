@@ -46,6 +46,25 @@ JSON and are parsed for you; the "arbitrary data" inputs (a manifest, a native
 payload, a decision, a trust store) stay JSON strings — the same string boundary
 the Python (uniffi) binding uses. Types are in `index.d.ts`.
 
+## Authoring a capability in TypeScript
+
+`index.d.ts` also exports the **authoring contract** — `CanonicalPayload`,
+`Decision`, `NormEvent`, `ToolInfo`, `Verdict` — so a hook written in TypeScript
+can type its stdin/stdout against the frozen `hook@1` protocol:
+
+```ts
+import type { CanonicalPayload, Decision } from "@open-harness/node";
+
+const decision: Decision = { decision: "allow" };
+```
+
+`oh scaffold --project --id my-cap` generates a ready-to-run npm package around
+exactly this: a typed `src/hook.ts` plus a `test.mjs` that dispatches the built
+capability through the core **in-process** (via this addon) — see the
+[authoring guide](../../docs/src/authoring.md). The addon is a **dev/test**
+dependency there; the built capability itself is plain Node with no runtime
+dependency on it.
+
 ## Status
 
 Verified on Linux in this repo. Publishing to npm and prebuilt binaries for

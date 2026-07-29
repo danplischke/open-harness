@@ -78,6 +78,68 @@ fn scaffold_supports_each_language_and_generative_kinds() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `oh scaffold --project` writes a TypeScript **npm package**: a valid
+/// capability manifest plus the `package.json` / `tsconfig.json` / `src/hook.ts`
+/// / `test.mjs` scaffolding that drives it through the core in-process via
+/// `@open-harness/node`.
+#[test]
+fn scaffold_project_produces_a_typescript_npm_package() {
+    let root = tmp("project");
+    let files = scaffold::scaffold_ts_project("guard", &root).unwrap();
+    for expected in [
+        "package.json",
+        "tsconfig.json",
+        "capability.json",
+        "src/hook.ts",
+        "test.mjs",
+        "README.md",
+        ".gitignore",
+    ] {
+        assert!(
+            files.iter().any(|f| f.ends_with(expected)),
+            "scaffold writes {expected}"
+        );
+    }
+
+    // The manifest is a real, loadable Hook that plans cleanly on a harness.
+    let cap = LoadedCapability::load(&root.join("guard/capability.json")).unwrap();
+    assert_eq!(cap.manifest.kind, KindId::Hook);
+    let run = cap.manifest.run.as_ref().expect("has a run entrypoint");
+    assert_eq!(run.command, "node");
+    assert_eq!(run.args, vec!["dist/hook.js".to_string()]);
+    assert!(installable(
+        &kind_impl(cap.manifest.kind).plan(&cap, Harness::Claude)
+    ));
+
+    // package.json is valid and does NOT declare the unpublished addon as a dep
+    // (that would 404 on `npm install`); the toolchain deps are present.
+    let pkg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("guard/package.json")).unwrap())
+            .unwrap();
+    assert_eq!(pkg["name"], "guard");
+    assert_eq!(pkg["type"], "module");
+    assert!(pkg["scripts"]["build"].is_string() && pkg["scripts"]["test"].is_string());
+    let dev = &pkg["devDependencies"];
+    assert!(dev.get("typescript").is_some(), "toolchain dep present");
+    assert!(
+        dev.get("@open-harness/node").is_none(),
+        "the unpublished addon must not be a hard dependency"
+    );
+
+    // tsconfig.json parses; the capability source imports the addon's types.
+    serde_json::from_str::<serde_json::Value>(
+        &std::fs::read_to_string(root.join("guard/tsconfig.json")).unwrap(),
+    )
+    .expect("tsconfig is valid JSON");
+    let hook = std::fs::read_to_string(root.join("guard/src/hook.ts")).unwrap();
+    assert!(hook.contains("@open-harness/node") && hook.contains("Decision"));
+
+    // Refuses to clobber an existing package.
+    assert!(scaffold::scaffold_ts_project("guard", &root).is_err());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn scaffold_refuses_to_overwrite_and_rejects_bad_ids() {
     let root = tmp("guard-rails");

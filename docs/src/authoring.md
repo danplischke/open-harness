@@ -14,6 +14,31 @@ oh scaffold --kind skill --id commit-style
 Kinds: `hook`, `skill`, `rule`, `command`, `tool`, `permission`. `--lang` applies
 to hooks (the only kind with a runtime).
 
+### A TypeScript npm package (`--project`)
+
+For a full TypeScript authoring loop — typed against the contract and testable
+before you install anywhere — scaffold a hook as an **npm package**:
+
+```sh
+oh scaffold --project --id my-cap
+cd capabilities/my-cap
+npm install                 # typescript + @types/node
+npm link @open-harness/node # types + the in-process test (see below)
+npm run build               # tsc → dist/hook.js
+npm test                    # runs THIS capability through the core, in-process
+```
+
+The package writes `src/hook.ts` typed against `CanonicalPayload` / `Decision`
+from `@open-harness/node`, and a `test.mjs` that dispatches the built capability
+through the core **in-process** via the native addon — no separate harness, no
+install step, just `npm test`.
+
+`@open-harness/node` is used for the **types and the dev-time test only** — the
+built capability (`capability.json` + `dist/hook.js`) is plain Node with no
+runtime dependency on it. Because the addon isn't published to npm yet, the
+package doesn't list it as a dependency (that would 404 on `npm install`); you
+supply it with `npm link` (`build.sh` in `bindings/node`, then `npm link` there).
+
 ## The hook contract
 
 A hook is *any executable in any language* that reads a `CanonicalPayload` as
