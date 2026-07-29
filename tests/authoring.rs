@@ -60,13 +60,35 @@ fn scaffold_hook_produces_a_runnable_capability() {
 #[test]
 fn scaffold_supports_each_language_and_generative_kinds() {
     let root = tmp("langs");
-    for lang in [Lang::Python, Lang::TypeScript, Lang::Bash] {
+    // Python and Node are peers (plain scripts); TypeScript emits a typed
+    // `hook.ts` that Node runs directly via type stripping — each binds the
+    // right entrypoint + interpreter.
+    for (lang, script, command) in [
+        (Lang::Python, "hook.py", "python3"),
+        (Lang::Node, "hook.mjs", "node"),
+        (Lang::TypeScript, "hook.ts", "node"),
+        (Lang::Bash, "hook.sh", "sh"),
+    ] {
         let id = format!("h-{lang:?}").to_lowercase();
-        scaffold::scaffold(KindId::Hook, lang, &id, &root).unwrap();
+        let files = scaffold::scaffold(KindId::Hook, lang, &id, &root).unwrap();
+        assert!(
+            files.iter().any(|f| f.ends_with(script)),
+            "{id} writes {script}"
+        );
         let cap = LoadedCapability::load(&root.join(&id).join("capability.json")).unwrap();
         assert_eq!(cap.manifest.kind, KindId::Hook);
-        assert!(cap.manifest.run.is_some(), "{id} has a run entrypoint");
+        let run = cap.manifest.run.as_ref().expect("has a run entrypoint");
+        assert_eq!(run.command, command, "{id} runs via {command}");
+        assert_eq!(run.args, vec![script.to_string()]);
     }
+
+    // `--lang` aliases resolve node/js to Node and typescript/ts to TypeScript.
+    assert_eq!(Lang::parse("js"), Some(Lang::Node));
+    assert_eq!(Lang::parse("node"), Some(Lang::Node));
+    assert_eq!(Lang::parse("ts"), Some(Lang::TypeScript));
+    assert_eq!(Lang::parse("typescript"), Some(Lang::TypeScript));
+    assert!(Lang::parse("cobol").is_none());
+
     // A generative kind scaffolds to a valid, installable manifest.
     scaffold::scaffold(KindId::Permission, Lang::Python, "policy", &root).unwrap();
     let cap = LoadedCapability::load(&root.join("policy/capability.json")).unwrap();

@@ -6,13 +6,30 @@ The fastest start is `oh scaffold`, which writes a ready-to-edit capability
 directory (a **hook** scaffold is runnable immediately):
 
 ```sh
-oh scaffold --kind hook --lang python --id my-guard      # or --lang typescript | bash
+oh scaffold --kind hook --lang python --id my-guard      # or --lang node | typescript | bash
 oh scaffold --kind permission --id safe-shell
 oh scaffold --kind skill --id commit-style
 ```
 
 Kinds: `hook`, `skill`, `rule`, `command`, `tool`, `permission`. `--lang` applies
 to hooks (the only kind with a runtime).
+
+### Hook languages
+
+Because a hook is just *an executable that reads stdin and writes stdout*, the
+language is a per-capability choice — they are all peers:
+
+| `--lang` | Writes | Runs via | Notes |
+|---|---|---|---|
+| `python` | `hook.py` | `python3 hook.py` | no deps |
+| `node` (`js`) | `hook.mjs` | `node hook.mjs` | plain JavaScript, no deps |
+| `typescript` (`ts`) | `hook.ts` | `node hook.ts` | **typed**, run directly via Node's type stripping (Node ≥ 22.18 / 23.6) — no build step, no runtime dependency |
+| `bash` (`sh`) | `hook.sh` | `sh hook.sh` | no deps |
+
+The `typescript` starter carries a small inline subset of the `hook@1` types so
+the file is self-contained. For the full canonical `CanonicalPayload` / `Decision`
+types from `@open-harness/node` plus an in-process test, scaffold a package with
+[`--project`](#a-typescript-npm-package---project) instead.
 
 ### A TypeScript npm package (`--project`)
 

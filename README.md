@@ -70,6 +70,7 @@ actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JS
 ```sh
 cargo test                            # 95 tests (conformance + profile + trust + mcp + authoring)
 cargo run -- scaffold --kind hook --lang python --id my-guard   # a runnable capability starter
+cargo run -- scaffold --kind hook --lang typescript --id ts-guard   # typed hook.ts, run via node (no build)
 cargo run -- scaffold --project --id my-cap    # a TypeScript capability as an npm package
 cargo run -- doctor                   # check interpreters + capability health
 cargo run -- mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'   # MCP→CLI bridge
@@ -88,7 +89,8 @@ cargo run -- sync --into /tmp/proj --uninstall # clean removal (managed files on
 Capabilities declare a `kind`; each kind plugs into the same `Kind` trait
 (`src/kind.rs`) and adding one needs no change to the dispatcher core.
 
-- **hook** (runtime) — the stdio contract above, across 10 harnesses.
+- **hook** (runtime) — the stdio contract above, across 10 harnesses; authored in
+  Python, Node, TypeScript (typed, run directly via Node type-stripping), or bash.
 - **skill** (generative) — unifies `SKILL.md` for Claude / Codex / Cursor / Windsurf.
 - **rule** (generative) — one glob-scoped rule → each harness's native spelling
   (Cursor `alwaysApply`+`globs`, Copilot `applyTo`, Windsurf `trigger`, Cline /

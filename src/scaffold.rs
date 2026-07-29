@@ -14,6 +14,10 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
     Python,
+    /// Plain Node/JavaScript (`hook.mjs`) — the direct peer to Python.
+    Node,
+    /// TypeScript (`hook.ts`) run through Node's built-in type stripping — typed
+    /// authoring with no build step and no runtime dependency.
     TypeScript,
     Bash,
 }
@@ -22,7 +26,8 @@ impl Lang {
     pub fn parse(s: &str) -> Option<Lang> {
         Some(match s {
             "python" | "py" => Lang::Python,
-            "typescript" | "ts" | "node" | "js" => Lang::TypeScript,
+            "node" | "js" | "javascript" | "mjs" => Lang::Node,
+            "typescript" | "ts" => Lang::TypeScript,
             "bash" | "sh" | "shell" => Lang::Bash,
             _ => return None,
         })
@@ -209,10 +214,15 @@ fn hook_files(lang: Lang, id: &str) -> Vec<(String, String)> {
             r#""run": { "command": "python3", "args": ["hook.py"] }"#,
             PY_HOOK,
         ),
-        Lang::TypeScript => (
+        Lang::Node => (
             "hook.mjs",
             r#""run": { "command": "node", "args": ["hook.mjs"] }"#,
-            TS_HOOK,
+            NODE_HOOK,
+        ),
+        Lang::TypeScript => (
+            "hook.ts",
+            r#""run": { "command": "node", "args": ["hook.ts"] }"#,
+            TS_TYPED_HOOK,
         ),
         Lang::Bash => (
             "hook.sh",
@@ -271,9 +281,9 @@ if __name__ == "__main__":
     main()
 "#;
 
-const TS_HOOK: &str = r#"#!/usr/bin/env node
-// An open-harness hook capability (scaffolded).
-// CanonicalPayload in on stdin, Decision out on stdout.
+const NODE_HOOK: &str = r#"#!/usr/bin/env node
+// An open-harness hook capability (scaffolded, plain Node/JavaScript).
+// CanonicalPayload in on stdin, Decision out on stdout. No dependencies.
 let raw = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (d) => (raw += d));
@@ -291,6 +301,63 @@ process.stdin.on("end", () => {
   // {"decision":"deny","reason":"..."} blocks; {"decision":"allow"} permits.
   process.stdout.write(JSON.stringify({ decision: "allow" }));
 });
+"#;
+
+// A TypeScript hook run *directly* by Node (>= 22.18 / 23.6) via built-in type
+// stripping — `node hook.ts`, no compile step, no dependencies. The types are a
+// small inline subset of the `hook@1` contract so the file is self-contained;
+// for the full canonical types (`CanonicalPayload` / `Decision`) plus an
+// in-process test, scaffold an npm package with `oh scaffold --project`.
+//
+// Type stripping runs *erasable* TypeScript only: keep to type annotations,
+// `interface` / `type`, and `import type` — no enums, no `namespace`.
+const TS_TYPED_HOOK: &str = r#"#!/usr/bin/env node
+// An open-harness hook capability, authored in TypeScript.
+// Run it with `node hook.ts` — Node strips the types; there is no build step and
+// no runtime dependency. CanonicalPayload in on stdin, Decision out on stdout.
+
+interface ToolInfo {
+  name: string;
+  input: unknown;
+}
+interface CanonicalPayload {
+  protocol: string;
+  harness: string;
+  event: { phase: string; subject: string; tool_class?: string };
+  blocking: boolean;
+  tool?: ToolInfo;
+  prompt?: string;
+  cwd?: string;
+}
+type Verdict = "allow" | "deny" | "modify";
+interface Decision {
+  decision: Verdict;
+  reason?: string;
+  context_append?: string;
+}
+
+async function main(): Promise<void> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  const raw = Buffer.concat(chunks).toString("utf8");
+
+  let payload: Partial<CanonicalPayload> = {};
+  try {
+    payload = raw.trim() ? (JSON.parse(raw) as CanonicalPayload) : {};
+  } catch {
+    // Unparseable input: don't veto here (the dispatcher owns error policy).
+  }
+
+  const tool = payload.tool;
+  void tool; // TODO: inspect tool?.name / tool?.input and decide.
+
+  // { decision: "deny", reason: "..." } blocks a blocking event;
+  // { decision: "allow", context_append: "..." } adds model context.
+  const decision: Decision = { decision: "allow" };
+  process.stdout.write(JSON.stringify(decision));
+}
+
+main();
 "#;
 
 const BASH_HOOK: &str = r#"#!/usr/bin/env sh

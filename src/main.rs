@@ -923,7 +923,7 @@ fn cmd_scaffold(rest: &[String]) {
     };
     let lang_str = o.scaffold_lang.as_deref().unwrap_or("python");
     let Some(lang) = Lang::parse(lang_str) else {
-        eprintln!("unknown --lang '{lang_str}' (python|typescript|bash)");
+        eprintln!("unknown --lang '{lang_str}' (python|node|typescript|bash)");
         exit(2);
     };
 
