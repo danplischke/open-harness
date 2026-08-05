@@ -254,8 +254,9 @@ fn server_from_capability_reads_an_http_transport() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `https` is refused honestly (no TLS), pointing at native config — never a
-/// silent failure or a hang.
+/// Without the `mcp-http-tls` feature, `https` is refused honestly (no TLS),
+/// pointing at native config — never a silent failure or a hang.
+#[cfg(not(feature = "mcp-http-tls"))]
 #[test]
 fn http_bridge_refuses_https_with_a_clear_message() {
     let err = mcp::Client::connect_http(&HttpServerSpec {
@@ -267,5 +268,22 @@ fn http_bridge_refuses_https_with_a_clear_message() {
     assert!(
         err.contains("https") && (err.contains("native") || err.contains("proxy")),
         "the refusal should be actionable, got: {err}"
+    );
+}
+
+/// With the feature on, `https` routes to the TLS transport — a closed port
+/// yields a connect/TLS error, NOT the "no TLS in this build" refusal.
+#[cfg(feature = "mcp-http-tls")]
+#[test]
+fn https_routes_to_the_tls_transport_when_enabled() {
+    let err = mcp::Client::connect_http(&HttpServerSpec {
+        url: "https://127.0.0.1:1/mcp".to_string(), // port 1: nothing listens
+        headers: Vec::new(),
+    })
+    .err()
+    .expect("connecting to a closed port fails");
+    assert!(
+        !err.contains("no TLS") && !err.contains("Rebuild"),
+        "https must reach the TLS transport, not the no-TLS refusal, got: {err}"
     );
 }

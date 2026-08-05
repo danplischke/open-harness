@@ -116,3 +116,19 @@ jobs:
         run: cargo build --bin oh
       - name: Run the end-to-end walkthrough
         run: bash examples/walkthrough.sh
+
+  # The optional TLS feature for the MCP bridge (#25) must build, lint, and test
+  # clean — it is off by default, so it needs its own job to stay green.
+  tls-feature:
+    name: mcp-http-tls feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: clippy (mcp-http-tls)
+        run: cargo clippy --features mcp-http-tls --all-targets -- -D warnings
+      - name: test (mcp-http-tls)
+        run: cargo test --features mcp-http-tls

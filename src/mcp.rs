@@ -15,10 +15,12 @@
 //!   - **streamable-HTTP** (#20): one `POST` per request to an HTTP endpoint,
 //!     parsing either an `application/json` reply or a `text/event-stream` (SSE)
 //!     one, threading the `Mcp-Session-Id` header. Hand-rolled over `TcpStream`
-//!     to keep the crate dependency-free (no HTTP/TLS crate) — so it speaks
-//!     `http://` only. An `https://` endpoint is **honestly refused** with a
-//!     pointer to native MCP config (which `oh emit`/`oh sync` already generate)
-//!     or a local http proxy; TLS is a follow-up.
+//!     to keep the default build dependency-free. `http://` needs no dependency;
+//!     `https://` uses the optional **`mcp-http-tls`** feature (rustls, #25) —
+//!     without it, an `https` endpoint is **honestly refused** with a pointer to
+//!     native MCP config (`oh emit`/`oh sync`) or a local http proxy. With TLS
+//!     on, `OPEN_HARNESS_CA_FILE` adds a private/corporate CA to the Mozilla
+//!     roots.
 
 use crate::manifest::{LoadedCapability, RunSpec};
 use serde_json::{json, Value};
@@ -528,9 +530,11 @@ fn parse_sse(body: &str) -> Vec<Value> {
     messages
 }
 
-/// A tiny HTTP/1.1 `POST` over `TcpStream` — enough for streamable-HTTP MCP, no
-/// dependency. `https` is refused honestly (no TLS). Uses `Connection: close` so
-/// the body is delimited by EOF (a per-request response stream, per the spec).
+/// A tiny HTTP/1.1 `POST` — enough for streamable-HTTP MCP, hand-rolled over
+/// `TcpStream`. `http://` needs no dependency; `https://` uses the optional
+/// `mcp-http-tls` feature (rustls), and without it is refused honestly. Uses
+/// `Connection: close` so the body is delimited by EOF (a per-request response
+/// stream, per the spec).
 fn http_post(
     url: &str,
     body: &str,
@@ -538,29 +542,21 @@ fn http_post(
     timeout: Duration,
 ) -> Result<HttpResponse, String> {
     let (scheme, host, port, path) = parse_url(url)?;
-    if scheme == "https" {
-        return Err(format!(
-            "the MCP→CLI bridge speaks stdio and http:// streamable-HTTP, not https ({url}). \
-             Install this server as native MCP config (`oh emit`/`oh sync`) or front it with a \
-             local http proxy."
-        ));
-    }
-    if scheme != "http" {
-        return Err(format!(
-            "unsupported MCP URL scheme '{scheme}://' (want http://)"
-        ));
-    }
+    let request = build_request(&host, &path, body, extra_headers);
+    let raw = match scheme.as_str() {
+        "http" => send_plain(&host, port, request.as_bytes(), timeout)?,
+        "https" => send_tls(&host, port, request.as_bytes(), timeout)?,
+        other => {
+            return Err(format!(
+                "unsupported MCP URL scheme '{other}://' (want http/https)"
+            ))
+        }
+    };
+    parse_http_response(&raw)
+}
 
-    let addr = (host.as_str(), port)
-        .to_socket_addrs()
-        .map_err(|e| format!("resolve {host}:{port}: {e}"))?
-        .next()
-        .ok_or_else(|| format!("no address for {host}:{port}"))?;
-    let mut stream =
-        TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect {addr}: {e}"))?;
-    stream.set_read_timeout(Some(timeout)).ok();
-    stream.set_write_timeout(Some(timeout)).ok();
-
+/// Build the raw HTTP/1.1 request bytes (shared by the plain + TLS transports).
+fn build_request(host: &str, path: &str, body: &str, extra_headers: &[(String, String)]) -> String {
     let mut req = String::new();
     req.push_str(&format!("POST {path} HTTP/1.1\r\n"));
     req.push_str(&format!("Host: {host}\r\n"));
@@ -572,17 +568,142 @@ fn http_post(
     }
     req.push_str("\r\n");
     req.push_str(body);
+    req
+}
 
+/// Connect a `TcpStream` to `host:port` with the timeout applied to connect,
+/// read, and write.
+fn connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, String> {
+    let addr = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("resolve {host}:{port}: {e}"))?
+        .next()
+        .ok_or_else(|| format!("no address for {host}:{port}"))?;
+    let stream =
+        TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect {addr}: {e}"))?;
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
+    Ok(stream)
+}
+
+/// Plain-HTTP transport: write the request, read the response to EOF.
+fn send_plain(host: &str, port: u16, request: &[u8], timeout: Duration) -> Result<Vec<u8>, String> {
+    let mut stream = connect(host, port, timeout)?;
     stream
-        .write_all(req.as_bytes())
+        .write_all(request)
         .and_then(|_| stream.flush())
         .map_err(|e| format!("write to MCP server: {e}"))?;
-
     let mut raw = Vec::new();
     stream
         .read_to_end(&mut raw)
         .map_err(|e| format!("read from MCP server: {e}"))?;
-    parse_http_response(&raw)
+    Ok(raw)
+}
+
+/// TLS transport (`https`), gated on `mcp-http-tls` (rustls). Trusts the Mozilla
+/// root set plus, if `OPEN_HARNESS_CA_FILE` points to a PEM bundle, that CA too
+/// (for a private/corporate CA or a test server).
+#[cfg(feature = "mcp-http-tls")]
+fn send_tls(host: &str, port: u16, request: &[u8], timeout: Duration) -> Result<Vec<u8>, String> {
+    use std::sync::Arc;
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    if let Ok(ca_path) = std::env::var("OPEN_HARNESS_CA_FILE") {
+        let pem = std::fs::read(&ca_path).map_err(|e| format!("read CA {ca_path}: {e}"))?;
+        for cert in rustls_pemfile_certs(&pem) {
+            let _ = roots.add(cert);
+        }
+    }
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|_| format!("invalid TLS server name '{host}'"))?;
+    let mut conn = rustls::ClientConnection::new(Arc::new(config), server_name)
+        .map_err(|e| format!("tls setup: {e}"))?;
+    let mut sock = connect(host, port, timeout)?;
+    let mut tls = rustls::Stream::new(&mut conn, &mut sock);
+
+    tls.write_all(request)
+        .and_then(|_| tls.flush())
+        .map_err(|e| format!("tls write to MCP server: {e}"))?;
+    let mut raw = Vec::new();
+    match tls.read_to_end(&mut raw) {
+        Ok(_) => Ok(raw),
+        // A server that closes the TLS session ungracefully after the response
+        // still delivered a complete body; surface a hard failure only if empty.
+        Err(_) if !raw.is_empty() => Ok(raw),
+        Err(e) => Err(format!("tls read from MCP server: {e}")),
+    }
+}
+
+#[cfg(not(feature = "mcp-http-tls"))]
+fn send_tls(
+    host: &str,
+    _port: u16,
+    _request: &[u8],
+    _timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    Err(format!(
+        "this build has no TLS: the MCP→CLI bridge speaks stdio and http:// (not https, for {host}). \
+         Rebuild with `--features mcp-http-tls`, install the server as native MCP config \
+         (`oh emit`/`oh sync`), or front it with a local http proxy."
+    ))
+}
+
+/// Minimal PEM certificate extractor (avoids a `rustls-pemfile` dependency):
+/// pull each `-----BEGIN CERTIFICATE-----` block and base64-decode it.
+#[cfg(feature = "mcp-http-tls")]
+fn rustls_pemfile_certs(pem: &[u8]) -> Vec<rustls::pki_types::CertificateDer<'static>> {
+    let text = String::from_utf8_lossy(pem);
+    let mut out = Vec::new();
+    let mut in_cert = false;
+    let mut b64 = String::new();
+    for line in text.lines() {
+        if line.contains("BEGIN CERTIFICATE") {
+            in_cert = true;
+            b64.clear();
+        } else if line.contains("END CERTIFICATE") {
+            if let Some(der) = base64_decode(&b64) {
+                out.push(rustls::pki_types::CertificateDer::from(der));
+            }
+            in_cert = false;
+        } else if in_cert {
+            b64.push_str(line.trim());
+        }
+    }
+    out
+}
+
+/// Standard base64 decode (no external crate), for PEM certificate bodies.
+#[cfg(feature = "mcp-http-tls")]
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::new();
+    let mut acc = 0u32;
+    let mut bits = 0;
+    for &c in s.as_bytes() {
+        if c == b'=' || c.is_ascii_whitespace() {
+            continue;
+        }
+        acc = (acc << 6) | val(c)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Split a `scheme://host[:port][/path]` URL. Path defaults to `/`.

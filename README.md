@@ -28,7 +28,7 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 | `src/adapters.rs` | 10 harness adapters: event mapping, deny signal, registration format |
 | `src/dispatch.rs` | Single-entrypoint dispatcher: concurrent fan-out, merge, policy-driven fail-closed |
 | `src/runtime.rs` | Hardened execution: per-capability timeout, output cap, error taxonomy |
-| `src/mcp.rs` | Minimal MCP client (stdio + streamable-HTTP) — the MCP→CLI bridge runtime |
+| `src/mcp.rs` | Minimal MCP client (stdio + streamable-HTTP, optional TLS) — the MCP→CLI bridge runtime |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `src/api.rs` | Stable embeddable API (JSON-string boundary) the CLI + bindings call |
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
@@ -230,9 +230,12 @@ prebuilt-binary matrix is the remaining #14 follow-up.
   reliance — `python3`→`python` on Windows, `PATHEXT` honored) and the Python +
   Node capabilities are exercised on Linux/macOS/Windows in CI. `platform_note`
   surfaces per-harness caveats (e.g. Cline hooks are Unix-only).
-- Deferred (tracked as follow-ups on the [roadmap epic](https://github.com/danplischke/open-harness/issues/1)):
-  process-group kill for forking capabilities, capability sandboxing/revocation (#22),
-  registry sources + a root of trust (#21), transitive deps (#23), and `https` for the
-  MCP bridge (stdio + `http://` land today). See `FEASIBILITY.md`.
+- Since delivered (see the [roadmap epic](https://github.com/danplischke/open-harness/issues/1)):
+  transitive dependency resolution (#23), key revocation (#22), registry sources + a
+  root of trust (#21), and TLS for the MCP bridge via the `mcp-http-tls` feature (#25).
+- Deferred, tracked as follow-ups: process-group kill for forking capabilities, runtime
+  sandbox *enforcement* of the permission manifest (#22), full TUF registry roles, and
+  live adapter capture from real harnesses (#24, tooling ships via `oh capture`). See
+  `FEASIBILITY.md`.
 
 License: MIT.

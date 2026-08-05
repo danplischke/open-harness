@@ -31,10 +31,18 @@ uniffi = { version = "0.28", features = ["cli"], optional = true }
 ed25519-dalek = "2"
 sha2 = "0.10"
 getrandom = "0.2"
+# Optional TLS for the MCP bridge (#25) — only compiled with `mcp-http-tls`.
+# `ring` provider (no cmake/build tooling) + Mozilla roots, both pure-Rust.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+webpki-roots = { version = "0.26", optional = true }
 
 [features]
 # Opt-in FFI surface (uniffi). Off by default so the core build stays lean.
 ffi = ["dep:uniffi"]
+# Opt-in TLS for the streamable-HTTP MCP bridge (#25). Off by default so the
+# default build + the language bindings stay dependency-free; without it the
+# bridge speaks http:// and honestly refuses https.
+mcp-http-tls = ["dep:rustls", "dep:webpki-roots"]
 
 [profile.dev]
 opt-level = 0
