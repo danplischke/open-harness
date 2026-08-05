@@ -151,6 +151,130 @@ fn missing_dependency_is_warned() {
 }
 
 #[test]
+fn dependencies_order_topologically() {
+    let wd = tmp("topo");
+    // Source order is a, b, c (discover sorts by id); the graph a→b→c must
+    // reorder them so each dependency precedes its dependent.
+    write(
+        &wd.join("caps/a/capability.json"),
+        &cap_json(
+            "a",
+            "1.0.0",
+            "skill",
+            json!({ "dependencies": ["b"], "skill": { "body": "a" } }),
+        ),
+    );
+    write(
+        &wd.join("caps/b/capability.json"),
+        &cap_json(
+            "b",
+            "1.0.0",
+            "skill",
+            json!({ "dependencies": ["c"], "skill": { "body": "b" } }),
+        ),
+    );
+    write(
+        &wd.join("caps/c/capability.json"),
+        &cap_json("c", "1.0.0", "skill", json!({ "skill": { "body": "c" } })),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "caps" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    let ids: Vec<&str> = r
+        .capabilities
+        .iter()
+        .map(|c| c.manifest.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["c", "b", "a"],
+        "a dependency is composed before its dependents"
+    );
+    assert!(
+        r.warnings.is_empty(),
+        "a satisfied graph warns about nothing: {:?}",
+        r.warnings
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn dependency_cycle_is_warned_not_hung() {
+    let wd = tmp("cycle");
+    write(
+        &wd.join("caps/a/capability.json"),
+        &cap_json(
+            "a",
+            "1.0.0",
+            "skill",
+            json!({ "dependencies": ["b"], "skill": { "body": "a" } }),
+        ),
+    );
+    write(
+        &wd.join("caps/b/capability.json"),
+        &cap_json(
+            "b",
+            "1.0.0",
+            "skill",
+            json!({ "dependencies": ["a"], "skill": { "body": "b" } }),
+        ),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "caps" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    assert_eq!(r.capabilities.len(), 2, "a cycle drops nothing");
+    assert!(
+        r.warnings.iter().any(|w| w.contains("cycle")),
+        "the cycle is reported, not hung on: {:?}",
+        r.warnings
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn resolved_dependencies_are_recorded_in_the_lock() {
+    let wd = tmp("lockdeps");
+    write(
+        &wd.join("caps/a/capability.json"),
+        &cap_json(
+            "a",
+            "1.0.0",
+            "skill",
+            json!({ "dependencies": ["b"], "skill": { "body": "a" } }),
+        ),
+    );
+    write(
+        &wd.join("caps/b/capability.json"),
+        &cap_json("b", "1.0.0", "skill", json!({ "skill": { "body": "b" } })),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "caps" } }],
+    }));
+    let lock = profile::resolve(&profile, &wd, None).unwrap().lock;
+    let a = lock.sources[0]
+        .capabilities
+        .iter()
+        .find(|c| c.id == "a")
+        .unwrap();
+    assert_eq!(
+        a.dependencies,
+        vec!["b".to_string()],
+        "the lock pins the dependency graph"
+    );
+    assert_eq!(
+        lock,
+        Lock::from_json(&lock.to_json()).unwrap(),
+        "the graph survives a lock round-trip"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
 fn unknown_harness_is_rejected() {
     let wd = tmp("badharness");
     let profile = profile_from(json!({

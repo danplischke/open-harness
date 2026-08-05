@@ -9,6 +9,11 @@
 //! resolved capability (id + version + content fingerprint) and every git
 //! source's exact commit — so a re-resolve is reproducible.
 //!
+//! Composition also resolves the **dependency graph** (#23): capabilities may
+//! declare `dependencies` on other ids; the resolver reports unmet dependencies
+//! and cycles (loudly, non-fatally), orders the set so a dependency precedes its
+//! dependents, and pins each capability's resolved dependencies in the lock.
+//!
 //! This is the sourcing layer beneath `oh sync` (#16): `sync --profile` resolves
 //! here, then hands the composed capabilities + target harnesses to `sync::apply`.
 //!
@@ -19,6 +24,7 @@
 use crate::adapters::Harness;
 use crate::manifest::LoadedCapability;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -108,6 +114,10 @@ pub struct LockedCap {
     pub kind: String,
     /// Content fingerprint of the capability's `capability.json`.
     pub fingerprint: String,
+    /// Direct capability dependencies (ids). Recorded so the resolved dependency
+    /// graph is pinned and auditable in the lock.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -174,6 +184,7 @@ pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result
     let harnesses = profile.harness_set()?;
     let mut composed: Vec<LoadedCapability> = Vec::new();
     let mut seen_ids: Vec<String> = Vec::new();
+    let mut kept_version: HashMap<String, String> = HashMap::new();
     let mut locked_sources: Vec<LockedSource> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
@@ -210,14 +221,22 @@ pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result
                 version: cap.manifest.version.clone(),
                 kind: cap.manifest.kind.as_str().to_string(),
                 fingerprint: crate::sync::fingerprint(&manifest_json(&cap)),
+                dependencies: cap.manifest.dependencies.clone(),
             });
-            // Earlier sources win; a later duplicate id is a loud skip.
-            if seen_ids.contains(&cap.manifest.id) {
+            // Earlier sources win; a later duplicate id is a loud skip, noting a
+            // version conflict when the shadowed copy differs.
+            if let Some(kept) = kept_version.get(&cap.manifest.id) {
+                let conflict = if *kept != cap.manifest.version {
+                    format!(" (kept {kept}, ignored {})", cap.manifest.version)
+                } else {
+                    String::new()
+                };
                 warnings.push(format!(
-                    "capability '{}' from {origin} shadowed by an earlier source; kept the earlier one",
+                    "capability '{}' from {origin} shadowed by an earlier source{conflict}",
                     cap.manifest.id
                 ));
             } else {
+                kept_version.insert(cap.manifest.id.clone(), cap.manifest.version.clone());
                 seen_ids.push(cap.manifest.id.clone());
                 composed.push(cap);
             }
@@ -231,17 +250,10 @@ pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result
         });
     }
 
-    // Dependency check (advisory): every declared dependency must be present.
-    for cap in &composed {
-        for dep in &cap.manifest.dependencies {
-            if !seen_ids.contains(dep) {
-                warnings.push(format!(
-                    "capability '{}' declares dependency '{dep}', which no source provides",
-                    cap.manifest.id
-                ));
-            }
-        }
-    }
+    // Resolve the dependency graph: report unmet dependencies (transitively) and
+    // cycles — loudly, but non-fatally, so nothing is silently dropped — and
+    // order the set so a dependency is composed before whatever depends on it.
+    let composed = resolve_dependencies(composed, &seen_ids, &mut warnings);
 
     let lock = Lock {
         version: 1,
@@ -255,6 +267,91 @@ pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result
         lock,
         warnings,
     })
+}
+
+/// Resolve the dependency graph over the composed set: warn on unmet
+/// dependencies and cycles (loud, non-fatal — nothing is dropped), and return the
+/// set ordered so every dependency precedes the capabilities that declare it (a
+/// stable topological sort; ties keep source order, so a dependency-free set is
+/// returned unchanged).
+///
+/// Unmet dependencies are reported transitively for free: an intermediate
+/// dependency's own missing dependencies surface when that capability is visited.
+fn resolve_dependencies(
+    caps: Vec<LoadedCapability>,
+    present: &[String],
+    warnings: &mut Vec<String>,
+) -> Vec<LoadedCapability> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    for cap in &caps {
+        for dep in &cap.manifest.dependencies {
+            if dep != &cap.manifest.id && !present.contains(dep) {
+                warnings.push(format!(
+                    "capability '{}' depends on '{dep}', which no source provides",
+                    cap.manifest.id
+                ));
+            }
+        }
+    }
+
+    let n = caps.len();
+    let index: HashMap<&str, usize> = caps
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.manifest.id.as_str(), i))
+        .collect();
+    // Edge dependency → dependent; a node's in-degree is its count of present deps.
+    let mut in_degree = vec![0usize; n];
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, c) in caps.iter().enumerate() {
+        for dep in &c.manifest.dependencies {
+            if let Some(&j) = index.get(dep.as_str()) {
+                if j != i {
+                    dependents[j].push(i);
+                    in_degree[i] += 1;
+                }
+            }
+        }
+    }
+
+    // Kahn's algorithm with a stable, lowest-source-index-first tie-break.
+    let mut ready: BinaryHeap<Reverse<usize>> =
+        (0..n).filter(|&i| in_degree[i] == 0).map(Reverse).collect();
+    let mut order = Vec::with_capacity(n);
+    let mut emitted = vec![false; n];
+    while let Some(Reverse(i)) = ready.pop() {
+        order.push(i);
+        emitted[i] = true;
+        for &d in &dependents[i] {
+            in_degree[d] -= 1;
+            if in_degree[d] == 0 {
+                ready.push(Reverse(d));
+            }
+        }
+    }
+
+    // Any node never reaching in-degree 0 is part of a cycle: report it and keep
+    // it (in source order) rather than dropping it.
+    if order.len() < n {
+        let cyclic: Vec<&str> = (0..n)
+            .filter(|&i| !emitted[i])
+            .map(|i| caps[i].manifest.id.as_str())
+            .collect();
+        warnings.push(format!(
+            "dependency cycle among [{}] — kept in source order",
+            cyclic.join(", ")
+        ));
+        for (i, done) in emitted.iter().enumerate() {
+            if !done {
+                order.push(i);
+            }
+        }
+    }
+
+    let mut slots: Vec<Option<LoadedCapability>> = caps.into_iter().map(Some).collect();
+    order.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
 /// Re-serialize a capability's manifest to a stable string for fingerprinting.
