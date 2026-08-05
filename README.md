@@ -76,6 +76,7 @@ cargo run -- doctor                   # check interpreters + capability health
 cargo run -- mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'   # MCP→CLI bridge
 cargo run -- matrix                   # support grid across 10 harnesses
 cargo run -- check                    # per-capability installability
+bash examples/walkthrough.sh          # the whole lifecycle: author→sign→compose→sync→dispatch→report
 bash examples/demo.sh                 # deny across all four signal families
 cargo run -- emit --harness cursor    # native registration (note the fan-out)
 cargo run -- sync --into /tmp/proj --dry-run   # compose the set → files (preview)

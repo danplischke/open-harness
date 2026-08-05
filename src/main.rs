@@ -708,14 +708,26 @@ fn cmd_sync(rest: &[String]) {
 fn cmd_check(rest: &[String]) {
     let o = parse_opts(rest);
 
-    // With `--into`, `check` is drift detection against a synced project.
+    // With `--into`, `check` is drift detection against a synced project. Sources
+    // resolve the same way as `sync`: from a `--profile` (its sources + harnesses)
+    // or the ad-hoc `--capabilities` / `--harness` mode — so you can drift-check
+    // exactly what you profile-synced.
     if let Some(into) = o.into.clone() {
-        let caps = load_caps(&o);
-        if caps.is_empty() {
-            eprintln!("no capabilities found under {}", o.capabilities.display());
-            exit(1);
-        }
-        let harnesses = select_harnesses(&o);
+        let (caps, harnesses) = if let Some(profile_path) = o.profile.clone() {
+            let resolved = resolve_profile(&profile_path);
+            if resolved.harnesses.is_empty() {
+                eprintln!("profile '{}' targets no harnesses", resolved.profile);
+                exit(1);
+            }
+            (resolved.capabilities, resolved.harnesses)
+        } else {
+            let caps = load_caps(&o);
+            if caps.is_empty() {
+                eprintln!("no capabilities found under {}", o.capabilities.display());
+                exit(1);
+            }
+            (caps, select_harnesses(&o))
+        };
         let plan = sync::plan_sync(&caps, &harnesses);
         let report = sync::check(&into, &plan).unwrap_or_else(|e| {
             eprintln!("check failed: {e}");

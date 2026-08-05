@@ -10,7 +10,7 @@ BIN=./target/debug/oh
 
 SAFE='{"tool_name":"Bash","tool_input":{"command":"ls -la"}}'
 SECRET='{"tool_name":"Bash","tool_input":{"command":"echo AKIAIOSFODNN7EXAMPLE"}}'
-CURSOR_SECRET='{"toolName":"Bash","toolInput":{"command":"echo AKIAIOSFODNN7EXAMPLE"}}'
+CURSOR_SECRET='{"command":"echo AKIAIOSFODNN7EXAMPLE","cwd":"/repo"}'   # Cursor's beforeShellExecution shape
 
 rule() { printf '\n=== %s ===\n' "$1"; }
 

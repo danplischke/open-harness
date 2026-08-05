@@ -92,3 +92,27 @@ jobs:
       - name: Build addon + run example
         working-directory: bindings/node
         run: bash build.sh
+
+  # The end-to-end lifecycle must actually run: author → sign & trust → compose a
+  # profile → sync into a project → dispatch across harnesses → bridge + matrix.
+  # This exercises the whole `oh` surface (incl. `check --profile`) with the real
+  # Python + Node capabilities, and guards the demo from bit-rot.
+  walkthrough:
+    name: e2e walkthrough
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Python (secret-guard)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up Node (audit-note + typed TS hook)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build the oh CLI
+        run: cargo build --bin oh
+      - name: Run the end-to-end walkthrough
+        run: bash examples/walkthrough.sh

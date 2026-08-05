@@ -8,6 +8,9 @@ __pycache__/
 *.pyc
 examples/open-harness.lock
 
+# End-to-end walkthrough workspace (examples/walkthrough.sh)
+examples/.walkthrough/
+
 # signing keys (secret) — never commit
 *.key
 openharness.key
