@@ -43,13 +43,14 @@ fn main() {
         "check" => cmd_check(&rest),
         "matrix" => cmd_matrix(&rest),
         "scaffold" => cmd_scaffold(&rest),
+        "capture" => cmd_capture(&rest),
         "init" => cmd_init(&rest),
         "doctor" => cmd_doctor(&rest),
         "add" => cmd_add(&rest),
         "remove" => cmd_remove(&rest),
         _ => {
             eprintln!(
-                "oh <init|scaffold|add|remove|doctor|run|emit|keygen|sign|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
+                "oh <init|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
             );
             exit(2);
         }
@@ -1150,6 +1151,32 @@ fn cmd_scaffold(rest: &[String]) {
     } else {
         println!("\ncheck it: oh check --capabilities {}", into.display());
     }
+}
+
+/// `oh capture` — record the raw native payload a harness sends on stdin into a
+/// fixture, then allow (exit 0) so the harness is never disrupted. Wire it as a
+/// harness's hook entrypoint to build the fixture corpus from live runs (#24).
+fn cmd_capture(rest: &[String]) {
+    let o = parse_opts(rest);
+    let out = o
+        .out
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("captured.stdin.json"));
+    let mut buf = String::new();
+    let _ = std::io::stdin().read_to_string(&mut buf);
+    match open_harness::capture::record_fixture(&buf, &out) {
+        Ok(()) => {
+            let ctx = match (&o.harness, &o.event) {
+                (Some(h), Some(e)) => format!(" ({h} {e})"),
+                (Some(h), None) => format!(" ({h})"),
+                _ => String::new(),
+            };
+            eprintln!("captured native payload{ctx} → {}", out.display());
+        }
+        // Even on a capture error, allow: a capture hook must not block the agent.
+        Err(e) => eprintln!("capture: {e}"),
+    }
+    exit(0);
 }
 
 fn cmd_init(rest: &[String]) {
