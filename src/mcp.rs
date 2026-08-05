@@ -656,10 +656,7 @@ fn parse_http_response(raw: &[u8]) -> Result<HttpResponse, String> {
 /// Decode HTTP/1.1 chunked transfer-encoding.
 fn dechunk(mut b: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
-    loop {
-        let Some(nl) = b.windows(2).position(|w| w == b"\r\n") else {
-            break;
-        };
+    while let Some(nl) = b.windows(2).position(|w| w == b"\r\n") {
         // A chunk-size line may carry a `;ext` suffix; take the hex prefix only.
         let line = String::from_utf8_lossy(&b[..nl]);
         let hex = line.split(';').next().unwrap_or("").trim();
