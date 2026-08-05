@@ -4,7 +4,8 @@
 //! A **profile** is a named set of **sources** targeting a set of harnesses. A
 //! source resolves to capabilities from a **local path**, a **git repo**
 //! (personal-repo sync — cloned/fetched and pinned to a commit), or a
-//! **registry** (stubbed; reported, never silently skipped). Resolving a profile
+//! **registry** (#21) — a JSON index mapping names to their real local/git
+//! source, one point of indirection over many repos. Resolving a profile
 //! composes the sources in order and writes an `open-harness.lock` pinning every
 //! resolved capability (id + version + content fingerprint) and every git
 //! source's exact commit — so a re-resolve is reproducible.
@@ -81,9 +82,48 @@ fn default_rev() -> String {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RegistrySource {
+    /// Capability/pack name to resolve from the registry index.
     pub name: String,
+    /// Optional exact version to select (else the first matching entry).
     #[serde(default)]
     pub version: Option<String>,
+    /// Path to the registry index (JSON), relative to the profile workdir. The
+    /// index maps names → real sources (local/git), giving one point of
+    /// indirection over many repos. Without it the source is a loud no-op.
+    #[serde(default)]
+    pub index: Option<String>,
+}
+
+/// A registry index: a JSON file mapping capability names to their real source.
+/// `{ "capabilities": [ { "name": "pack", "version": "1.0.0",
+///    "source": { "git": { "url": "…", "subdir": "…" } } } ] }`.
+#[derive(Debug, Clone, Deserialize)]
+struct RegistryIndex {
+    #[serde(default)]
+    capabilities: Vec<RegistryEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RegistryEntry {
+    name: String,
+    #[serde(default)]
+    version: Option<String>,
+    /// Where this named capability actually lives (a local or git source).
+    source: Source,
+}
+
+impl RegistryIndex {
+    fn load(path: &Path) -> Result<RegistryIndex, String> {
+        let text =
+            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        serde_json::from_str(&text).map_err(|e| format!("invalid registry index: {e}"))
+    }
+
+    fn find(&self, name: &str, version: Option<&str>) -> Option<&RegistryEntry> {
+        self.capabilities
+            .iter()
+            .find(|e| e.name == name && (version.is_none() || e.version.as_deref() == version))
+    }
 }
 
 impl Profile {
@@ -189,29 +229,10 @@ pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result
     let mut warnings: Vec<String> = Vec::new();
 
     for source in &profile.sources {
-        let (origin, kind, rev, subdir, caps) = match source {
-            Source::Local(l) => {
-                let dir = workdir.join(&l.path);
-                let caps = crate::manifest::discover(&dir)?;
-                (l.path.clone(), "local", None, None, caps)
-            }
-            Source::Git(g) => {
-                let pin = lock.and_then(|lk| lk.pinned_rev(&g.url));
-                let (checkout_dir, sha) = git_sync(&g.url, pin.unwrap_or(&g.rev), workdir)?;
-                let scan = match &g.subdir {
-                    Some(s) => checkout_dir.join(s),
-                    None => checkout_dir,
-                };
-                let caps = crate::manifest::discover(&scan)?;
-                (g.url.clone(), "git", Some(sha), g.subdir.clone(), caps)
-            }
-            Source::Registry(r) => {
-                warnings.push(format!(
-                    "registry source '{}' skipped — registry resolution is not yet implemented (use a local or git source)",
-                    r.name
-                ));
-                continue;
-            }
+        let Some((origin, kind, rev, subdir, caps)) =
+            resolve_source(source, workdir, lock, &mut warnings)?
+        else {
+            continue; // a source that resolved to nothing was already warned about
         };
 
         let mut locked_caps = Vec::new();
@@ -267,6 +288,95 @@ pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result
         lock,
         warnings,
     })
+}
+
+/// A resolved source: `(origin, kind, pinned rev, subdir, capabilities)`.
+type ResolvedSource = (
+    String,
+    &'static str,
+    Option<String>,
+    Option<String>,
+    Vec<LoadedCapability>,
+);
+
+/// Resolve one source to its capabilities + lock metadata. `Ok(None)` means the
+/// source resolved to nothing (already warned) and is skipped.
+fn resolve_source(
+    source: &Source,
+    workdir: &Path,
+    lock: Option<&Lock>,
+    warnings: &mut Vec<String>,
+) -> Result<Option<ResolvedSource>, String> {
+    match source {
+        Source::Local(l) => {
+            let caps = crate::manifest::discover(&workdir.join(&l.path))?;
+            Ok(Some((l.path.clone(), "local", None, None, caps)))
+        }
+        Source::Git(g) => {
+            let pin = lock.and_then(|lk| lk.pinned_rev(&g.url));
+            let (checkout_dir, sha) = git_sync(&g.url, pin.unwrap_or(&g.rev), workdir)?;
+            let scan = match &g.subdir {
+                Some(s) => checkout_dir.join(s),
+                None => checkout_dir,
+            };
+            let caps = crate::manifest::discover(&scan)?;
+            Ok(Some((
+                g.url.clone(),
+                "git",
+                Some(sha),
+                g.subdir.clone(),
+                caps,
+            )))
+        }
+        Source::Registry(r) => resolve_registry(r, workdir, lock, warnings),
+    }
+}
+
+/// Resolve a registry source: load its index, find the named entry, and resolve
+/// the real (local/git) source it points to — one point of indirection over many
+/// repos. Provenance is recorded on the lock as kind `registry`, origin
+/// `index#name`. Nested registries are refused (loudly).
+fn resolve_registry(
+    r: &RegistrySource,
+    workdir: &Path,
+    lock: Option<&Lock>,
+    warnings: &mut Vec<String>,
+) -> Result<Option<ResolvedSource>, String> {
+    let Some(index_rel) = &r.index else {
+        warnings.push(format!(
+            "registry source '{}' has no `index` — skipped (set an index path to resolve it)",
+            r.name
+        ));
+        return Ok(None);
+    };
+    let index = match RegistryIndex::load(&workdir.join(index_rel)) {
+        Ok(i) => i,
+        Err(e) => {
+            warnings.push(format!("registry index '{index_rel}': {e}"));
+            return Ok(None);
+        }
+    };
+    let want = r.version.as_deref();
+    let Some(entry) = index.find(&r.name, want) else {
+        warnings.push(format!(
+            "registry '{index_rel}' has no capability '{}'{}",
+            r.name,
+            want.map(|v| format!("@{v}")).unwrap_or_default()
+        ));
+        return Ok(None);
+    };
+    if matches!(entry.source, Source::Registry(_)) {
+        warnings.push(format!(
+            "registry entry '{}' points to another registry — nested registries are not resolved",
+            r.name
+        ));
+        return Ok(None);
+    }
+    // Resolve the leaf source, then relabel it with registry provenance (the
+    // resolved git rev, if any, is still recorded for auditability).
+    let origin = format!("{index_rel}#{}", r.name);
+    Ok(resolve_source(&entry.source, workdir, lock, warnings)?
+        .map(|(_, _, rev, subdir, caps)| (origin, "registry", rev, subdir, caps)))
 }
 
 /// Resolve the dependency graph over the composed set: warn on unmet

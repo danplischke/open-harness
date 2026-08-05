@@ -126,6 +126,76 @@ fn registry_source_is_reported_not_silently_skipped() {
 }
 
 #[test]
+fn registry_source_resolves_through_a_local_index() {
+    let wd = tmp("registry-resolve");
+    // A capability living under packs/, reached only via the registry index.
+    write(
+        &wd.join("packs/greeter/capability.json"),
+        &cap_json(
+            "greeter",
+            "2.1.0",
+            "skill",
+            json!({ "skill": { "body": "hi" } }),
+        ),
+    );
+    // The index maps the pack name → that real (local) source.
+    write(
+        &wd.join("registry.json"),
+        &json!({
+            "capabilities": [
+                { "name": "greeter-pack", "version": "2.1.0",
+                  "source": { "local": { "path": "packs" } } }
+            ]
+        })
+        .to_string(),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "registry": { "index": "registry.json", "name": "greeter-pack", "version": "2.1.0" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    let ids: Vec<&str> = r
+        .capabilities
+        .iter()
+        .map(|c| c.manifest.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["greeter"],
+        "the registry resolved the pack's capability: {ids:?}"
+    );
+    let src = &r.lock.sources[0];
+    assert_eq!(src.kind, "registry", "provenance is recorded as registry");
+    assert!(
+        src.origin.contains("greeter-pack"),
+        "the resolved name is pinned: {}",
+        src.origin
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn registry_missing_entry_is_warned_not_dropped() {
+    let wd = tmp("registry-miss");
+    write(
+        &wd.join("registry.json"),
+        &json!({ "capabilities": [] }).to_string(),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "registry": { "index": "registry.json", "name": "nope" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    assert!(r.capabilities.is_empty());
+    assert!(
+        r.warnings.iter().any(|w| w.contains("nope")),
+        "a missing registry entry is loudly reported: {:?}",
+        r.warnings
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
 fn missing_dependency_is_warned() {
     let wd = tmp("deps");
     write(
