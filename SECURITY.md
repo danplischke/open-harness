@@ -76,21 +76,25 @@ default and **hard failures under `--require-signed`**.
 | `sync` writing outside the project or clobbering user files | path-traversal guard (no `..`/absolute/`~`); prune only lockfile-managed paths | **enforced** |
 | A capability that forks grandchildren evading the timeout kill | only the direct child is killed today | **deferred** (needs process-group kill) |
 | Untrusted code doing anything at all once installed (sandboxing) | not sandboxed; runs with agent privileges | **deferred** |
-| Key compromise / revocation | no revocation list yet | **deferred** |
+| Key compromise / revocation | trust-store revocation list; a revoked key never verifies again, even in advisory mode (#22) | **enforced** |
 | Rollback / downgrade to an old vulnerable version | the profile lockfile pins commit + digest; no signed-version-monotonicity yet | **partial** (pinning only) |
 | Malicious registry / key distribution | registry is a stub; no TUF-style root of trust | **deferred** |
 
 ## What is enforced today vs deferred
 
 **Enforced:** content-digest integrity, ed25519 signature verification, the
-trust store + `--require-signed` gate, permission-manifest surfacing + policy
-checks, the `sync` path-traversal and prune-only-managed guarantees, and
+trust store + `--require-signed` gate, **key revocation** (a revoked key never
+verifies again, even in advisory mode — #22), permission-manifest surfacing +
+policy checks, the `sync` path-traversal and prune-only-managed guarantees, and
 lockfile pinning (commit + digest) from #15.
 
-**Deferred (documented, not silently missing):** sandboxed / containerized
-execution; process-group kill for forking capabilities; key revocation; a
-registry with a real root of trust (TUF-style); and signed version
-monotonicity. These are tracked against M4/M5.
+**Deferred (documented, not silently missing):** runtime **sandbox enforcement**
+of the permission manifest — real fs/net/exec confinement needs OS mechanisms
+(Linux `landlock`/`seccomp`, macOS `sandbox-exec`, Windows job objects) or a
+sandboxing dependency, so the manifest is surfaced + policy-checked but not yet
+enforced at runtime (#22); process-group kill for forking capabilities; a
+registry with a real root of trust — TUF-style (#21); and signed version
+monotonicity. These are tracked as follow-ups on the roadmap epic.
 
 ## Reporting
 

@@ -181,6 +181,83 @@ fn permission_policy_flags_denied_capabilities() {
     );
 }
 
+/// Revocation (#22): a withdrawn key is rejected, even in lax mode, and even if
+/// it is still (stale) in the trusted list.
+#[test]
+fn a_revoked_signer_is_rejected_even_in_lax_mode() {
+    let dir = tmp("revoked");
+    make_cap(&dir);
+    let key = trust::generate_keyfile("alice").unwrap();
+    trust::sign(&dir, &key).unwrap().write(&dir).unwrap();
+
+    let mut store = trust::TrustStore::default();
+    store.add(&key.public_key, "alice");
+    assert!(
+        matches!(trust::verify(&dir, &store), Verification::Trusted { .. }),
+        "trusted before revocation"
+    );
+
+    assert!(store.revoke(&key.public_key, "key compromised"));
+    let v = trust::verify(&dir, &store);
+    assert!(
+        matches!(v, Verification::Revoked { ref reason, .. } if reason.contains("compromised")),
+        "got {v:?}"
+    );
+    assert!(
+        !v.passes(false),
+        "a revoked key never passes, even in lax mode"
+    );
+    assert!(!v.passes(true));
+    assert!(
+        !store.contains(&key.public_key),
+        "revoke() drops the key from the trusted list"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn revocation_overrides_a_stale_trusted_entry() {
+    let dir = tmp("revwins");
+    make_cap(&dir);
+    let key = trust::generate_keyfile("alice").unwrap();
+    trust::sign(&dir, &key).unwrap().write(&dir).unwrap();
+
+    // A store where the key is BOTH trusted and revoked (a stale trusted entry).
+    // Revocation is consulted first, so it must win.
+    let store = trust::TrustStore::from_json(&format!(
+        r#"{{ "keys": [{{"public_key":"{pk}","label":"alice"}}],
+              "revoked": [{{"public_key":"{pk}","reason":"leaked"}}] }}"#,
+        pk = key.public_key
+    ))
+    .unwrap();
+    assert!(matches!(
+        trust::verify(&dir, &store),
+        Verification::Revoked { .. }
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_revoked_key_cannot_be_retrusted_and_survives_round_trip() {
+    let dir = tmp("revrt");
+    let key = trust::generate_keyfile("alice").unwrap();
+    let mut store = trust::TrustStore::default();
+    assert!(store.revoke(&key.public_key, "compromised"));
+    assert!(
+        !store.add(&key.public_key, "alice"),
+        "a revoked key cannot be silently re-trusted"
+    );
+
+    let sf = dir.join("trust.json");
+    store.write(&sf).unwrap();
+    let reloaded = trust::TrustStore::load(&sf).unwrap();
+    assert!(
+        reloaded.is_revoked(&key.public_key),
+        "revocation survives a round-trip"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn keyfile_and_trust_store_round_trip() {
     let dir = tmp("keys");

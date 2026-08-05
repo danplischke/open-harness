@@ -10,17 +10,21 @@
 //!   * **signature** — the author signs the digest with an **ed25519** key; the
 //!     detached `capability.sig` carries `{algorithm, public_key, digest,
 //!     signature}`.
-//!   * **trust** — a [`TrustStore`] lists trusted public keys. Verification is
-//!     four-valued: `Trusted` (valid signature by a known key), `Untrusted`
-//!     (valid signature, unknown key — trust-on-first-use territory), `Invalid`
-//!     (tampered content or bad signature — always rejected), `Unsigned`.
+//!   * **trust** — a [`TrustStore`] lists trusted (and revoked) public keys.
+//!     Verification is five-valued: `Trusted` (valid signature by a known key),
+//!     `Untrusted` (valid signature, unknown key — trust-on-first-use territory),
+//!     `Revoked` (valid signature by a **withdrawn** key — always rejected, #22),
+//!     `Invalid` (tampered content or bad signature — always rejected),
+//!     `Unsigned`.
 //!
 //! Enforcement composes with the resolver (#15): a tampered capability is
 //! rejected on resolve; `--require-signed` additionally rejects unsigned /
 //! untrusted ones. The permission manifest (`manifest::Permissions`) is
-//! surfaced for consent and checked against a policy (advisory). See
-//! `SECURITY.md` for the threat model and what is deferred (sandbox
-//! enforcement, revocation, key distribution).
+//! surfaced for consent and checked against a policy (advisory). A trusted key
+//! can be **revoked** (#22): revocation is consulted before trust, so a withdrawn
+//! key never verifies again — even in advisory mode. See `SECURITY.md` for the
+//! threat model and what is still deferred (runtime sandbox *enforcement* of the
+//! permission manifest, key distribution).
 
 use crate::manifest::{PermissionPolicy, Permissions};
 use ed25519_dalek::{Signature as EdSig, Signer, SigningKey, Verifier, VerifyingKey};
@@ -179,7 +183,7 @@ pub fn sign(dir: &Path, key: &Keyfile) -> Result<Signature, String> {
 
 // ---- verification ---------------------------------------------------------
 
-/// The four-valued verdict for a capability directory.
+/// The five-valued verdict for a capability directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verification {
     /// Valid signature by a key in the trust store.
@@ -191,6 +195,9 @@ pub enum Verification {
     },
     /// Tampered content or a bad signature — always rejected.
     Invalid(String),
+    /// A valid signature by a key that has since been **revoked** — always
+    /// rejected, even in advisory mode (a withdrawn key is actively distrusted).
+    Revoked { fingerprint: String, reason: String },
     /// No signature present.
     Unsigned,
 }
@@ -202,7 +209,7 @@ impl Verification {
         match self {
             Verification::Trusted { .. } => true,
             Verification::Untrusted { .. } | Verification::Unsigned => !require_signed,
-            Verification::Invalid(_) => false,
+            Verification::Invalid(_) | Verification::Revoked { .. } => false,
         }
     }
 
@@ -215,6 +222,16 @@ impl Verification {
             }
             Verification::Untrusted { fingerprint, .. } => format!("UNTRUSTED ({fingerprint})"),
             Verification::Invalid(r) => format!("INVALID — {r}"),
+            Verification::Revoked {
+                fingerprint,
+                reason,
+            } => {
+                if reason.is_empty() {
+                    format!("REVOKED ({fingerprint})")
+                } else {
+                    format!("REVOKED ({fingerprint}) — {reason}")
+                }
+            }
             Verification::Unsigned => "unsigned".to_string(),
         }
     }
@@ -252,6 +269,14 @@ pub fn verify(dir: &Path, trust: &TrustStore) -> Verification {
         return Verification::Invalid("signature verification failed".to_string());
     }
     let fp = fingerprint(&sig.public_key);
+    // Revocation wins over trust: a withdrawn key is rejected even if it is also
+    // (stale) in the trusted list.
+    if let Some(reason) = trust.revocation_reason(&sig.public_key) {
+        return Verification::Revoked {
+            fingerprint: fp,
+            reason: reason.to_string(),
+        };
+    }
     match trust.label_for(&sig.public_key) {
         Some(label) => Verification::Trusted {
             label,
@@ -273,10 +298,21 @@ pub struct TrustedKey {
     pub label: String,
 }
 
+/// A withdrawn key. Once revoked, a signature by this key never verifies again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevokedKey {
+    pub public_key: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TrustStore {
     #[serde(default)]
     pub keys: Vec<TrustedKey>,
+    /// Revoked keys. Consulted before the trusted list, so revocation wins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked: Vec<RevokedKey>,
 }
 
 impl TrustStore {
@@ -309,14 +345,41 @@ impl TrustStore {
         self.keys.iter().any(|k| k.public_key == public_key)
     }
 
-    /// Add a key (trust-on-first-use consent). Returns false if already present.
+    /// Add a key (trust-on-first-use consent). Returns false if already present
+    /// or revoked (a revoked key cannot be re-trusted without un-revoking first).
     pub fn add(&mut self, public_key: &str, label: &str) -> bool {
-        if self.contains(public_key) {
+        if self.contains(public_key) || self.is_revoked(public_key) {
             return false;
         }
         self.keys.push(TrustedKey {
             public_key: public_key.to_string(),
             label: label.to_string(),
+        });
+        true
+    }
+
+    /// The revocation reason for a key, if it has been revoked.
+    pub fn revocation_reason(&self, public_key: &str) -> Option<&str> {
+        self.revoked
+            .iter()
+            .find(|k| k.public_key == public_key)
+            .map(|k| k.reason.as_str())
+    }
+
+    pub fn is_revoked(&self, public_key: &str) -> bool {
+        self.revoked.iter().any(|k| k.public_key == public_key)
+    }
+
+    /// Revoke a key: drop it from the trusted list and add it to the revocation
+    /// list. Returns false if it was already revoked.
+    pub fn revoke(&mut self, public_key: &str, reason: &str) -> bool {
+        if self.is_revoked(public_key) {
+            return false;
+        }
+        self.keys.retain(|k| k.public_key != public_key);
+        self.revoked.push(RevokedKey {
+            public_key: public_key.to_string(),
+            reason: reason.to_string(),
         });
         true
     }

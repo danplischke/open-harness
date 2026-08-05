@@ -34,6 +34,7 @@ fn main() {
         "sign" => cmd_sign(&rest),
         "verify" => cmd_verify(&rest),
         "trust" => cmd_trust(&rest),
+        "revoke" => cmd_revoke(&rest),
         "mcp" => cmd_mcp(&rest),
         "resolve" => cmd_resolve(&rest),
         "sync" => cmd_sync(&rest),
@@ -46,7 +47,7 @@ fn main() {
         "remove" => cmd_remove(&rest),
         _ => {
             eprintln!(
-                "oh <init|scaffold|add|remove|doctor|run|emit|keygen|sign|verify|trust|mcp|resolve|sync|check|matrix> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--out FILE] [--require-signed] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
+                "oh <init|scaffold|add|remove|doctor|run|emit|keygen|sign|verify|trust|revoke|mcp|resolve|sync|check|matrix> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
             );
             exit(2);
         }
@@ -70,6 +71,7 @@ struct Opts {
     key: Option<PathBuf>,
     trust: Option<PathBuf>,
     label: Option<String>,
+    reason: Option<String>,
     out: Option<PathBuf>,
     require_signed: bool,
     deny_network: bool,
@@ -107,6 +109,7 @@ fn parse_opts(rest: &[String]) -> Opts {
         key: None,
         trust: None,
         label: None,
+        reason: None,
         out: None,
         require_signed: false,
         deny_network: false,
@@ -159,6 +162,10 @@ fn parse_opts(rest: &[String]) -> Opts {
             }
             "--label" => {
                 o.label = rest.get(i + 1).cloned();
+                i += 2;
+            }
+            "--reason" => {
+                o.reason = rest.get(i + 1).cloned();
                 i += 2;
             }
             "--out" => {
@@ -547,8 +554,43 @@ fn cmd_trust(rest: &[String]) {
             exit(1);
         });
         println!("trusted {fp} → {}", trust_path.display());
+    } else if store.is_revoked(&sig.public_key) {
+        eprintln!("refusing to trust {fp}: it is revoked (un-revoke it first)");
+        exit(1);
     } else {
         println!("already trusted: {fp}");
+    }
+}
+
+fn cmd_revoke(rest: &[String]) {
+    let o = parse_opts(rest);
+    let Some(dir) = o.capability_one.clone() else {
+        eprintln!("revoke requires --capability DIR (whose signer to revoke)");
+        exit(2);
+    };
+    let Some(sig) = trust::Signature::load(&dir) else {
+        eprintln!("no {} in {}", trust::SIG_NAME, dir.display());
+        exit(1);
+    };
+    let trust_path = o
+        .trust
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("trust.json"));
+    let mut store = TrustStore::load(&trust_path).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        exit(1);
+    });
+    let reason = o.reason.clone().unwrap_or_default();
+    let fp = trust::fingerprint(&sig.public_key);
+    if store.revoke(&sig.public_key, &reason) {
+        store.write(&trust_path).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            exit(1);
+        });
+        println!("revoked {fp} → {}", trust_path.display());
+        eprintln!("any capability signed by {fp} will now fail verification");
+    } else {
+        println!("already revoked: {fp}");
     }
 }
 
