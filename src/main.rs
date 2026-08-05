@@ -8,7 +8,8 @@
 //! Delivery:   `emit` (native registration config) · `resolve` (sources → lock)
 //!   · `sync` (install/converge into a project) · `check` (installability, or
 //!   drift vs a synced project with `--ci`).
-//! Trust:      `keygen` · `sign` · `verify` · `trust`.
+//! Trust:      `keygen` · `sign` · `verify` · `trust` · `revoke` · `keyring`
+//!   (a root of trust: `keyring` + `trust --root`/`--keyring`).
 //! Reporting:  `matrix` (the event × harness support grid; `--markdown`).
 
 use open_harness::adapters::{Harness, ALL};
@@ -35,6 +36,7 @@ fn main() {
         "verify" => cmd_verify(&rest),
         "trust" => cmd_trust(&rest),
         "revoke" => cmd_revoke(&rest),
+        "keyring" => cmd_keyring(&rest),
         "mcp" => cmd_mcp(&rest),
         "resolve" => cmd_resolve(&rest),
         "sync" => cmd_sync(&rest),
@@ -47,7 +49,7 @@ fn main() {
         "remove" => cmd_remove(&rest),
         _ => {
             eprintln!(
-                "oh <init|scaffold|add|remove|doctor|run|emit|keygen|sign|verify|trust|revoke|mcp|resolve|sync|check|matrix> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
+                "oh <init|scaffold|add|remove|doctor|run|emit|keygen|sign|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
             );
             exit(2);
         }
@@ -74,6 +76,9 @@ struct Opts {
     reason: Option<String>,
     out: Option<PathBuf>,
     require_signed: bool,
+    // root of trust (#21)
+    root: bool,
+    keyring: Option<PathBuf>,
     deny_network: bool,
     deny_exec: bool,
     // MCP→CLI bridge (#19, #20)
@@ -112,6 +117,8 @@ fn parse_opts(rest: &[String]) -> Opts {
         reason: None,
         out: None,
         require_signed: false,
+        root: false,
+        keyring: None,
         deny_network: false,
         deny_exec: false,
         id: None,
@@ -175,6 +182,14 @@ fn parse_opts(rest: &[String]) -> Opts {
             "--require-signed" => {
                 o.require_signed = true;
                 i += 1;
+            }
+            "--root" => {
+                o.root = true;
+                i += 1;
+            }
+            "--keyring" => {
+                o.keyring = rest.get(i + 1).map(PathBuf::from);
+                i += 2;
             }
             "--deny-network" => {
                 o.deny_network = true;
@@ -530,14 +545,6 @@ fn cmd_verify(rest: &[String]) {
 
 fn cmd_trust(rest: &[String]) {
     let o = parse_opts(rest);
-    let Some(dir) = o.capability_one.clone() else {
-        eprintln!("trust requires --capability DIR (whose signer to trust)");
-        exit(2);
-    };
-    let Some(sig) = trust::Signature::load(&dir) else {
-        eprintln!("no {} in {}", trust::SIG_NAME, dir.display());
-        exit(1);
-    };
     let trust_path = o
         .trust
         .clone()
@@ -546,6 +553,79 @@ fn cmd_trust(rest: &[String]) {
         eprintln!("{e}");
         exit(1);
     });
+
+    // Attach a keyring: its authors become trusted once their root is trusted.
+    if let Some(kr_path) = o.keyring.clone() {
+        let keyring = trust::Keyring::load(&kr_path).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            exit(1);
+        });
+        if !keyring.verify() {
+            eprintln!(
+                "refusing to attach {}: its root signature is invalid",
+                kr_path.display()
+            );
+            exit(1);
+        }
+        let root_fp = trust::fingerprint(&keyring.root_public_key);
+        let n = keyring.keys.len();
+        store.attach_keyring(keyring);
+        store.write(&trust_path).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            exit(1);
+        });
+        println!(
+            "attached keyring vouching for {n} author(s) under root {root_fp} → {}",
+            trust_path.display()
+        );
+        eprintln!(
+            "trust that root with: oh trust --root --key <root.key> --trust {}",
+            trust_path.display()
+        );
+        return;
+    }
+
+    // Trust a root key (delegation anchor): from a keyfile (--key) or a capability
+    // signer (--capability).
+    if o.root {
+        let (public_key, label) = if let Some(keyf) = o.key.clone() {
+            let key = trust::Keyfile::load(&keyf).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                exit(1);
+            });
+            (key.public_key, o.label.clone().unwrap_or(key.label))
+        } else if let Some(dir) = o.capability_one.clone() {
+            let sig = trust::Signature::load(&dir).unwrap_or_else(|| {
+                eprintln!("no {} in {}", trust::SIG_NAME, dir.display());
+                exit(1);
+            });
+            (sig.public_key, o.label.clone().unwrap_or_default())
+        } else {
+            eprintln!("trust --root requires --key ROOT_KEYFILE or --capability DIR");
+            exit(2);
+        };
+        let fp = trust::fingerprint(&public_key);
+        if store.add_root(&public_key, &label) {
+            store.write(&trust_path).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                exit(1);
+            });
+            println!("trusted root {fp} → {}", trust_path.display());
+        } else {
+            println!("already a trusted root: {fp}");
+        }
+        return;
+    }
+
+    // Default: trust a capability's signer directly (trust-on-first-use).
+    let Some(dir) = o.capability_one.clone() else {
+        eprintln!("trust requires --capability DIR (whose signer to trust)");
+        exit(2);
+    };
+    let Some(sig) = trust::Signature::load(&dir) else {
+        eprintln!("no {} in {}", trust::SIG_NAME, dir.display());
+        exit(1);
+    };
     let label = o.label.clone().unwrap_or_default();
     let fp = trust::fingerprint(&sig.public_key);
     if store.add(&sig.public_key, &label) {
@@ -560,6 +640,54 @@ fn cmd_trust(rest: &[String]) {
     } else {
         println!("already trusted: {fp}");
     }
+}
+
+/// `oh keyring --key ROOT_KEYFILE --capability AUTHOR_DIR --out FILE` — the root
+/// vouches for the author who signed AUTHOR_DIR, producing a signed keyring.
+fn cmd_keyring(rest: &[String]) {
+    let o = parse_opts(rest);
+    let Some(keyf) = o.key.clone() else {
+        eprintln!("keyring requires --key ROOT_KEYFILE (the vouching root)");
+        exit(2);
+    };
+    let Some(dir) = o.capability_one.clone() else {
+        eprintln!("keyring requires --capability DIR (the author to vouch for)");
+        exit(2);
+    };
+    let root = trust::Keyfile::load(&keyf).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        exit(1);
+    });
+    let sig = trust::Signature::load(&dir).unwrap_or_else(|| {
+        eprintln!(
+            "no {} in {} (sign it first)",
+            trust::SIG_NAME,
+            dir.display()
+        );
+        exit(1);
+    });
+    let author = trust::TrustedKey {
+        public_key: sig.public_key,
+        label: o.label.clone().unwrap_or_default(),
+    };
+    let keyring = trust::sign_keyring(vec![author], &root).unwrap_or_else(|e| {
+        eprintln!("keyring signing failed: {e}");
+        exit(1);
+    });
+    let out = o
+        .out
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("keyring.json"));
+    keyring.write(&out).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        exit(1);
+    });
+    println!(
+        "signed keyring ({} author) by root {} → {}",
+        keyring.keys.len(),
+        trust::fingerprint(&keyring.root_public_key),
+        out.display()
+    );
 }
 
 fn cmd_revoke(rest: &[String]) {

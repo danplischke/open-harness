@@ -20,9 +20,12 @@
 //! Enforcement composes with the resolver (#15): a tampered capability is
 //! rejected on resolve; `--require-signed` additionally rejects unsigned /
 //! untrusted ones. The permission manifest (`manifest::Permissions`) is
-//! surfaced for consent and checked against a policy (advisory). A trusted key
-//! can be **revoked** (#22): revocation is consulted before trust, so a withdrawn
-//! key never verifies again — even in advisory mode. See `SECURITY.md` for the
+//! surfaced for consent and checked against a policy (advisory). Beyond per-key
+//! trust-on-first-use, a **root of trust** (#21) lets a trusted root vouch for
+//! many authors via a signed [`Keyring`], so consumers pin a root once. A trusted
+//! (or root) key can be **revoked** (#22): revocation is consulted before trust,
+//! so a withdrawn key never verifies again — even in advisory mode, and revoking
+//! a root withdraws every author it vouched for. See `SECURITY.md` for the
 //! threat model and what is still deferred (runtime sandbox *enforcement* of the
 //! permission manifest, key distribution).
 
@@ -277,15 +280,20 @@ pub fn verify(dir: &Path, trust: &TrustStore) -> Verification {
             reason: reason.to_string(),
         };
     }
-    match trust.label_for(&sig.public_key) {
-        Some(label) => Verification::Trusted {
+    // Direct trust, then delegated trust (a trusted root vouching via a keyring),
+    // then untrusted.
+    if let Some(label) = trust
+        .label_for(&sig.public_key)
+        .or_else(|| trust.delegated_label(&sig.public_key))
+    {
+        return Verification::Trusted {
             label,
             fingerprint: fp,
-        },
-        None => Verification::Untrusted {
-            fingerprint: fp,
-            public_key: sig.public_key.clone(),
-        },
+        };
+    }
+    Verification::Untrusted {
+        fingerprint: fp,
+        public_key: sig.public_key.clone(),
     }
 }
 
@@ -306,6 +314,74 @@ pub struct RevokedKey {
     pub reason: String,
 }
 
+/// A **keyring**: a set of author keys vouched for by a single **root** key
+/// (#21). It lets one trusted root delegate trust to many authors, so consumers
+/// pin a root once instead of every author key (trust-on-first-use per author).
+/// The root signs the sorted author public keys, so re-labeling doesn't break it
+/// and adding/removing an author requires the root to re-sign.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Keyring {
+    /// Author keys this keyring vouches for.
+    pub keys: Vec<TrustedKey>,
+    /// The root public key that signed this keyring.
+    pub root_public_key: String,
+    /// ed25519 signature by the root over the sorted author public keys.
+    pub signature: String,
+}
+
+/// The stable message a root signs to vouch for a keyring: the author public
+/// keys, sorted and newline-joined (order- and label-independent).
+fn keyring_message(keys: &[TrustedKey]) -> String {
+    let mut pks: Vec<&str> = keys.iter().map(|k| k.public_key.as_str()).collect();
+    pks.sort_unstable();
+    pks.join("\n")
+}
+
+/// Sign a keyring: the `root` vouches for `keys`.
+pub fn sign_keyring(keys: Vec<TrustedKey>, root: &Keyfile) -> Result<Keyring, String> {
+    let signing = root.signing_key()?;
+    let sig = signing.sign(keyring_message(&keys).as_bytes());
+    Ok(Keyring {
+        keys,
+        root_public_key: root.public_key.clone(),
+        signature: hex(&sig.to_bytes()),
+    })
+}
+
+impl Keyring {
+    pub fn load(path: &Path) -> Result<Keyring, String> {
+        let text =
+            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        serde_json::from_str(&text).map_err(|e| format!("invalid keyring: {e}"))
+    }
+
+    pub fn write(&self, path: &Path) -> Result<(), String> {
+        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        std::fs::write(path, format!("{text}\n"))
+            .map_err(|e| format!("write {}: {e}", path.display()))
+    }
+
+    /// Verify the root's signature over the vouched keys.
+    pub fn verify(&self) -> bool {
+        let Ok(pk) = decode_hex_array::<32>(&self.root_public_key) else {
+            return false;
+        };
+        let Ok(vk) = VerifyingKey::from_bytes(&pk) else {
+            return false;
+        };
+        let Ok(sig_bytes) = decode_hex_array::<64>(&self.signature) else {
+            return false;
+        };
+        let ed = EdSig::from_bytes(&sig_bytes);
+        vk.verify(keyring_message(&self.keys).as_bytes(), &ed)
+            .is_ok()
+    }
+
+    fn vouches_for(&self, public_key: &str) -> Option<&TrustedKey> {
+        self.keys.iter().find(|k| k.public_key == public_key)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TrustStore {
     #[serde(default)]
@@ -313,6 +389,13 @@ pub struct TrustStore {
     /// Revoked keys. Consulted before the trusted list, so revocation wins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revoked: Vec<RevokedKey>,
+    /// Trusted root keys — a root vouches for authors via a signed keyring (#21).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<TrustedKey>,
+    /// Keyrings attached to this store; each is honored only if signed by a
+    /// trusted (non-revoked) root and its signature verifies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keyrings: Vec<Keyring>,
 }
 
 impl TrustStore {
@@ -382,6 +465,50 @@ impl TrustStore {
             reason: reason.to_string(),
         });
         true
+    }
+
+    /// Trust a root key (delegation anchor). Returns false if already trusted.
+    pub fn add_root(&mut self, public_key: &str, label: &str) -> bool {
+        if self.roots.iter().any(|k| k.public_key == public_key) {
+            return false;
+        }
+        self.roots.push(TrustedKey {
+            public_key: public_key.to_string(),
+            label: label.to_string(),
+        });
+        true
+    }
+
+    /// Attach a keyring so its authors are trusted (once its root is trusted).
+    pub fn attach_keyring(&mut self, keyring: Keyring) {
+        self.keyrings.push(keyring);
+    }
+
+    fn is_root(&self, public_key: &str) -> bool {
+        self.roots.iter().any(|k| k.public_key == public_key)
+    }
+
+    /// A label for `public_key` if some attached keyring vouches for it, that
+    /// keyring's root is trusted (and not revoked), and its signature verifies.
+    /// This is the delegated-trust path: a valid root vouching for an author.
+    pub fn delegated_label(&self, public_key: &str) -> Option<String> {
+        for kr in &self.keyrings {
+            if !self.is_root(&kr.root_public_key) || self.is_revoked(&kr.root_public_key) {
+                continue;
+            }
+            if !kr.verify() {
+                continue;
+            }
+            if let Some(vouched) = kr.vouches_for(public_key) {
+                let via = fingerprint(&kr.root_public_key);
+                return Some(if vouched.label.is_empty() {
+                    format!("via root {via}")
+                } else {
+                    format!("{} (via root {via})", vouched.label)
+                });
+            }
+        }
+        None
     }
 }
 

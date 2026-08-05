@@ -258,6 +258,110 @@ fn a_revoked_key_cannot_be_retrusted_and_survives_round_trip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Root of trust (#21): a trusted root vouches for an author via a signed
+/// keyring, so the author verifies as Trusted without being pinned directly.
+#[test]
+fn delegated_trust_via_a_signed_keyring() {
+    let dir = tmp("delegated");
+    make_cap(&dir);
+    let author = trust::generate_keyfile("author").unwrap();
+    trust::sign(&dir, &author).unwrap().write(&dir).unwrap();
+
+    let root = trust::generate_keyfile("root").unwrap();
+    let keyring = trust::sign_keyring(
+        vec![trust::TrustedKey {
+            public_key: author.public_key.clone(),
+            label: "author".into(),
+        }],
+        &root,
+    )
+    .unwrap();
+    assert!(keyring.verify(), "the root's keyring signature verifies");
+
+    // A keyring alone (root not trusted) confers nothing.
+    let mut store = trust::TrustStore::default();
+    store.attach_keyring(keyring);
+    assert!(
+        matches!(trust::verify(&dir, &store), Verification::Untrusted { .. }),
+        "a keyring without a trusted root confers no trust"
+    );
+
+    // Trust the root → the author is now trusted via delegation.
+    store.add_root(&root.public_key, "root");
+    let v = trust::verify(&dir, &store);
+    assert!(
+        matches!(v, Verification::Trusted { ref label, .. } if label.contains("via root")),
+        "got {v:?}"
+    );
+    assert!(v.passes(true), "delegated trust passes strict mode");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_tampered_keyring_confers_no_trust() {
+    let dir = tmp("krtamper");
+    make_cap(&dir);
+    let author = trust::generate_keyfile("author").unwrap();
+    trust::sign(&dir, &author).unwrap().write(&dir).unwrap();
+    let root = trust::generate_keyfile("root").unwrap();
+    let mut keyring = trust::sign_keyring(
+        vec![trust::TrustedKey {
+            public_key: author.public_key.clone(),
+            label: "a".into(),
+        }],
+        &root,
+    )
+    .unwrap();
+    let flip = if keyring.signature.starts_with('a') {
+        'b'
+    } else {
+        'a'
+    };
+    keyring.signature.replace_range(0..1, &flip.to_string());
+    assert!(!keyring.verify());
+
+    let mut store = trust::TrustStore::default();
+    store.add_root(&root.public_key, "root");
+    store.attach_keyring(keyring);
+    assert!(
+        matches!(trust::verify(&dir, &store), Verification::Untrusted { .. }),
+        "a keyring whose root signature is invalid is ignored"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn revoking_a_root_withdraws_its_delegated_trust() {
+    let dir = tmp("krrevoke");
+    make_cap(&dir);
+    let author = trust::generate_keyfile("author").unwrap();
+    trust::sign(&dir, &author).unwrap().write(&dir).unwrap();
+    let root = trust::generate_keyfile("root").unwrap();
+    let keyring = trust::sign_keyring(
+        vec![trust::TrustedKey {
+            public_key: author.public_key.clone(),
+            label: "a".into(),
+        }],
+        &root,
+    )
+    .unwrap();
+
+    let mut store = trust::TrustStore::default();
+    store.add_root(&root.public_key, "root");
+    store.attach_keyring(keyring);
+    assert!(matches!(
+        trust::verify(&dir, &store),
+        Verification::Trusted { .. }
+    ));
+
+    store.revoke(&root.public_key, "root compromised");
+    assert!(
+        matches!(trust::verify(&dir, &store), Verification::Untrusted { .. }),
+        "revoking the root withdraws every author it vouched for"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn keyfile_and_trust_store_round_trip() {
     let dir = tmp("keys");

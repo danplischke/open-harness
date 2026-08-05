@@ -78,7 +78,7 @@ default and **hard failures under `--require-signed`**.
 | Untrusted code doing anything at all once installed (sandboxing) | not sandboxed; runs with agent privileges | **deferred** |
 | Key compromise / revocation | trust-store revocation list; a revoked key never verifies again, even in advisory mode (#22) | **enforced** |
 | Rollback / downgrade to an old vulnerable version | the profile lockfile pins commit + digest; no signed-version-monotonicity yet | **partial** (pinning only) |
-| Malicious registry / key distribution | registry is a stub; no TUF-style root of trust | **deferred** |
+| Malicious registry / key distribution | registry index resolution (#21) + a root-of-trust keyring (a trusted root vouches for authors; revoking the root withdraws them, #21); not yet full TUF (no threshold / timestamp / snapshot roles) | **partial** |
 
 ## What is enforced today vs deferred
 
@@ -93,8 +93,9 @@ of the permission manifest — real fs/net/exec confinement needs OS mechanisms
 (Linux `landlock`/`seccomp`, macOS `sandbox-exec`, Windows job objects) or a
 sandboxing dependency, so the manifest is surfaced + policy-checked but not yet
 enforced at runtime (#22); process-group kill for forking capabilities; a
-registry with a real root of trust — TUF-style (#21); and signed version
-monotonicity. These are tracked as follow-ups on the roadmap epic.
+**full TUF-style** registry root of trust (the #21 keyring model gives a root
+that vouches for authors, but not threshold / timestamp / snapshot roles); and
+signed version monotonicity. These are tracked as follow-ups on the roadmap epic.
 
 ## Reporting
 
