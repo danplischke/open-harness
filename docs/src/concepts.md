@@ -44,7 +44,8 @@ regardless of the host harness.
 - **rule** — one glob-scoped rule → each harness's native spelling.
 - **command** — one slash-command → each harness's native file.
 - **tool** — one tool → native **MCP** config, an **MCP-free** shell delivery, or
-  an **MCP→CLI bridge** for a server where the harness's MCP client is disabled.
+  an **MCP→CLI bridge** (stdio or streamable-HTTP) for a server where the harness's
+  MCP client is disabled.
 - **permission** — one policy (`allow`/`ask`/`deny`) → faithful on Claude/OpenCode,
   approximated-with-a-loss-report elsewhere, unsupported (with a reason) where
   there's no committed permission file.

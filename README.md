@@ -28,7 +28,7 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 | `src/adapters.rs` | 10 harness adapters: event mapping, deny signal, registration format |
 | `src/dispatch.rs` | Single-entrypoint dispatcher: concurrent fan-out, merge, policy-driven fail-closed |
 | `src/runtime.rs` | Hardened execution: per-capability timeout, output cap, error taxonomy |
-| `src/mcp.rs` | Minimal MCP client (stdio JSON-RPC) — the MCP→CLI bridge runtime |
+| `src/mcp.rs` | Minimal MCP client (stdio + streamable-HTTP) — the MCP→CLI bridge runtime |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `src/api.rs` | Stable embeddable API (JSON-string boundary) the CLI + bindings call |
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
@@ -38,7 +38,7 @@ This spike implements the riskiest slice of that — **hooks** — for 10 harnes
 | `capabilities/audit-note/` | A real **Node/TS** non-blocking capability |
 | `src/scaffold.rs` + `src/matrix.rs` | `oh scaffold` capability starters; adapter-generated support matrix |
 | `tests/conformance.rs` | 70 tests: harness contracts, protocol, kind plans, composition, runtime, API |
-| `tests/{profile,trust,mcp,authoring}.rs` | Sourcing (8), signing (9), MCP bridge (3), scaffold/matrix (5) |
+| `tests/{profile,trust,mcp,mcp_http,authoring}.rs` | Sourcing (8), signing (9), MCP bridge (7: stdio+http), scaffold/matrix (5) |
 | `docs/` | mdBook site (concepts, authoring guide, generated matrix); `docs/gen-matrix.sh` |
 | `.github/workflows/ci.yml` | CI: test on Linux/macOS/Windows; fmt+clippy; docs build + matrix drift gate |
 
@@ -68,7 +68,7 @@ actually reads — exit code 2 (Claude/Codex/Gemini/Windsurf), a `permission` JS
 ## Try it
 
 ```sh
-cargo test                            # 95 tests (conformance + profile + trust + mcp + authoring)
+cargo test                            # 99 tests (conformance + profile + trust + mcp + authoring)
 cargo run -- scaffold --kind hook --lang python --id my-guard   # a runnable capability starter
 cargo run -- scaffold --kind hook --lang typescript --id ts-guard   # typed hook.ts, run via node (no build)
 cargo run -- scaffold --project --id my-cap    # a TypeScript capability as an npm package
@@ -101,8 +101,8 @@ Capabilities declare a `kind`; each kind plugs into the same `Kind` trait
   `httpUrl`), **or** an **MCP-free** shell delivery (`provider: exec`) for
   environments that block MCP, **or** — for an MCP *server* where the harness's
   MCP client is disabled — an **MCP→CLI bridge**: a shell wrapper backed by
-  `oh mcp call` (a minimal MCP client) plus instructions, with a loud "the server
-  still runs" caveat on every artifact.
+  `oh mcp call` (a minimal MCP client speaking **stdio or streamable-HTTP**) plus
+  instructions, with a loud "the server still runs" caveat on every artifact.
 - **command** (generative) — one slash-command → each harness's native file:
   Markdown+YAML with `$ARGUMENTS`/`$N` (Claude/Codex/OpenCode/Cursor/Copilot/
   Windsurf/Cline) vs Gemini's `.toml` with `{{args}}`; positional args degrade
@@ -230,7 +230,9 @@ prebuilt-binary matrix is the remaining #14 follow-up.
   reliance — `python3`→`python` on Windows, `PATHEXT` honored) and the Python +
   Node capabilities are exercised on Linux/macOS/Windows in CI. `platform_note`
   surfaces per-harness caveats (e.g. Cline hooks are Unix-only).
-- Deferred: sandboxing + process-group kill, registry/signing, the MCP→CLI
-  bridge (#19), the TypeScript/`napi` binding. See `FEASIBILITY.md`.
+- Deferred (tracked as follow-ups on the [roadmap epic](https://github.com/danplischke/open-harness/issues/1)):
+  process-group kill for forking capabilities, capability sandboxing/revocation (#22),
+  registry sources + a root of trust (#21), transitive deps (#23), and `https` for the
+  MCP bridge (stdio + `http://` land today). See `FEASIBILITY.md`.
 
 License: MIT.

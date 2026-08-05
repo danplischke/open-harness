@@ -14,7 +14,7 @@
 use open_harness::adapters::{Harness, ALL};
 use open_harness::kind::{kind_impl, Artifact, Installability, KindId};
 use open_harness::manifest::{discover, LoadedCapability, PermissionPolicy};
-use open_harness::mcp::{self, ServerSpec};
+use open_harness::mcp::{self, HttpServerSpec, McpServer, ServerSpec};
 use open_harness::profile::{self, Lock, Profile, Resolved};
 use open_harness::scaffold::{self, Lang};
 use open_harness::sync::{self, ApplyReport, ChangeAction, Deferred, DriftKind, DriftReport};
@@ -46,7 +46,7 @@ fn main() {
         "remove" => cmd_remove(&rest),
         _ => {
             eprintln!(
-                "oh <init|scaffold|add|remove|doctor|run|emit|keygen|sign|verify|trust|mcp|resolve|sync|check|matrix> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--out FILE] [--require-signed] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]...) [--tool NAME] [--json '<args>']"
+                "oh <init|scaffold|add|remove|doctor|run|emit|keygen|sign|verify|trust|mcp|resolve|sync|check|matrix> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--out FILE] [--require-signed] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
             );
             exit(2);
         }
@@ -74,10 +74,12 @@ struct Opts {
     require_signed: bool,
     deny_network: bool,
     deny_exec: bool,
-    // MCP→CLI bridge (#19)
+    // MCP→CLI bridge (#19, #20)
     id: Option<String>,
     mcp_command: Option<String>,
     mcp_args: Vec<String>,
+    mcp_url: Option<String>,
+    mcp_headers: Vec<(String, String)>,
     tool: Option<String>,
     json_args: Option<String>,
     // authoring (#18)
@@ -112,6 +114,8 @@ fn parse_opts(rest: &[String]) -> Opts {
         id: None,
         mcp_command: None,
         mcp_args: Vec::new(),
+        mcp_url: None,
+        mcp_headers: Vec::new(),
         tool: None,
         json_args: None,
         scaffold_kind: None,
@@ -184,6 +188,20 @@ fn parse_opts(rest: &[String]) -> Opts {
             "--mcp-arg" => {
                 if let Some(a) = rest.get(i + 1) {
                     o.mcp_args.push(a.clone());
+                }
+                i += 2;
+            }
+            "--url" => {
+                o.mcp_url = rest.get(i + 1).cloned();
+                i += 2;
+            }
+            "--header" => {
+                // `--header "Name: value"` (repeatable), for http MCP endpoints.
+                if let Some(h) = rest.get(i + 1) {
+                    if let Some((k, v)) = h.split_once(':') {
+                        o.mcp_headers
+                            .push((k.trim().to_string(), v.trim().to_string()));
+                    }
                 }
                 i += 2;
             }
@@ -357,11 +375,11 @@ fn cmd_mcp(rest: &[String]) {
     let sub = rest.first().map(|s| s.as_str()).unwrap_or("");
     let o = parse_opts(&rest[rest.len().min(1)..]);
 
-    let spec = mcp_server_spec(&o).unwrap_or_else(|e| {
+    let server = mcp_server(&o).unwrap_or_else(|e| {
         eprintln!("{e}");
         exit(2);
     });
-    let mut client = mcp::Client::start(&spec).unwrap_or_else(|e| {
+    let mut client = mcp::Client::connect(&server).unwrap_or_else(|e| {
         eprintln!("mcp: {e}");
         exit(1);
     });
@@ -402,16 +420,23 @@ fn cmd_mcp(rest: &[String]) {
     }
 }
 
-/// Build the MCP server spec from `--command`/`--mcp-arg`, or from a capability
-/// (`--id` resolved under `--capabilities`).
-fn mcp_server_spec(o: &Opts) -> Result<ServerSpec, String> {
+/// Resolve which MCP server to reach: a streamable-HTTP `--url`, a stdio
+/// `--command`/`--mcp-arg`, or a capability's `tool.server` (`--id` under
+/// `--capabilities`, which may itself be stdio or http).
+fn mcp_server(o: &Opts) -> Result<McpServer, String> {
+    if let Some(url) = &o.mcp_url {
+        return Ok(McpServer::Http(HttpServerSpec {
+            url: url.clone(),
+            headers: o.mcp_headers.clone(),
+        }));
+    }
     if let Some(command) = &o.mcp_command {
-        return Ok(ServerSpec {
+        return Ok(McpServer::Stdio(ServerSpec {
             command: command.clone(),
             args: o.mcp_args.clone(),
             env: Vec::new(),
             cwd: None,
-        });
+        }));
     }
     if let Some(id) = &o.id {
         let caps = discover(&o.capabilities)?;
@@ -421,7 +446,7 @@ fn mcp_server_spec(o: &Opts) -> Result<ServerSpec, String> {
             .ok_or_else(|| format!("no capability '{id}' under {}", o.capabilities.display()))?;
         return mcp::server_from_capability(&cap);
     }
-    Err("mcp requires --command CMD or --id CAPABILITY".to_string())
+    Err("mcp requires --url URL, --command CMD, or --id CAPABILITY".to_string())
 }
 
 // ---- trust & signing (#17) -------------------------------------------------

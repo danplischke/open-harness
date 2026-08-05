@@ -20,8 +20,8 @@ fn echo_bridge() -> LoadedCapability {
 /// `tool.server` spec) and returns tool results.
 #[test]
 fn mcp_client_lists_and_calls_tools() {
-    let spec = mcp::server_from_capability(&echo_bridge()).unwrap();
-    let mut client = mcp::Client::start(&spec).expect("start MCP server");
+    let server = mcp::server_from_capability(&echo_bridge()).unwrap();
+    let mut client = mcp::Client::connect(&server).expect("start MCP server");
 
     let names: Vec<String> = client
         .list_tools()
@@ -64,7 +64,7 @@ fn mcp_direct_command_spec_works() {
 /// An unknown tool surfaces the server's JSON-RPC error, not a hang.
 #[test]
 fn mcp_unknown_tool_errors() {
-    let spec = mcp::server_from_capability(&echo_bridge()).unwrap();
-    let mut client = mcp::Client::start(&spec).unwrap();
+    let server = mcp::server_from_capability(&echo_bridge()).unwrap();
+    let mut client = mcp::Client::connect(&server).unwrap();
     assert!(client.call_tool("does-not-exist", json!({})).is_err());
 }
