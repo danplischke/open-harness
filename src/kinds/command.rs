@@ -53,13 +53,10 @@ impl Kind for CommandKind {
     }
 
     fn plan(&self, cap: &LoadedCapability, harness: Harness) -> KindPlan {
-        let cfg: CommandConfig = cap
-            .manifest
-            .config
-            .get("command")
-            .cloned()
-            .map(|v| serde_json::from_value(v).unwrap_or_default())
-            .unwrap_or_default();
+        let cfg: CommandConfig = match crate::kind::kind_config(cap, "command") {
+            Ok(c) => c,
+            Err(e) => return KindPlan::unsupported(e),
+        };
 
         let body = match resolve_body(cap, &cfg) {
             Ok(b) => b,

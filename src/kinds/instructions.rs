@@ -65,13 +65,10 @@ impl Kind for InstructionsKind {
             ));
         };
 
-        let cfg: InstructionsConfig = cap
-            .manifest
-            .config
-            .get("instructions")
-            .cloned()
-            .map(|v| serde_json::from_value(v).unwrap_or_default())
-            .unwrap_or_default();
+        let cfg: InstructionsConfig = match crate::kind::kind_config(cap, "instructions") {
+            Ok(c) => c,
+            Err(e) => return KindPlan::unsupported(e),
+        };
 
         let body = if let Some(bf) = &cfg.body_file {
             match std::fs::read_to_string(cap.dir.join(bf)) {

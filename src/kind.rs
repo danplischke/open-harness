@@ -94,6 +94,28 @@ impl KindPlan {
     }
 }
 
+/// Parse a kind's config block (`config["<key>"]`) into its typed shape.
+///
+/// Distinguishes an **absent** block (→ the default, legitimately empty) from a
+/// block that is **present but malformed** (→ a hard error carrying the reason).
+/// The malformed case must never be silently defaulted: doing so voids the
+/// capability's real content — body *and* every config field — and emits a
+/// plausible-but-wrong artifact with exit 0, the exact silent honest-degradation
+/// failure this project forbids. Callers surface the `Err` as an `Unsupported`
+/// plan so `oh check` / `oh sync` report the capability as blocked, with the
+/// serde error, instead of shipping garbage.
+pub fn kind_config<T>(cap: &LoadedCapability, key: &str) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned + Default,
+{
+    match cap.manifest.config.get(key) {
+        Some(v) => {
+            serde_json::from_value(v.clone()).map_err(|e| format!("invalid `{key}` config: {e}"))
+        }
+        None => Ok(T::default()),
+    }
+}
+
 /// The one operation every capability kind must implement.
 pub trait Kind {
     fn id(&self) -> KindId;

@@ -168,6 +168,38 @@ fn explicit_frontmatter_kind_and_id_win_over_conventions() {
 }
 
 #[test]
+fn single_file_skill_with_string_allowed_tools_keeps_body_and_frontmatter() {
+    // The reported blocker: a native string `allowed-tools` used to fail the
+    // config deserialize and silently void the whole skill (body → description).
+    let dir = tmp("strtools");
+    write(
+        &dir.join("airflow-dag-review/SKILL.md"),
+        "---\nname: airflow-dag-review\ndescription: Reviews Airflow DAGs.\nlicense: MIT\nallowed-tools: Read Grep Bash(git diff:*)\n---\n# Airflow\nThe real skill body.\n",
+    );
+    let cap = manifest::discover(&dir)
+        .unwrap()
+        .into_iter()
+        .find(|c| c.manifest.id == "airflow-dag-review")
+        .unwrap();
+    let plan = kind_impl(cap.manifest.kind).plan(&cap, Harness::Claude);
+    let Some(Artifact::File { contents, .. }) = plan.artifacts.first() else {
+        panic!("expected a file");
+    };
+    assert!(
+        contents.contains("allowed-tools: Read, Grep, Bash(git diff:*)"),
+        "{contents}"
+    );
+    assert!(
+        contents.contains("The real skill body."),
+        "body voided:\n{contents}"
+    );
+    assert!(
+        contents.contains("license: MIT"),
+        "passthrough voided:\n{contents}"
+    );
+}
+
+#[test]
 fn single_file_nested_override_is_applied_not_dropped() {
     // gap 2c must compose with single-file authoring: a nested `overrides:` block
     // in frontmatter has to reach the kind, not be flattened away.

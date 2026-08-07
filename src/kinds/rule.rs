@@ -59,13 +59,10 @@ impl Kind for RuleKind {
     }
 
     fn plan(&self, cap: &LoadedCapability, harness: Harness) -> KindPlan {
-        let cfg: RuleConfig = cap
-            .manifest
-            .config
-            .get("rule")
-            .cloned()
-            .map(|v| serde_json::from_value(v).unwrap_or_default())
-            .unwrap_or_default();
+        let cfg: RuleConfig = match crate::kind::kind_config(cap, "rule") {
+            Ok(c) => c,
+            Err(e) => return KindPlan::unsupported(e),
+        };
 
         let body = match resolve_body(cap, &cfg) {
             Ok(b) => b,

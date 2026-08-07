@@ -96,13 +96,10 @@ impl Kind for ToolKind {
     }
 
     fn plan(&self, cap: &LoadedCapability, harness: Harness) -> KindPlan {
-        let cfg: ToolConfig = cap
-            .manifest
-            .config
-            .get("tool")
-            .cloned()
-            .map(|v| serde_json::from_value(v).unwrap_or_default())
-            .unwrap_or_default();
+        let cfg: ToolConfig = match crate::kind::kind_config(cap, "tool") {
+            Ok(c) => c,
+            Err(e) => return KindPlan::unsupported(e),
+        };
 
         let delivery = match cfg.delivery {
             Delivery::Mcp => Delivery::Mcp,

@@ -82,13 +82,10 @@ impl Kind for PermissionKind {
     }
 
     fn plan(&self, cap: &LoadedCapability, harness: Harness) -> KindPlan {
-        let cfg: PermissionConfig = cap
-            .manifest
-            .config
-            .get("permission")
-            .cloned()
-            .map(|v| serde_json::from_value(v).unwrap_or_default())
-            .unwrap_or_default();
+        let cfg: PermissionConfig = match crate::kind::kind_config(cap, "permission") {
+            Ok(c) => c,
+            Err(e) => return KindPlan::unsupported(e),
+        };
 
         let r = match harness {
             Harness::Claude => render_claude(&cfg),

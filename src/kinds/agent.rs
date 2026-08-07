@@ -45,8 +45,9 @@ struct AgentConfig {
     /// Portable tier hint (`xl`/`l`/`m`/`s`). Carried, never resolved here.
     #[serde(default, alias = "model-tier")]
     model_tier: Option<String>,
-    /// Canonical tool names — mapped to each harness's native tokens.
-    #[serde(default)]
+    /// Canonical tool names — mapped to each harness's native tokens. Accepts a
+    /// sequence or the native scalar spelling (`Read Grep Bash(git diff:*)`).
+    #[serde(default, deserialize_with = "crate::tools::deserialize_tool_list")]
     tools: Vec<String>,
     /// Canonical tool → verdict (`allow`/`ask`/`deny`), for harnesses that gate
     /// an agent's tools by permission (OpenCode) rather than a list.
@@ -92,13 +93,10 @@ impl Kind for AgentKind {
     }
 
     fn plan(&self, cap: &LoadedCapability, harness: Harness) -> KindPlan {
-        let cfg: AgentConfig = cap
-            .manifest
-            .config
-            .get("agent")
-            .cloned()
-            .map(|v| serde_json::from_value(v).unwrap_or_default())
-            .unwrap_or_default();
+        let cfg: AgentConfig = match crate::kind::kind_config(cap, "agent") {
+            Ok(c) => c,
+            Err(e) => return KindPlan::unsupported(e),
+        };
 
         let body = match resolve_body(cap, &cfg) {
             Ok(b) => b,

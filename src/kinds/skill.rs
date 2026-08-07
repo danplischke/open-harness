@@ -51,7 +51,11 @@ struct SkillConfig {
     body: String,
     #[serde(default)]
     body_file: Option<String>,
-    #[serde(default, alias = "allowed-tools")]
+    #[serde(
+        default,
+        alias = "allowed-tools",
+        deserialize_with = "crate::tools::deserialize_tool_list"
+    )]
     allowed_tools: Vec<String>,
     /// Portable frontmatter passthrough: every key that isn't a known skill field
     /// is emitted verbatim on every harness (spec + forward-compat fields). This
@@ -90,13 +94,10 @@ impl Kind for SkillKind {
             ));
         };
 
-        let cfg: SkillConfig = cap
-            .manifest
-            .config
-            .get("skill")
-            .cloned()
-            .map(|v| serde_json::from_value(v).unwrap_or_default())
-            .unwrap_or_default();
+        let cfg: SkillConfig = match crate::kind::kind_config(cap, "skill") {
+            Ok(c) => c,
+            Err(e) => return KindPlan::unsupported(e),
+        };
 
         let body = if let Some(bf) = &cfg.body_file {
             match std::fs::read_to_string(cap.dir.join(bf)) {

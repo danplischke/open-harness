@@ -131,3 +131,72 @@ fn title_case(s: &str) -> String {
         None => String::new(),
     }
 }
+
+// ---- tool-list deserialization --------------------------------------------
+
+/// Split a native tool string into entries. Accepts comma **or** whitespace as
+/// separators (both native spellings occur) and keeps a parenthesized spec whole
+/// — `"Read Grep Bash(git diff:*)"` → `["Read", "Grep", "Bash(git diff:*)"]` —
+/// so the internal spaces/colons of `Bash(git diff:*)` are preserved.
+pub fn split_tool_string(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0i32;
+    let flush = |cur: &mut String, out: &mut Vec<String>| {
+        let t = cur.trim();
+        if !t.is_empty() {
+            out.push(t.to_string());
+        }
+        cur.clear();
+    };
+    for c in s.chars() {
+        match c {
+            '(' | '[' | '{' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' | ']' | '}' => {
+                depth = (depth - 1).max(0);
+                cur.push(c);
+            }
+            ',' if depth == 0 => flush(&mut cur, &mut out),
+            c if c.is_whitespace() && depth == 0 => flush(&mut cur, &mut out),
+            _ => cur.push(c),
+        }
+    }
+    flush(&mut cur, &mut out);
+    out
+}
+
+/// A serde deserializer for a tool list that accepts **either** a sequence
+/// (`[read, grep]`) **or** a scalar string in the native Agent-Skills / Claude
+/// spelling (`Read Grep Bash(git diff:*)`). Both are valid; without this the
+/// string form fails to deserialize, which — combined with a silent default —
+/// used to void the whole capability config.
+pub fn deserialize_tool_list<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, SeqAccess, Visitor};
+    struct V;
+    impl<'de> Visitor<'de> for V {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a tool list: a sequence, or a space/comma-separated string")
+        }
+        fn visit_str<E: de::Error>(self, s: &str) -> Result<Self::Value, E> {
+            Ok(split_tool_string(s))
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                out.push(s);
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_any(V)
+}

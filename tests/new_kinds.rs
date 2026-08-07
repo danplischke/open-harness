@@ -76,6 +76,63 @@ fn tool_list_dedups_after_mapping() {
     assert_eq!(mapped, vec!["readFile".to_string(), "search".to_string()]);
 }
 
+#[test]
+fn tool_string_splits_respecting_parens_and_separators() {
+    // A parenthesized spec stays whole; comma OR whitespace separates.
+    assert_eq!(
+        tools::split_tool_string("Read Grep Bash(git diff:*)"),
+        vec!["Read", "Grep", "Bash(git diff:*)"]
+    );
+    assert_eq!(tools::split_tool_string("Read, Grep"), vec!["Read", "Grep"]);
+    assert_eq!(
+        tools::split_tool_string("Bash(git add:*), Bash(git status:*)"),
+        vec!["Bash(git add:*)", "Bash(git status:*)"]
+    );
+    assert!(tools::split_tool_string("   ").is_empty());
+}
+
+#[test]
+fn skill_accepts_scalar_allowed_tools_and_keeps_body() {
+    // The native Agent-Skills spelling is a string, not a list. It must parse —
+    // and crucially must NOT void the body (the old failure emitted the
+    // description as the body).
+    let m = json!({
+        "id": "s", "name": "S", "description": "a description", "kind": "skill",
+        "skill": { "body": "THE REAL BODY", "allowed_tools": "Read Grep Bash(git diff:*)" }
+    });
+    let plan = kind_impl(KindId::Skill).plan(&cap(m), Harness::Claude);
+    let Some(Artifact::File { contents, .. }) = plan.artifacts.first() else {
+        panic!("expected a file");
+    };
+    assert!(
+        contents.contains("allowed-tools: Read, Grep, Bash(git diff:*)"),
+        "string allowed-tools must parse:\n{contents}"
+    );
+    // If the body were voided, it would be the description ("a description");
+    // the real body appearing proves it survived.
+    assert!(
+        contents.contains("THE REAL BODY"),
+        "the real body must survive, not be replaced by the description:\n{contents}"
+    );
+}
+
+#[test]
+fn malformed_kind_config_is_reported_not_silently_voided() {
+    // A type mismatch in a config block must surface as a loud Unsupported with
+    // the reason — never a silent default that ships a plausible-but-wrong file.
+    let m = json!({
+        "id": "r", "name": "R", "description": "d", "kind": "rule",
+        "rule": { "activation": "glob", "globs": "not-a-list" }
+    });
+    let plan = kind_impl(KindId::Rule).plan(&cap(m), Harness::Cursor);
+    match plan.installability {
+        Installability::Unsupported(reason) => {
+            assert!(reason.contains("invalid `rule` config"), "reason: {reason}");
+        }
+        other => panic!("expected Unsupported for a malformed config, got {other:?}"),
+    }
+}
+
 // ---- gap 1: agent kind ----------------------------------------------------
 
 fn agent_manifest() -> Value {
