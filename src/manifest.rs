@@ -373,28 +373,71 @@ const DOC_FILES: &[(&str, KindId)] = &[
     ("INSTRUCTIONS.md", KindId::Instructions),
 ];
 
-/// Scan a directory for capabilities. Each subdirectory is one capability,
-/// authored either as a `capability.json` manifest (any kind) or as a **single
-/// file** whose frontmatter is the manifest (`SKILL.md`, `AGENT.md`, …). When
-/// both are present, `capability.json` wins.
+/// Scan `dir` for capabilities, **recursing** through category subdirectories.
+///
+/// `dir` is a container. Each descendant directory that holds a `capability.json`
+/// or a single-file document (`SKILL.md`, `AGENT.md`, …) is one capability,
+/// authored either way (when both are present, `capability.json` wins). A
+/// directory that *is* a capability is **not** descended into — its
+/// subdirectories are its own assets — so a category tree like
+/// `skills/gcp/cloud-run-basics/SKILL.md` is found while a capability's internals
+/// are left alone.
+///
+/// Hidden directories (dot-prefixed, e.g. `.git` / `.open-harness`) and symlinks
+/// are skipped (the latter keeps the walk cycle-safe). A malformed capability is
+/// a hard error, never a silent skip — nothing is dropped without a reason.
 pub fn discover(dir: &Path) -> Result<Vec<LoadedCapability>, String> {
     let mut out = Vec::new();
-    let entries = std::fs::read_dir(dir).map_err(|e| format!("scan {}: {e}", dir.display()))?;
-    for e in entries.flatten() {
-        let sub = e.path();
-        let json = sub.join("capability.json");
-        if json.is_file() {
-            out.push(LoadedCapability::load(&json)?);
-            continue;
-        }
-        for (name, kind) in DOC_FILES {
-            let doc = sub.join(name);
-            if doc.is_file() {
-                out.push(LoadedCapability::from_doc(&doc, *kind)?);
-                break;
-            }
-        }
-    }
+    scan_container(dir, &mut out)?;
     out.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
     Ok(out)
+}
+
+/// Treat `dir` as a container: recurse into each real, non-hidden subdirectory,
+/// in a deterministic (name-sorted) order.
+fn scan_container(dir: &Path, out: &mut Vec<LoadedCapability>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("scan {}: {e}", dir.display()))?;
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+    for e in entries.flatten() {
+        // `file_type` does not traverse a symlink, so `is_dir()` is true only for
+        // a real directory — this skips files and symlinked dirs (no cycles).
+        let Ok(ft) = e.file_type() else { continue };
+        if !ft.is_dir() {
+            continue;
+        }
+        if e.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        subdirs.push(e.path());
+    }
+    subdirs.sort();
+    for sub in subdirs {
+        scan_capability_or_category(&sub, out)?;
+    }
+    Ok(())
+}
+
+/// `dir` is either a capability (load it and stop) or a category (recurse).
+fn scan_capability_or_category(dir: &Path, out: &mut Vec<LoadedCapability>) -> Result<(), String> {
+    if let Some(cap) = load_capability_dir(dir)? {
+        out.push(cap);
+        return Ok(());
+    }
+    scan_container(dir, out)
+}
+
+/// Load the capability rooted directly at `dir`, if any: a `capability.json`
+/// wins, otherwise the first recognized single-file document.
+fn load_capability_dir(dir: &Path) -> Result<Option<LoadedCapability>, String> {
+    let json = dir.join("capability.json");
+    if json.is_file() {
+        return Ok(Some(LoadedCapability::load(&json)?));
+    }
+    for (name, kind) in DOC_FILES {
+        let doc = dir.join(name);
+        if doc.is_file() {
+            return Ok(Some(LoadedCapability::from_doc(&doc, *kind)?));
+        }
+    }
+    Ok(None)
 }

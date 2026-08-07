@@ -140,6 +140,77 @@ fn capability_json_wins_when_both_are_present() {
     assert_eq!(caps[0].manifest.description, "json wins");
 }
 
+// ---- recursive discovery --------------------------------------------------
+
+#[test]
+fn discovers_capabilities_nested_in_category_directories() {
+    let dir = tmp("nested");
+    // A deep category tree (harness-style registry) — must be found, not skipped.
+    write(
+        &dir.join("skills/gcp/cloud-run-basics/SKILL.md"),
+        "---\ndescription: Deploy to Cloud Run.\n---\n# Cloud Run\nSteps…\n",
+    );
+    // A capability directly under the root.
+    write(
+        &dir.join("commit-style/SKILL.md"),
+        "---\ndescription: Commits.\n---\n# X\n",
+    );
+    // A nested capability.json, under its own category.
+    write(
+        &dir.join("agents/db/capability.json"),
+        r#"{"id":"db","kind":"agent","agent":{"body":"b"}}"#,
+    );
+    let ids: Vec<String> = manifest::discover(&dir)
+        .unwrap()
+        .into_iter()
+        .map(|c| c.manifest.id)
+        .collect();
+    assert!(
+        ids.contains(&"cloud-run-basics".to_string()),
+        "the deeply-nested skill must be found: {ids:?}"
+    );
+    assert!(ids.contains(&"commit-style".to_string()));
+    assert!(ids.contains(&"db".to_string()));
+    assert_eq!(ids.len(), 3);
+}
+
+#[test]
+fn does_not_descend_into_a_capability_directory() {
+    let dir = tmp("nodescend");
+    // `outer` is a capability; a look-alike file inside it is an asset, not a
+    // second capability — the walk must stop at `outer`.
+    write(
+        &dir.join("outer/SKILL.md"),
+        "---\ndescription: outer.\n---\n# outer\n",
+    );
+    write(
+        &dir.join("outer/examples/SKILL.md"),
+        "---\ndescription: an asset.\n---\n# inner\n",
+    );
+    let caps = manifest::discover(&dir).unwrap();
+    assert_eq!(caps.len(), 1);
+    assert_eq!(caps[0].manifest.id, "outer");
+}
+
+#[test]
+fn skips_hidden_directories() {
+    let dir = tmp("hidden");
+    write(
+        &dir.join(".git/SKILL.md"),
+        "---\ndescription: not a cap.\n---\n# x\n",
+    );
+    write(
+        &dir.join("real/SKILL.md"),
+        "---\ndescription: real.\n---\n# r\n",
+    );
+    let ids: Vec<String> = manifest::discover(&dir)
+        .unwrap()
+        .into_iter()
+        .map(|c| c.manifest.id)
+        .collect();
+    assert_eq!(ids, vec!["real".to_string()]);
+}
+
 // ---- scaffold -------------------------------------------------------------
 
 #[test]
