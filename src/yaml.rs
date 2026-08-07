@@ -124,11 +124,12 @@ pub fn apply_overrides(pairs: &mut Vec<(String, String)>, extra: &Map<String, Va
 // ---- reading (frontmatter → JSON) -----------------------------------------
 //
 // The inverse of the emit side, for single-file capabilities whose frontmatter
-// *is* the manifest. A deliberately small YAML subset — the shapes real
-// frontmatter uses: scalars (quoted/plain, bool/int/float/null inference), flow
-// lists `[a, b]` and maps `{k: v}` (nested), and top-level block lists (`- x`)
-// and block maps. Not a general YAML parser (no anchors, multi-line scalars, or
-// deep block indentation); deeply-nested config belongs in `capability.json`.
+// *is* the manifest. A focused YAML subset covering what real frontmatter uses:
+// scalars (quoted/plain, bool/int/float/null inference), flow lists `[a, b]` and
+// maps `{k: v}`, and **block** mappings and sequences nested to arbitrary depth
+// (sequences of scalars, sequences of maps, maps of lists) — including PyYAML's
+// default layout where a sequence sits at its key's indent. Not a general YAML
+// parser: no anchors/aliases, tags, or multi-line (`|` / `>` / folded) scalars.
 
 /// Split a `---\nfrontmatter\n---\n\nbody` document into its parsed frontmatter
 /// map and its body. A document without a leading `---` yields an empty map and
@@ -157,78 +158,175 @@ pub fn parse_document(text: &str) -> Result<(Map<String, Value>, String), String
 }
 
 /// Parse a YAML frontmatter block (the text between the `---` fences) into a map.
+///
+/// Indentation carries structure, so this is a recursive descent over the block:
+/// nested mappings, sequences of scalars, sequences of maps, and arbitrary depth
+/// all parse — including PyYAML's default layout where a sequence value sits at
+/// the *same* indent as its key (`key:` then `- item`).
 pub fn parse_frontmatter(text: &str) -> Result<Map<String, Value>, String> {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut map = Map::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let raw = lines[i];
-        let content = strip_comment(raw);
-        if content.trim().is_empty() {
-            i += 1;
-            continue;
-        }
-        if raw.starts_with([' ', '\t']) {
-            return Err(format!("unexpected indentation in frontmatter: {raw:?}"));
-        }
-        let (key, rest) = content
-            .split_once(':')
-            .ok_or_else(|| format!("frontmatter line without ':': {content:?}"))?;
-        let key = key.trim().to_string();
-        let rest = rest.trim();
-        if rest.is_empty() {
-            // A block list or block map on the following indented lines.
-            let mut block: Vec<&str> = Vec::new();
-            let mut j = i + 1;
-            while j < lines.len() {
-                let l = lines[j];
-                if l.trim().is_empty() {
-                    j += 1;
-                    continue;
-                }
-                if !l.starts_with([' ', '\t']) {
-                    break;
-                }
-                block.push(l);
-                j += 1;
-            }
-            map.insert(key, parse_block(&block)?);
-            i = j;
-        } else {
-            map.insert(key, parse_flow(rest)?);
-            i += 1;
-        }
+    let lines = logical_lines(text);
+    let mut pos = 0;
+    let value = parse_map(&lines, &mut pos, 0)?;
+    if pos < lines.len() {
+        return Err(format!(
+            "frontmatter must be a mapping; unexpected line: {:?}",
+            lines[pos].1
+        ));
     }
-    Ok(map)
+    match value {
+        Value::Object(m) => Ok(m),
+        _ => Ok(Map::new()),
+    }
 }
 
-/// A top-level block: `- item` lines → array; `k: v` lines → map.
-fn parse_block(lines: &[&str]) -> Result<Value, String> {
-    let mut cleaned: Vec<String> = Vec::new();
-    for l in lines {
-        let c = strip_comment(l);
-        if !c.trim().is_empty() {
-            cleaned.push(c.trim().to_string());
+/// Preprocess the block into `(indent, content)` logical lines: drop blank and
+/// comment lines, and split each `- item` into a bare `-` marker at the dash's
+/// column plus the item content at the column where it starts. That reduction
+/// lets the same map/seq recursion handle sequences of scalars, sequences of
+/// maps, and nesting without special cases.
+fn logical_lines(text: &str) -> Vec<(usize, String)> {
+    let mut out: Vec<(usize, String)> = Vec::new();
+    for raw in text.lines() {
+        let stripped = strip_comment(raw);
+        if stripped.trim().is_empty() {
+            continue;
+        }
+        let mut indent = stripped.len() - stripped.trim_start().len();
+        let mut content = stripped.trim().to_string();
+        loop {
+            if content == "-" {
+                out.push((indent, "-".to_string()));
+                break;
+            } else if let Some(rest) = content.strip_prefix("- ") {
+                out.push((indent, "-".to_string()));
+                let trimmed = rest.trim_start();
+                indent += 2 + (rest.len() - trimmed.len());
+                content = trimmed.to_string();
+            } else {
+                out.push((indent, content));
+                break;
+            }
         }
     }
-    if cleaned.is_empty() {
+    out
+}
+
+fn is_seq_marker(content: &str) -> bool {
+    content == "-"
+}
+
+/// The index of the `:` that separates a mapping key from its value: the first
+/// top-level colon (outside quotes/flow) followed by a space or end-of-line.
+fn find_key_colon(content: &str) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut in_str = false;
+    let mut depth = 0i32;
+    for (i, c) in content.char_indices() {
+        match c {
+            '"' => in_str = !in_str,
+            _ if in_str => {}
+            '[' | '{' => depth += 1,
+            ']' | '}' => depth -= 1,
+            ':' if depth == 0 => {
+                let next = bytes.get(i + 1);
+                if next.is_none() || next == Some(&b' ') {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Parse a block mapping whose keys sit at `indent`.
+fn parse_map(lines: &[(usize, String)], pos: &mut usize, indent: usize) -> Result<Value, String> {
+    let mut map = Map::new();
+    while let Some((ind, content)) = lines.get(*pos) {
+        if *ind < indent {
+            break;
+        }
+        if *ind > indent {
+            return Err(format!("unexpected indentation: {content:?}"));
+        }
+        if is_seq_marker(content) {
+            break; // a sequence at map indent is not a mapping entry
+        }
+        let ci = find_key_colon(content)
+            .ok_or_else(|| format!("mapping line without a key ':': {content:?}"))?;
+        let key = unquote(content[..ci].trim());
+        let rest = content[ci + 1..].trim();
+        *pos += 1;
+        let value = if !rest.is_empty() {
+            parse_flow(rest)?
+        } else {
+            parse_value_after_key(lines, pos, indent)?
+        };
+        map.insert(key, value);
+    }
+    Ok(Value::Object(map))
+}
+
+/// The value that follows a `key:` with an empty inline part: a sequence (whose
+/// items may sit at the key's indent — PyYAML style — or deeper), a nested
+/// mapping (strictly deeper), or null.
+fn parse_value_after_key(
+    lines: &[(usize, String)],
+    pos: &mut usize,
+    key_indent: usize,
+) -> Result<Value, String> {
+    match lines.get(*pos) {
+        Some((ind, content)) if is_seq_marker(content) && *ind >= key_indent => {
+            parse_seq(lines, pos, *ind)
+        }
+        Some((ind, _)) if *ind > key_indent => parse_node(lines, pos, *ind),
+        _ => Ok(Value::Null),
+    }
+}
+
+/// Parse a block sequence whose `-` markers sit at `indent`. Each item's value is
+/// the nested block indented deeper than the marker (a scalar, flow value, map,
+/// or nested sequence), or null for a bare `-`.
+fn parse_seq(lines: &[(usize, String)], pos: &mut usize, indent: usize) -> Result<Value, String> {
+    let mut arr = Vec::new();
+    while let Some((ind, content)) = lines.get(*pos) {
+        if *ind < indent {
+            break;
+        }
+        if *ind > indent {
+            return Err(format!("unexpected indentation in sequence: {content:?}"));
+        }
+        if !is_seq_marker(content) {
+            break;
+        }
+        *pos += 1;
+        let value = match lines.get(*pos) {
+            Some((ind2, _)) if *ind2 > indent => parse_node(lines, pos, *ind2)?,
+            _ => Value::Null,
+        };
+        arr.push(value);
+    }
+    Ok(Value::Array(arr))
+}
+
+/// Parse the node beginning at the current line (indent already established by the
+/// caller): a sequence, a lone flow value, a mapping, or a lone scalar.
+fn parse_node(lines: &[(usize, String)], pos: &mut usize, indent: usize) -> Result<Value, String> {
+    let Some((_, content)) = lines.get(*pos) else {
         return Ok(Value::Null);
-    }
-    if cleaned.iter().all(|l| l == "-" || l.starts_with("- ")) {
-        let mut arr = Vec::new();
-        for l in &cleaned {
-            arr.push(parse_flow(l[1..].trim())?);
-        }
-        Ok(Value::Array(arr))
+    };
+    if is_seq_marker(content) {
+        parse_seq(lines, pos, indent)
+    } else if content.starts_with('[') || content.starts_with('{') {
+        let v = parse_flow(content)?;
+        *pos += 1;
+        Ok(v)
+    } else if find_key_colon(content).is_some() {
+        parse_map(lines, pos, indent)
     } else {
-        let mut obj = Map::new();
-        for l in &cleaned {
-            let (k, v) = l
-                .split_once(':')
-                .ok_or_else(|| format!("block-map line without ':': {l:?}"))?;
-            obj.insert(k.trim().to_string(), parse_flow(v.trim())?);
-        }
-        Ok(Value::Object(obj))
+        let v = parse_scalar(content);
+        *pos += 1;
+        Ok(v)
     }
 }
 

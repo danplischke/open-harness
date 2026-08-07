@@ -139,14 +139,17 @@ booleans (a `version`, a leading `-`) should be quoted to stay strings.
 
 Any document capability may carry an `overrides` block to tune one target without
 forking — replace the output `path`, the `tools` list (native tokens verbatim),
-or merge extra `frontmatter`. In a single file, write it as frontmatter (nested
-flow YAML), or use `capability.json` when the overrides get large:
+or merge extra `frontmatter`. In a single file it's just nested frontmatter
+(block or flow YAML both parse):
 
 ```markdown
 ---
 description: Use for schema and query work.
 tools: [read, grep, bash]
-overrides: { copilot: { tools: [readFile, search, runInTerminal], frontmatter: { user-invocable: true } } }
+overrides:
+  copilot:
+    tools: [readFile, search, runInTerminal]
+    frontmatter: { user-invocable: true }
 ---
 ```
 

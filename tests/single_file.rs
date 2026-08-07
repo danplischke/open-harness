@@ -64,6 +64,49 @@ fn quoted_scalar_keeps_colon_and_hash_and_bare_markdown_is_all_body() {
     assert_eq!(body, "# Just markdown\n");
 }
 
+#[test]
+fn parses_a_map_of_list_in_both_pyyaml_and_indented_styles() {
+    // PyYAML's default: the sequence sits at its key's indent.
+    let (fm, _) =
+        yaml::parse_document("---\ntriggers:\n  keywords:\n  - Aurora DSQL\n  - DSQL\n---\nx")
+            .unwrap();
+    assert_eq!(
+        fm.get("triggers").unwrap(),
+        &json!({"keywords": ["Aurora DSQL", "DSQL"]})
+    );
+    // The same content, sequence indented further, parses identically.
+    let (fm2, _) =
+        yaml::parse_document("---\ntriggers:\n  keywords:\n    - Aurora DSQL\n    - DSQL\n---\nx")
+            .unwrap();
+    assert_eq!(fm.get("triggers"), fm2.get("triggers"));
+}
+
+#[test]
+fn parses_a_deeply_nested_block_map() {
+    let (fm, _) =
+        yaml::parse_document("---\noverrides:\n  claude-code:\n    path: CUSTOM/PATH.md\n---\nx")
+            .unwrap();
+    assert_eq!(
+        fm.get("overrides").unwrap(),
+        &json!({"claude-code": {"path": "CUSTOM/PATH.md"}})
+    );
+}
+
+#[test]
+fn parses_a_block_sequence_of_maps() {
+    let (fm, _) = yaml::parse_document(
+        "---\nsteps:\n- name: build\n  run: cargo build\n- name: test\n  run: cargo test\n---\nx",
+    )
+    .unwrap();
+    assert_eq!(
+        fm.get("steps").unwrap(),
+        &json!([
+            {"name": "build", "run": "cargo build"},
+            {"name": "test", "run": "cargo test"},
+        ])
+    );
+}
+
 // ---- discovery ------------------------------------------------------------
 
 #[test]
@@ -122,6 +165,30 @@ fn explicit_frontmatter_kind_and_id_win_over_conventions() {
     let caps = manifest::discover(&dir).unwrap();
     assert_eq!(caps[0].manifest.id, "house-rules");
     assert_eq!(caps[0].manifest.kind, KindId::Instructions);
+}
+
+#[test]
+fn single_file_nested_override_is_applied_not_dropped() {
+    // gap 2c must compose with single-file authoring: a nested `overrides:` block
+    // in frontmatter has to reach the kind, not be flattened away.
+    let dir = tmp("override");
+    write(
+        &dir.join("nested/AGENT.md"),
+        "---\ndescription: An agent.\ntools: [read]\noverrides:\n  claude-code:\n    path: CUSTOM/OVERRIDE/PATH.md\n---\nBody.\n",
+    );
+    let cap = manifest::discover(&dir)
+        .unwrap()
+        .into_iter()
+        .find(|c| c.manifest.id == "nested")
+        .unwrap();
+    let plan = kind_impl(KindId::Agent).plan(&cap, Harness::Claude);
+    let Some(Artifact::File { path, .. }) = plan.artifacts.first() else {
+        panic!("expected a file");
+    };
+    assert_eq!(
+        path, "CUSTOM/OVERRIDE/PATH.md",
+        "the single-file per-harness override must be applied"
+    );
 }
 
 #[test]
