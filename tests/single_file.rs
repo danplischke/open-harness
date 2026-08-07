@@ -107,6 +107,22 @@ fn parses_a_block_sequence_of_maps() {
     );
 }
 
+#[test]
+fn parses_single_quoted_scalars_and_the_escape() {
+    // PyYAML single-quotes any scalar starting with `*` (the alias indicator), so
+    // globs arrive single-quoted; `''` is an escaped `'`.
+    let (fm, _) = yaml::parse_document(
+        "---\nfiles:\n- dags/**/*.py\n- '**/airflow.cfg'\nplain: [a, '**/q.yml']\nesc: 'it''s'\n---\nx",
+    )
+    .unwrap();
+    assert_eq!(
+        fm.get("files").unwrap(),
+        &json!(["dags/**/*.py", "**/airflow.cfg"])
+    );
+    assert_eq!(fm.get("plain").unwrap(), &json!(["a", "**/q.yml"]));
+    assert_eq!(fm.get("esc").unwrap(), &json!("it's"));
+}
+
 // ---- discovery ------------------------------------------------------------
 
 #[test]
@@ -186,7 +202,7 @@ fn single_file_skill_with_string_allowed_tools_keeps_body_and_frontmatter() {
         panic!("expected a file");
     };
     assert!(
-        contents.contains("allowed-tools: Read, Grep, Bash(git diff:*)"),
+        contents.contains("allowed-tools: Read Grep Bash(git diff:*)"),
         "{contents}"
     );
     assert!(
@@ -196,6 +212,31 @@ fn single_file_skill_with_string_allowed_tools_keeps_body_and_frontmatter() {
     assert!(
         contents.contains("license: MIT"),
         "passthrough voided:\n{contents}"
+    );
+}
+
+#[test]
+fn space_separated_allowed_tools_round_trips() {
+    // A space-separated `allowed-tools` re-emits space-separated, so `check --ci`
+    // doesn't flag a never-edited file as drifted.
+    let dir = tmp("idem");
+    write(
+        &dir.join("s/SKILL.md"),
+        "---\nname: s\ndescription: d\nallowed-tools: Read Grep\n---\nbody\n",
+    );
+    let cap = manifest::discover(&dir)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let plan = kind_impl(cap.manifest.kind).plan(&cap, Harness::Claude);
+    let Some(Artifact::File { contents, .. }) = plan.artifacts.first() else {
+        panic!("expected a file");
+    };
+    assert!(contents.contains("allowed-tools: Read Grep"), "{contents}");
+    assert!(
+        !contents.contains("Read, Grep"),
+        "space input must not become comma-joined:\n{contents}"
     );
 }
 

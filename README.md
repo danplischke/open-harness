@@ -88,7 +88,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 139 tests, green on Linux/macOS/Windows
+cargo test                            # 152 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -263,7 +263,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `src/event.rs` | Normalized event model: `(phase, subject, tool_class?)` |
 | `src/adapters.rs` | 11 harness adapters: event mapping, deny signal, registration format |
 | `src/kind.rs` + `src/kinds/` | The `Kind` trait + the eight capability kinds |
-| `src/tools.rs` + `src/yaml.rs` | Canonical tool vocabulary (shared by permission/skill/agent) + YAML frontmatter (emit + parse for single-file capabilities) |
+| `src/tools.rs` + `src/yaml.rs` | Canonical tool vocabulary (shared by permission/skill/agent) + YAML frontmatter (hand-rolled emit; read via `yaml-rust2`) |
 | `src/dispatch.rs` | Single-entrypoint dispatcher: concurrent fan-out, merge, policy-driven fail-closed |
 | `src/runtime.rs` | Hardened execution: per-capability timeout, output cap, error taxonomy, cross-platform interpreters |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
@@ -277,17 +277,21 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
 | `docs/` | mdBook site (concepts, authoring guide, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 139 tests: conformance (70) + sourcing (13) + trust (15) + new kinds (19) + single-file (8) + MCP bridge (7) + authoring (5) + capture (2) |
+| `tests/` | 152 tests: conformance (70) + new kinds (22) + single-file (18) + trust (15) + sourcing (13) + MCP bridge (7) + authoring (5) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies
 
-The default build is deliberately lean: `serde` / `serde_json`, and `ed25519-dalek`
+The default build is deliberately lean: `serde` / `serde_json`, `ed25519-dalek`
 / `sha2` / `getrandom` for trust (integrity verification is always available, so
-it is not feature-gated). Everything else that would pull weight is **opt-in**:
-`ffi` (uniffi, for the Python binding), `mcp-http-tls` (rustls, for https on the
-bridge). The stdio JSON-RPC client, the http client, and hex/base64 are
-hand-rolled to keep it that way.
+it is not feature-gated), and `yaml-rust2` to read single-file capability
+frontmatter. Everything else that would pull weight is **opt-in**: `ffi` (uniffi,
+for the Python binding), `mcp-http-tls` (rustls, for https on the bridge). The
+line we draw: the *simple, fully-specified* wire formats — the stdio JSON-RPC
+client, the http client, hex/base64 — are hand-rolled to stay lean, but YAML
+frontmatter is *read* with a real parser (`yaml-rust2`), because YAML is a
+genuinely complex spec and getting quotes / nesting / anchors right is what a
+library is for, not something to hand-roll. We still emit our own frontmatter.
 
 ## Scope & honesty
 

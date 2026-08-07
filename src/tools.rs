@@ -177,26 +177,91 @@ pub fn deserialize_tool_list<'de, D>(d: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::{self, SeqAccess, Visitor};
-    struct V;
-    impl<'de> Visitor<'de> for V {
-        type Value = Vec<String>;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a tool list: a sequence, or a space/comma-separated string")
-        }
-        fn visit_str<E: de::Error>(self, s: &str) -> Result<Self::Value, E> {
-            Ok(split_tool_string(s))
-        }
-        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
-            Ok(Vec::new())
-        }
-        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-            let mut out = Vec::new();
-            while let Some(s) = seq.next_element::<String>()? {
-                out.push(s);
-            }
-            Ok(out)
+    Ok(<ToolList as serde::Deserialize>::deserialize(d)?.items)
+}
+
+/// Does `s` contain a comma at the top level (outside a parenthesized spec)?
+/// Distinguishes `Read, Grep` (comma-separated) from `Read Grep` (space) while
+/// keeping the comma inside `Bash(git add:*, ...)` out of the decision.
+fn has_top_level_comma(s: &str) -> bool {
+    let mut depth = 0i32;
+    for c in s.chars() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = (depth - 1).max(0),
+            ',' if depth == 0 => return true,
+            _ => {}
         }
     }
-    d.deserialize_any(V)
+    false
+}
+
+/// How a scalar tool list was written, so it can be re-emitted the same way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolSep {
+    /// `Read, Grep` — also the default for a YAML sequence input.
+    #[default]
+    Comma,
+    /// `Read Grep`.
+    Space,
+}
+
+impl ToolSep {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolSep::Comma => ", ",
+            ToolSep::Space => " ",
+        }
+    }
+}
+
+/// A tool list that remembers its written form. Accepts a sequence or the native
+/// scalar spelling; a scalar records whether it used spaces or commas so
+/// re-emitting round-trips (import → emit is idempotent, which matters for drift
+/// detection). The tokens themselves are still mapped per-harness by the kind.
+#[derive(Debug, Clone, Default)]
+pub struct ToolList {
+    pub items: Vec<String>,
+    pub sep: ToolSep,
+}
+
+impl<'de> serde::Deserialize<'de> for ToolList {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, SeqAccess, Visitor};
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = ToolList;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a tool list: a sequence, or a space/comma-separated string")
+            }
+            fn visit_str<E: de::Error>(self, s: &str) -> Result<ToolList, E> {
+                let sep = if has_top_level_comma(s) {
+                    ToolSep::Comma
+                } else {
+                    ToolSep::Space
+                };
+                Ok(ToolList {
+                    items: split_tool_string(s),
+                    sep,
+                })
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<ToolList, E> {
+                Ok(ToolList::default())
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<ToolList, A::Error> {
+                let mut items = Vec::new();
+                while let Some(s) = seq.next_element::<String>()? {
+                    items.push(s);
+                }
+                Ok(ToolList {
+                    items,
+                    sep: ToolSep::Comma,
+                })
+            }
+        }
+        d.deserialize_any(V)
+    }
 }

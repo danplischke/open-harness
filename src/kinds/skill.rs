@@ -51,12 +51,8 @@ struct SkillConfig {
     body: String,
     #[serde(default)]
     body_file: Option<String>,
-    #[serde(
-        default,
-        alias = "allowed-tools",
-        deserialize_with = "crate::tools::deserialize_tool_list"
-    )]
-    allowed_tools: Vec<String>,
+    #[serde(default, alias = "allowed-tools")]
+    allowed_tools: crate::tools::ToolList,
     /// Portable frontmatter passthrough: every key that isn't a known skill field
     /// is emitted verbatim on every harness (spec + forward-compat fields). This
     /// flattening means single-file frontmatter and a `capability.json` `skill`
@@ -126,9 +122,14 @@ impl Kind for SkillKind {
                 yaml::scalar(&cap.manifest.description),
             ),
         ];
-        if !cfg.allowed_tools.is_empty() {
-            let native = tools::native_tools(&cfg.allowed_tools, harness);
-            pairs.push(("allowed-tools".to_string(), native.join(", ")));
+        if !cfg.allowed_tools.items.is_empty() {
+            let native = tools::native_tools(&cfg.allowed_tools.items, harness);
+            // Re-emit with the separator the source used (space vs comma), so an
+            // import → emit round-trip is idempotent (no phantom drift).
+            pairs.push((
+                "allowed-tools".to_string(),
+                native.join(cfg.allowed_tools.sep.as_str()),
+            ));
         }
         // Portable passthrough (never clobber a core key).
         for (k, v) in &cfg.frontmatter {
@@ -180,81 +181,30 @@ pub struct ImportedSkill {
     pub body: String,
 }
 
-/// Parse a `SKILL.md` document into a normalized skill. Handles plain and
-/// double-quoted scalar values (so a description containing `:` round-trips) and
-/// `allowed-tools` as either a comma list or a `[a, b]` flow list. Block scalars
-/// and nested maps are out of scope (a line-based parser); unknown keys are kept
-/// out of the core fields.
+/// Parse a `SKILL.md` document into a normalized skill, reusing the shared
+/// frontmatter reader ([`crate::yaml::parse_document`]) so quoting and nesting
+/// are handled by the YAML parser. `allowed-tools` accepts a sequence or the
+/// native scalar spelling; unknown keys are ignored.
 pub fn import_skill_md(text: &str) -> Result<ImportedSkill, String> {
-    let text = text.trim_start();
-    let after_open = text
-        .strip_prefix("---")
-        .ok_or("missing frontmatter opening '---'")?;
-    let close = after_open
-        .find("\n---")
-        .ok_or("missing frontmatter closing '---'")?;
-    let frontmatter = &after_open[..close];
-    let body = after_open[close + "\n---".len()..]
-        .trim_start_matches(['\n', '\r'])
-        .to_string();
-
-    let mut skill = ImportedSkill::default();
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once(':') {
-            let (k, v) = (k.trim(), unquote(v.trim()));
-            match k {
-                "name" => skill.name = v,
-                "description" => skill.description = v,
-                "allowed-tools" => skill.allowed_tools = parse_tool_list(&v),
-                _ => {}
-            }
-        }
-    }
-    skill.body = body.trim_end().to_string();
-    Ok(skill)
-}
-
-/// Unwrap a double-quoted YAML scalar (with basic escape handling); pass a plain
-/// scalar through unchanged.
-fn unquote(v: &str) -> String {
-    if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
-        let inner = &v[1..v.len() - 1];
-        let mut out = String::with_capacity(inner.len());
-        let mut chars = inner.chars();
-        while let Some(c) = chars.next() {
-            if c == '\\' {
-                match chars.next() {
-                    Some('n') => out.push('\n'),
-                    Some('t') => out.push('\t'),
-                    Some('r') => out.push('\r'),
-                    Some('"') => out.push('"'),
-                    Some('\\') => out.push('\\'),
-                    Some(other) => out.push(other),
-                    None => {}
-                }
-            } else {
-                out.push(c);
-            }
-        }
-        out
-    } else {
-        v.to_string()
-    }
-}
-
-/// Parse an `allowed-tools` value: a `[a, b]` flow list or a bare comma list.
-fn parse_tool_list(v: &str) -> Vec<String> {
-    let inner = v
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(v);
-    inner
-        .split(',')
-        .map(|s| unquote(s.trim()))
-        .filter(|s| !s.is_empty())
-        .collect()
+    let (fm, body) = crate::yaml::parse_document(text)?;
+    let str_field = |k: &str| {
+        fm.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let allowed_tools = match fm.get("allowed-tools") {
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        Some(Value::String(s)) => crate::tools::split_tool_string(s),
+        _ => Vec::new(),
+    };
+    Ok(ImportedSkill {
+        name: str_field("name"),
+        description: str_field("description"),
+        allowed_tools,
+        body: body.trim_end().to_string(),
+    })
 }

@@ -32,6 +32,11 @@ uniffi = { version = "0.28", features = ["cli"], optional = true }
 ed25519-dalek = "2"
 sha2 = "0.10"
 getrandom = "0.2"
+# YAML frontmatter for single-file capabilities. A real, pure-Rust YAML 1.2
+# parser — we hand-roll the *simple* wire formats (JSON-RPC, HTTP, hex), but YAML
+# is a complex spec and correctness (quotes, nesting, anchors) is what a library
+# is for. Reading only; we emit our own frontmatter.
+yaml-rust2 = "0.10"
 # Optional TLS for the MCP bridge (#25) — only compiled with `mcp-http-tls`.
 # `ring` provider (no cmake/build tooling) + Mozilla roots, both pure-Rust.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }

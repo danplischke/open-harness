@@ -104,9 +104,11 @@ fn skill_accepts_scalar_allowed_tools_and_keeps_body() {
     let Some(Artifact::File { contents, .. }) = plan.artifacts.first() else {
         panic!("expected a file");
     };
+    // A space-separated input re-emits space-separated (idempotent), and the
+    // parenthesized spec stays whole.
     assert!(
-        contents.contains("allowed-tools: Read, Grep, Bash(git diff:*)"),
-        "string allowed-tools must parse:\n{contents}"
+        contents.contains("allowed-tools: Read Grep Bash(git diff:*)"),
+        "string allowed-tools must parse + round-trip:\n{contents}"
     );
     // If the body were voided, it would be the description ("a description");
     // the real body appearing proves it survived.
