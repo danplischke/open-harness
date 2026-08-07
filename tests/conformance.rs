@@ -749,13 +749,16 @@ use open_harness::api;
 #[test]
 fn api_lists_harnesses_and_kinds() {
     let hs = api::harnesses();
-    assert_eq!(hs.len(), 10);
+    assert_eq!(hs.len(), 11);
     assert!(hs.contains(&"claude-code".to_string()));
+    assert!(hs.contains(&"antigravity".to_string()));
     let ks = api::kinds();
     assert!(
         ks.contains(&"hook".to_string())
             && ks.contains(&"tool".to_string())
             && ks.contains(&"command".to_string())
+            && ks.contains(&"agent".to_string())
+            && ks.contains(&"instructions".to_string())
     );
     assert_eq!(api::protocol_version(), "hook@1");
 }
@@ -783,7 +786,7 @@ fn api_plan_maps_installability_and_artifacts() {
     );
 
     // plan_all covers every harness in one call.
-    assert_eq!(api::plan_all(hook, ".").unwrap().len(), 10);
+    assert_eq!(api::plan_all(hook, ".").unwrap().len(), 11);
 }
 
 #[test]

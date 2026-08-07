@@ -111,6 +111,9 @@ impl Kind for PermissionKind {
             Harness::Pi => return KindPlan::unsupported(
                 "Pi has no permission system by design — run in a container or add an extension",
             ),
+            Harness::Antigravity => {
+                return KindPlan::unsupported("Antigravity has no known committed permission file")
+            }
         };
 
         let notes = match &r.installability {
@@ -136,7 +139,11 @@ fn render_claude(cfg: &PermissionConfig) -> Rendered {
     let mut ask = Vec::new();
     let mut deny = Vec::new();
     for r in &cfg.rules {
-        let entry = format!("{}({})", claude_tool(&r.tool), r.pattern);
+        let entry = format!(
+            "{}({})",
+            crate::tools::native_tool(&r.tool, Harness::Claude),
+            r.pattern
+        );
         match r.verdict {
             Verdict::Allow => allow.push(entry),
             Verdict::Ask => ask.push(entry),
@@ -208,7 +215,7 @@ fn render_gemini(cfg: &PermissionConfig) -> Rendered {
     for r in &cfg.rules {
         match r.verdict {
             Verdict::Allow => allowed.push(gemini_allow_entry(r)),
-            Verdict::Deny => exclude.push(gemini_tool(&r.tool).to_string()),
+            Verdict::Deny => exclude.push(crate::tools::native_tool(&r.tool, Harness::Gemini)),
             Verdict::Ask => {}
         }
     }
@@ -298,43 +305,13 @@ fn shell_patterns(cfg: &PermissionConfig, v: Verdict) -> Vec<String> {
         .collect()
 }
 
-fn claude_tool(t: &str) -> String {
-    match t {
-        "bash" => "Bash",
-        "read" => "Read",
-        "edit" => "Edit",
-        "write" => "Write",
-        "webfetch" => "WebFetch",
-        other => return title_case(other),
-    }
-    .to_string()
-}
-
-fn gemini_tool(t: &str) -> &str {
-    match t {
-        "bash" => "run_shell_command",
-        "read" => "read_file",
-        "write" => "write_file",
-        "edit" => "replace",
-        other => other,
-    }
-}
-
 /// Gemini `tools.allowed` entries carry command specificity for shell.
 fn gemini_allow_entry(r: &Rule) -> String {
     if r.tool == "bash" {
         let cmd = r.pattern.split_whitespace().next().unwrap_or("*");
         format!("run_shell_command({cmd})")
     } else {
-        gemini_tool(&r.tool).to_string()
-    }
-}
-
-fn title_case(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-        None => String::new(),
+        crate::tools::native_tool(&r.tool, Harness::Gemini)
     }
 }
 

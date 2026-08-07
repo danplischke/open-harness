@@ -185,6 +185,12 @@ pub struct Manifest {
     /// consent and checked against the host policy (advisory).
     #[serde(default)]
     pub permissions: Permissions,
+    /// Per-harness overrides: `{"<harness-id>": { "path": …, "tools": […],
+    /// "frontmatter": { … } }}`. Lets one canonical capability tune its own
+    /// output for a specific target without forking it (adopted by the skill and
+    /// agent kinds). See [`LoadedCapability::harness_override`].
+    #[serde(default)]
+    pub overrides: std::collections::BTreeMap<String, serde_json::Value>,
     /// Kind-specific configuration (e.g. the `skill` block). Each kind parses
     /// what it needs from here; unknown keys are ignored.
     #[serde(flatten)]
@@ -193,6 +199,18 @@ pub struct Manifest {
 
 fn default_version() -> String {
     "0.0.0".to_string()
+}
+
+/// A per-harness override block, resolved from [`Manifest::overrides`]. Every
+/// field is optional; an absent block yields the default (no overrides).
+#[derive(Debug, Clone, Default)]
+pub struct HarnessOverride {
+    /// Replace the kind's default output path for this harness.
+    pub path: Option<String>,
+    /// Replace the kind's tool list for this harness (native tokens, verbatim).
+    pub tools: Option<Vec<String>>,
+    /// Extra/replacement frontmatter keys merged into the rendered block.
+    pub frontmatter: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A manifest plus the directory it was loaded from (the cwd used when the
@@ -244,6 +262,39 @@ impl LoadedCapability {
         self.matching_binding(ev)
             .map(|b| b.on_error)
             .unwrap_or_default()
+    }
+
+    /// The resolved per-harness override for `harness_id` (see
+    /// [`Manifest::overrides`]). Returns the default (no overrides) when absent
+    /// or malformed — an override is a convenience, never load-bearing.
+    pub fn harness_override(&self, harness_id: &str) -> HarnessOverride {
+        let Some(obj) = self
+            .manifest
+            .overrides
+            .get(harness_id)
+            .and_then(|v| v.as_object())
+        else {
+            return HarnessOverride::default();
+        };
+        let path = obj
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let tools = obj.get("tools").and_then(|v| v.as_array()).map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        });
+        let frontmatter = obj
+            .get("frontmatter")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        HarnessOverride {
+            path,
+            tools,
+            frontmatter,
+        }
     }
 }
 

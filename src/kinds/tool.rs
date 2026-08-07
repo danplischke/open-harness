@@ -278,6 +278,14 @@ fn emit_mcp(cap: &LoadedCapability, cfg: &ToolConfig, harness: Harness) -> KindP
             ),
         ),
         Harness::Codex => (".codex/config.toml".into(), codex_toml(id, s), None),
+        // Antigravity: global-only MCP config; `mcpServers` with `serverUrl`.
+        Harness::Antigravity => (
+            "~/.gemini/antigravity/mcp_config.json".into(),
+            json_config("mcpServers", id, windsurf_entry(s)),
+            Some(
+                "Antigravity MCP config is global (~/.gemini/antigravity/mcp_config.json) and remote-oriented (serverUrl), not committed per-project".into(),
+            ),
+        ),
         Harness::Pi => (
             "~/.pi/agent/mcp.json".into(),
             json_config("mcpServers", id, claude_entry(s)),

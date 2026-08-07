@@ -1126,7 +1126,9 @@ fn cmd_scaffold(rest: &[String]) {
 
     let kind_str = o.scaffold_kind.as_deref().unwrap_or("hook");
     let Some(kind) = KindId::parse(kind_str) else {
-        eprintln!("unknown --kind '{kind_str}' (hook|skill|rule|command|tool|permission)");
+        eprintln!(
+            "unknown --kind '{kind_str}' (hook|skill|rule|command|tool|permission|agent|instructions)"
+        );
         exit(2);
     };
     let lang_str = o.scaffold_lang.as_deref().unwrap_or("python");

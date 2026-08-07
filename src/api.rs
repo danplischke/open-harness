@@ -104,6 +104,8 @@ pub fn kinds() -> Vec<String> {
         KindId::Tool,
         KindId::Command,
         KindId::Permission,
+        KindId::Agent,
+        KindId::Instructions,
     ]
     .iter()
     .map(|k| k.as_str().to_string())

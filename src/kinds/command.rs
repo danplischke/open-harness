@@ -149,6 +149,12 @@ impl Kind for CommandKind {
                 contents: md(String::new(), &body),
                 installability: Installability::Clean,
             },
+            // Antigravity commands are workflows: `.agents/workflows/<id>.md`.
+            Harness::Antigravity => Rendered {
+                path: format!(".agents/workflows/{id}.md"),
+                contents: md(fm(&[("description", desc)]), &dollar),
+                installability: Installability::Clean,
+            },
             Harness::Aider => {
                 return KindPlan::unsupported("Aider has no custom commands (built-ins only)");
             }

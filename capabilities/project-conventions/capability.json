@@ -1,0 +1,8 @@
+{
+  "id": "project-conventions",
+  "name": "Project Conventions",
+  "description": "Always-on house rules, installed as CLAUDE.md / AGENTS.md / GEMINI.md / copilot-instructions.md.",
+  "kind": "instructions",
+  "version": "0.1.0",
+  "instructions": { "body_file": "INSTRUCTIONS.md" }
+}

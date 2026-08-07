@@ -97,6 +97,37 @@ pub fn scaffold(kind: KindId, lang: Lang, id: &str, dir: &Path) -> Result<Vec<St
                 r#""permission": { "default": "ask", "rules": [ { "tool": "bash", "pattern": "git *", "verdict": "allow" } ] }"#,
             ),
         )],
+        KindId::Agent => vec![
+            (
+                "capability.json".into(),
+                manifest(
+                    id,
+                    "agent",
+                    r#""agent": { "description": "TODO: one line — when should this subagent be used?", "model_tier": "m", "tools": ["read", "grep", "glob"], "body_file": "AGENT.md" }"#,
+                ),
+            ),
+            (
+                "AGENT.md".into(),
+                format!(
+                    "# {title}\n\nTODO: write the subagent's system prompt — its role, what it should do, and what it must not do.\n",
+                    title = title(id)
+                ),
+            ),
+        ],
+        KindId::Instructions => vec![
+            (
+                "capability.json".into(),
+                manifest(
+                    id,
+                    "instructions",
+                    r#""instructions": { "body_file": "INSTRUCTIONS.md" }"#,
+                ),
+            ),
+            (
+                "INSTRUCTIONS.md".into(),
+                "TODO: write the always-on project instructions (installed as CLAUDE.md / AGENTS.md / GEMINI.md / copilot-instructions.md).\n".into(),
+            ),
+        ],
     };
 
     write_files(&cap_dir, files)

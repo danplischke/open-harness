@@ -23,6 +23,8 @@ pub enum KindId {
     Command,
     Tool,
     Permission,
+    Agent,
+    Instructions,
 }
 
 impl KindId {
@@ -34,6 +36,8 @@ impl KindId {
             KindId::Command => "command",
             KindId::Tool => "tool",
             KindId::Permission => "permission",
+            KindId::Agent => "agent",
+            KindId::Instructions => "instructions",
         }
     }
 
@@ -45,6 +49,8 @@ impl KindId {
             "command" => KindId::Command,
             "tool" => KindId::Tool,
             "permission" => KindId::Permission,
+            "agent" => KindId::Agent,
+            "instructions" => KindId::Instructions,
             _ => return None,
         })
     }
@@ -106,5 +112,7 @@ pub fn kind_impl(id: KindId) -> Box<dyn Kind> {
         KindId::Tool => Box::new(crate::kinds::tool::ToolKind),
         KindId::Command => Box::new(crate::kinds::command::CommandKind),
         KindId::Permission => Box::new(crate::kinds::permission::PermissionKind),
+        KindId::Agent => Box::new(crate::kinds::agent::AgentKind),
+        KindId::Instructions => Box::new(crate::kinds::instructions::InstructionsKind),
     }
 }

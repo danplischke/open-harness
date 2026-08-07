@@ -63,9 +63,14 @@ pub enum Harness {
     Pi,
     Aider,
     Copilot,
+    /// Google Antigravity — skills / workflows / instructions targets, no hooks
+    /// or permissions. Path research from primary docs (see the skill/command/
+    /// instructions kinds); the `.agents/` layout is Antigravity 2.0 and may
+    /// still shift, so it carries a documented-not-captured caveat.
+    Antigravity,
 }
 
-pub const ALL: [Harness; 10] = [
+pub const ALL: [Harness; 11] = [
     Harness::Claude,
     Harness::Codex,
     Harness::Gemini,
@@ -76,6 +81,7 @@ pub const ALL: [Harness; 10] = [
     Harness::Pi,
     Harness::Aider,
     Harness::Copilot,
+    Harness::Antigravity,
 ];
 
 impl Harness {
@@ -91,6 +97,7 @@ impl Harness {
             "pi" => Harness::Pi,
             "aider" => Harness::Aider,
             "copilot" => Harness::Copilot,
+            "antigravity" => Harness::Antigravity,
             _ => return None,
         })
     }
@@ -107,6 +114,7 @@ impl Harness {
             Harness::Pi => "pi",
             Harness::Aider => "aider",
             Harness::Copilot => "copilot",
+            Harness::Antigravity => "antigravity",
         }
     }
 
@@ -123,6 +131,9 @@ impl Harness {
             Harness::Codex => Some(
                 "PreToolUse fires for the shell tool only (file/MCP/web tools bypass it); enable with [features].codex_hooks = true",
             ),
+            Harness::Antigravity => Some(
+                "the `.agents/` layout is Antigravity 2.0 and may still shift; GEMINI.md may be transitional — re-verify before an Antigravity-facing release",
+            ),
             _ => None,
         }
     }
@@ -135,8 +146,9 @@ impl Harness {
             Harness::Cursor => DenyStyle::CursorJson,
             Harness::Cline => DenyStyle::ClineJson,
             Harness::OpenCode | Harness::Pi => DenyStyle::InProcess,
-            // Aider/Copilot have no hooks; deny is meaningless but keep it total.
-            Harness::Aider | Harness::Copilot => DenyStyle::Exit2,
+            // Aider/Copilot/Antigravity have no hooks; deny is meaningless but
+            // keep the mapping total.
+            Harness::Aider | Harness::Copilot | Harness::Antigravity => DenyStyle::Exit2,
         }
     }
 
@@ -230,6 +242,7 @@ impl Harness {
             },
             Aider => Support::Unsupported("Aider has no hook mechanism"),
             Copilot => Support::Unsupported("Copilot has no general-purpose hook mechanism"),
+            Antigravity => Support::Unsupported("Antigravity has no known hook mechanism"),
         }
     }
 
@@ -452,7 +465,7 @@ impl Harness {
                 out.push_str("# file: .pi/extensions/open-harness.ts\n");
                 out.push_str(&pi_shim(&targets, self.id()));
             }
-            Harness::Aider | Harness::Copilot => {
+            Harness::Aider | Harness::Copilot | Harness::Antigravity => {
                 out.push_str("# no hook mechanism on this harness — nothing to register\n");
             }
         }

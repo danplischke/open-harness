@@ -1,0 +1,19 @@
+{
+  "id": "database-engineer",
+  "name": "Database Engineer",
+  "description": "Subagent for schema work: migrations, indexes, and query plans.",
+  "kind": "agent",
+  "version": "0.1.0",
+  "agent": {
+    "description": "Use for schema and query work: migrations, indexes, and slow-query review.",
+    "model": "claude-sonnet-5",
+    "tools": ["read", "grep", "glob", "bash"],
+    "permissions": { "bash": "ask" },
+    "mode": "subagent",
+    "skills": ["postgres-review"],
+    "body_file": "AGENT.md"
+  },
+  "overrides": {
+    "copilot": { "frontmatter": { "user-invocable": true } }
+  }
+}

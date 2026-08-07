@@ -9,10 +9,12 @@ directory (a **hook** scaffold is runnable immediately):
 oh scaffold --kind hook --lang python --id my-guard      # or --lang node | typescript | bash
 oh scaffold --kind permission --id safe-shell
 oh scaffold --kind skill --id commit-style
+oh scaffold --kind agent --id database-engineer
+oh scaffold --kind instructions --id project-conventions
 ```
 
-Kinds: `hook`, `skill`, `rule`, `command`, `tool`, `permission`. `--lang` applies
-to hooks (the only kind with a runtime).
+Kinds: `hook`, `skill`, `rule`, `command`, `tool`, `permission`, `agent`,
+`instructions`. `--lang` applies to hooks (the only kind with a runtime).
 
 ### Hook languages
 
@@ -92,13 +94,48 @@ timeout. The runtime caps output and classifies every failure (`spawn-error`,
 
 ## Generative kinds
 
-Skills, rules, commands, tools, and permissions declare a config block instead of
-a `run`. For example a permission policy:
+Skills, rules, commands, tools, permissions, agents, and instructions declare a
+config block instead of a `run`. For example a permission policy:
 
 ```jsonc
 { "id": "safe-shell", "kind": "permission",
   "permission": { "default": "ask",
     "rules": [ { "tool": "bash", "pattern": "git *", "verdict": "allow" } ] } }
+```
+
+A **subagent** — one definition, fanned out to each harness's native agent file.
+Tool names are canonical (`read`/`grep`/`bash`/…) and lower to each harness's
+tokens; `model` is portable, `model_tier` is carried but resolved by *you*, not
+the compiler:
+
+```jsonc
+{ "id": "database-engineer", "kind": "agent",
+  "agent": { "description": "Use for schema and query work.",
+    "model": "claude-sonnet-5", "tools": ["read","grep","bash"],
+    "permissions": { "bash": "ask" }, "mode": "subagent",
+    "body_file": "AGENT.md" } }
+```
+
+An always-on **instructions** brief — installed as `CLAUDE.md` / `AGENTS.md` /
+`GEMINI.md` / `.github/copilot-instructions.md`:
+
+```jsonc
+{ "id": "project-conventions", "kind": "instructions",
+  "instructions": { "body_file": "INSTRUCTIONS.md" } }
+```
+
+### Per-harness overrides
+
+Any generative capability may carry an `overrides` block to tune one target
+without forking — replace the output `path`, the `tools` list (native tokens
+verbatim), or merge extra `frontmatter`:
+
+```jsonc
+{ "id": "database-engineer", "kind": "agent",
+  "agent": { "tools": ["read","grep","bash"], "body_file": "AGENT.md" },
+  "overrides": {
+    "copilot": { "tools": ["readFile","search","runInTerminal"],
+                 "frontmatter": { "user-invocable": true } } } }
 ```
 
 `oh check` shows how each capability lands on every harness (clean / degraded /

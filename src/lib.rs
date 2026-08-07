@@ -20,7 +20,9 @@ pub mod profile;
 pub mod runtime;
 pub mod scaffold;
 pub mod sync;
+pub mod tools;
 pub mod trust;
+pub mod yaml;
 
 // Generates the uniffi scaffolding for the language bindings (feature-gated so
 // the default build never pulls uniffi).

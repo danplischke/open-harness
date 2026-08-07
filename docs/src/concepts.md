@@ -39,8 +39,22 @@ regardless of the host harness.
 
 ## Capability kinds
 
-- **hook** (runtime) — the stdio decision contract, across 10 harnesses.
-- **skill** — unify `SKILL.md` across vendors.
+The set of kinds is open; eight are implemented today, across an 11-harness
+fleet (Claude Code, Codex, Gemini CLI, Cursor, Windsurf, Cline, OpenCode, Pi,
+Aider, Copilot, and Google Antigravity).
+
+- **hook** (runtime) — the stdio decision contract, across every harness that
+  exposes hooks.
+- **skill** — unify `SKILL.md` across vendors (Claude, Codex, Cursor, Windsurf,
+  Copilot, OpenCode, Antigravity), with YAML-safe frontmatter and portable
+  passthrough for spec + forward-compat fields.
+- **agent** — one subagent → `.claude/agents/<id>.md`, `.opencode/agents/<id>.md`
+  (tools lowered to the `permission` map), or `.github/agents/<id>.agent.md`;
+  Unsupported elsewhere. `model_tier` is carried but not resolved (that's the
+  consumer's registry, not the compiler's).
+- **instructions** — one always-on brief → `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`
+  / `.github/copilot-instructions.md` (the [AGENTS.md](https://agents.md)
+  standard plus the vendor-specific names).
 - **rule** — one glob-scoped rule → each harness's native spelling.
 - **command** — one slash-command → each harness's native file.
 - **tool** — one tool → native **MCP** config, an **MCP-free** shell delivery, or
@@ -50,11 +64,20 @@ regardless of the host harness.
   approximated-with-a-loss-report elsewhere, unsupported (with a reason) where
   there's no committed permission file.
 
+The **permission**, **skill**, and **agent** kinds share one canonical tool
+vocabulary (`read`, `edit`, `write`, `grep`, `glob`, `bash`, `web-fetch`,
+`web-search`, `task`) that maps to each harness's native tokens — so a tool name
+means the same thing wherever it appears, and unknown names pass through
+verbatim. A per-harness `overrides` block (`{ "<harness-id>": { path, tools,
+frontmatter } }`) lets one canonical capability tune its own output for a single
+target without forking it.
+
 ## Trust
 
 Installing a capability runs someone else's code. A capability is
 content-addressed by a `sha256` digest and signed with an **ed25519** key; the
-`oh verify` verdict is `Trusted` / `Untrusted` / `Invalid` (tampered — always
-rejected) / `Unsigned`, and `oh sync --require-signed` gates the install. Each
+`oh verify` verdict is `Trusted` / `Untrusted` / `Revoked` / `Invalid` (tampered
+— always rejected) / `Unsigned`, and `oh sync --require-signed` gates the
+install. Each
 capability also declares a **permission manifest** (`read` / `exec` / `network`)
 that is surfaced for consent. See `SECURITY.md` for the threat model.
