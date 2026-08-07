@@ -43,7 +43,7 @@ struct AgentConfig {
     #[serde(default)]
     model: Option<String>,
     /// Portable tier hint (`xl`/`l`/`m`/`s`). Carried, never resolved here.
-    #[serde(default)]
+    #[serde(default, alias = "model-tier")]
     model_tier: Option<String>,
     /// Canonical tool names — mapped to each harness's native tokens.
     #[serde(default)]
@@ -66,11 +66,11 @@ struct AgentConfig {
     handoffs: Vec<String>,
     #[serde(default)]
     agents: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "user-invocable")]
     user_invocable: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "disable-model-invocation")]
     disable_model_invocation: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "mcp-servers")]
     mcp_servers: Vec<String>,
     // ---- body (system prompt) ----
     #[serde(default)]

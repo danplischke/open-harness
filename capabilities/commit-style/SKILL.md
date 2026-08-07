@@ -1,3 +1,8 @@
+---
+name: Commit Style
+description: Teaches the agent this repo's commit message conventions.
+allowed-tools: [Read]
+---
 # Commit style
 
 Use [Conventional Commits](https://www.conventionalcommits.org): `type(scope): summary`.

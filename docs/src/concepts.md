@@ -2,8 +2,11 @@
 
 ## Layers
 
-- **L1 — Capability spec.** A capability is a directory with a `capability.json`
-  manifest declaring a `kind`, plus assets. The set of kinds is open.
+- **L1 — Capability spec.** A capability is a directory declaring a `kind`. The
+  document kinds (skill, agent, command, rule, instructions) are authored as a
+  **single file** whose YAML frontmatter is the manifest (`SKILL.md`, `AGENT.md`,
+  …); hooks and tools use a `capability.json`. Either form works for any kind; the
+  set of kinds is open.
 - **L2 — Runtime contract.** Language-agnostic execution: a **hook** is any
   executable that reads a canonical payload as JSON on stdin and writes a
   decision as JSON on stdout. Generative kinds emit files.

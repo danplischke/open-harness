@@ -16,6 +16,13 @@ oh scaffold --kind instructions --id project-conventions
 Kinds: `hook`, `skill`, `rule`, `command`, `tool`, `permission`, `agent`,
 `instructions`. `--lang` applies to hooks (the only kind with a runtime).
 
+The **document kinds** (skill, agent, command, rule, instructions) scaffold as a
+**single file** — `SKILL.md`, `AGENT.md`, `COMMAND.md`, `RULE.md`,
+`INSTRUCTIONS.md` — whose YAML frontmatter *is* the manifest. There is no sidecar
+`capability.json`: you author the artifact itself, and open-harness compiles that
+one file into each harness's dialect. (Hooks and tools keep a `capability.json` —
+they have no body and need structured `run` / `server` config.)
+
 ### Hook languages
 
 Because a hook is just *an executable that reads stdin and writes stdout*, the
@@ -92,10 +99,61 @@ Per binding, `on_error` chooses `auto` (fail-closed on blocking events),
 timeout. The runtime caps output and classifies every failure (`spawn-error`,
 `timeout`, `non-zero-exit`, `bad-json`, `protocol-mismatch`, `output-cap`).
 
-## Generative kinds
+## Document kinds — single file, frontmatter is the manifest
 
-Skills, rules, commands, tools, permissions, agents, and instructions declare a
-config block instead of a `run`. For example a permission policy:
+Skills, agents, commands, rules, and instructions are authored as one Markdown
+file whose YAML frontmatter carries the metadata and whose body is the content.
+`id` defaults to the directory name and `kind` to the filename (`SKILL.md` →
+skill), so a skill is just:
+
+```markdown
+---
+description: Teaches this repo's commit conventions.   # capabilities/commit-style/SKILL.md
+allowed-tools: [Read]
+---
+# Commit style
+Use Conventional Commits…
+```
+
+A **subagent** (`AGENT.md`) — tool names are canonical (`read`/`grep`/`bash`/…)
+and lower to each harness's tokens; `model` is portable, `model-tier` is carried
+but resolved by *you*, not the compiler:
+
+```markdown
+---
+description: "Use for schema and query work: migrations and indexes."
+model: claude-sonnet-5
+tools: [read, grep, bash]
+permissions: { bash: ask }
+mode: subagent
+---
+You are a database engineer. Review migrations for safety…
+```
+
+An always-on **instructions** brief (`INSTRUCTIONS.md`) needs no frontmatter at
+all — it installs as `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` /
+`.github/copilot-instructions.md`. Frontmatter values that look like numbers or
+booleans (a `version`, a leading `-`) should be quoted to stay strings.
+
+### Per-harness overrides
+
+Any document capability may carry an `overrides` block to tune one target without
+forking — replace the output `path`, the `tools` list (native tokens verbatim),
+or merge extra `frontmatter`. In a single file, write it as frontmatter (nested
+flow YAML), or use `capability.json` when the overrides get large:
+
+```markdown
+---
+description: Use for schema and query work.
+tools: [read, grep, bash]
+overrides: { copilot: { tools: [readFile, search, runInTerminal], frontmatter: { user-invocable: true } } }
+---
+```
+
+## Structured kinds — `capability.json`
+
+Hooks and tools (and, if you prefer, any kind) use a `capability.json` manifest —
+they have no body and need structured config. A permission policy, for example:
 
 ```jsonc
 { "id": "safe-shell", "kind": "permission",
@@ -103,43 +161,10 @@ config block instead of a `run`. For example a permission policy:
     "rules": [ { "tool": "bash", "pattern": "git *", "verdict": "allow" } ] } }
 ```
 
-A **subagent** — one definition, fanned out to each harness's native agent file.
-Tool names are canonical (`read`/`grep`/`bash`/…) and lower to each harness's
-tokens; `model` is portable, `model_tier` is carried but resolved by *you*, not
-the compiler:
-
-```jsonc
-{ "id": "database-engineer", "kind": "agent",
-  "agent": { "description": "Use for schema and query work.",
-    "model": "claude-sonnet-5", "tools": ["read","grep","bash"],
-    "permissions": { "bash": "ask" }, "mode": "subagent",
-    "body_file": "AGENT.md" } }
-```
-
-An always-on **instructions** brief — installed as `CLAUDE.md` / `AGENTS.md` /
-`GEMINI.md` / `.github/copilot-instructions.md`:
-
-```jsonc
-{ "id": "project-conventions", "kind": "instructions",
-  "instructions": { "body_file": "INSTRUCTIONS.md" } }
-```
-
-### Per-harness overrides
-
-Any generative capability may carry an `overrides` block to tune one target
-without forking — replace the output `path`, the `tools` list (native tokens
-verbatim), or merge extra `frontmatter`:
-
-```jsonc
-{ "id": "database-engineer", "kind": "agent",
-  "agent": { "tools": ["read","grep","bash"], "body_file": "AGENT.md" },
-  "overrides": {
-    "copilot": { "tools": ["readFile","search","runInTerminal"],
-                 "frontmatter": { "user-invocable": true } } } }
-```
-
-`oh check` shows how each capability lands on every harness (clean / degraded /
-blocked). `oh emit --harness <h>` prints the native artifacts.
+`capability.json` works for every kind and, when both are present in a directory,
+wins over a single-file document. `oh check` shows how each capability lands on
+every harness (clean / degraded / blocked); `oh emit --harness <h>` prints the
+native artifacts.
 
 ## Package, sign, share
 

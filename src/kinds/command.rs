@@ -29,7 +29,7 @@ pub struct CommandKind;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct CommandConfig {
-    #[serde(default)]
+    #[serde(default, alias = "argument-hint")]
     argument_hint: Option<String>,
     #[serde(default)]
     model: Option<String>,

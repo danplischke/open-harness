@@ -1,3 +1,8 @@
+---
+name: Project Conventions
+description: Always-on house rules, installed as CLAUDE.md / AGENTS.md / GEMINI.md / copilot-instructions.md.
+version: "0.1.0"
+---
 # Project conventions
 
 These are the always-on rules for working in this repository. Read them first.

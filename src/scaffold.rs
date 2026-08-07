@@ -35,50 +35,66 @@ impl Lang {
 }
 
 /// Scaffold a capability `id` of `kind` into `dir/<id>/`. Returns the created
-/// file paths. Refuses to overwrite an existing `capability.json`.
+/// file paths. Refuses to overwrite an existing capability.
+///
+/// Document kinds (skill / agent / command / rule / instructions) scaffold as a
+/// **single file** whose frontmatter is the manifest — the idiomatic authoring
+/// format, no sidecar `capability.json`. Executable kinds (hook, tool) and the
+/// structured permission kind scaffold a `capability.json`.
 pub fn scaffold(kind: KindId, lang: Lang, id: &str, dir: &Path) -> Result<Vec<String>, String> {
     validate_id(id)?;
     let cap_dir = dir.join(id);
-    let manifest_path = cap_dir.join("capability.json");
-    if manifest_path.exists() {
-        return Err(format!("{} already exists", manifest_path.display()));
-    }
 
     let files: Vec<(String, String)> = match kind {
         KindId::Hook => hook_files(lang, id),
-        KindId::Skill => vec![
-            (
-                "capability.json".into(),
-                manifest(id, "skill", r#""skill": { "body_file": "SKILL.md" }"#),
+        KindId::Skill => vec![(
+            "SKILL.md".into(),
+            doc(
+                &[
+                    "description: TODO describe when this skill applies.",
+                    "allowed-tools: [Read]",
+                ],
+                &format!("# {}\n\nTODO: write the skill guidance here.\n", title(id)),
             ),
-            (
-                "SKILL.md".into(),
-                format!(
-                    "# {title}\n\nTODO: write the skill guidance here.\n",
-                    title = title(id)
+        )],
+        KindId::Agent => vec![(
+            "AGENT.md".into(),
+            doc(
+                &[
+                    "description: TODO when should this subagent be used?",
+                    "model-tier: m",
+                    "tools: [read, grep, glob]",
+                ],
+                &format!(
+                    "# {}\n\nTODO: write the subagent's system prompt — its role, what it should do, and what it must not do.\n",
+                    title(id)
                 ),
             ),
-        ],
-        KindId::Rule => vec![
-            (
-                "capability.json".into(),
-                manifest(
-                    id,
-                    "rule",
-                    r#""rule": { "activation": "glob", "globs": ["src/**"], "body_file": "RULE.md" }"#,
-                ),
-            ),
-            (
-                "RULE.md".into(),
-                "TODO: write the rule guidance (applied to the globs above).\n".into(),
-            ),
-        ],
+        )],
         KindId::Command => vec![(
-            "capability.json".into(),
-            manifest(
-                id,
-                "command",
-                r#""command": { "argument_hint": "<args>", "body": "TODO: prompt body using {{args}} / {{arg1}}." }"#,
+            "COMMAND.md".into(),
+            doc(
+                &[
+                    "description: TODO what this command does.",
+                    "argument-hint: <args>",
+                ],
+                "TODO: prompt body using {{args}} / {{arg1}}.\n",
+            ),
+        )],
+        KindId::Rule => vec![(
+            "RULE.md".into(),
+            doc(
+                &["activation: glob", "globs: [src/**]"],
+                "TODO: write the rule guidance (applied to the globs above).\n",
+            ),
+        )],
+        KindId::Instructions => vec![(
+            // Instructions need no frontmatter — id comes from the directory,
+            // kind from the filename. Just write the brief.
+            "INSTRUCTIONS.md".into(),
+            format!(
+                "# {}\n\nTODO: write the always-on project instructions (installed as CLAUDE.md / AGENTS.md / GEMINI.md / copilot-instructions.md).\n",
+                title(id)
             ),
         )],
         KindId::Tool => vec![(
@@ -97,40 +113,26 @@ pub fn scaffold(kind: KindId, lang: Lang, id: &str, dir: &Path) -> Result<Vec<St
                 r#""permission": { "default": "ask", "rules": [ { "tool": "bash", "pattern": "git *", "verdict": "allow" } ] }"#,
             ),
         )],
-        KindId::Agent => vec![
-            (
-                "capability.json".into(),
-                manifest(
-                    id,
-                    "agent",
-                    r#""agent": { "description": "TODO: one line — when should this subagent be used?", "model_tier": "m", "tools": ["read", "grep", "glob"], "body_file": "AGENT.md" }"#,
-                ),
-            ),
-            (
-                "AGENT.md".into(),
-                format!(
-                    "# {title}\n\nTODO: write the subagent's system prompt — its role, what it should do, and what it must not do.\n",
-                    title = title(id)
-                ),
-            ),
-        ],
-        KindId::Instructions => vec![
-            (
-                "capability.json".into(),
-                manifest(
-                    id,
-                    "instructions",
-                    r#""instructions": { "body_file": "INSTRUCTIONS.md" }"#,
-                ),
-            ),
-            (
-                "INSTRUCTIONS.md".into(),
-                "TODO: write the always-on project instructions (installed as CLAUDE.md / AGENTS.md / GEMINI.md / copilot-instructions.md).\n".into(),
-            ),
-        ],
     };
 
+    // Refuse to overwrite an existing capability (the primary file of the kind).
+    let primary = cap_dir.join(&files[0].0);
+    if primary.exists() {
+        return Err(format!("{} already exists", primary.display()));
+    }
     write_files(&cap_dir, files)
+}
+
+/// Build a single-file capability document: `---` frontmatter lines + body.
+fn doc(front: &[&str], body: &str) -> String {
+    let mut s = String::from("---\n");
+    for line in front {
+        s.push_str(line);
+        s.push('\n');
+    }
+    s.push_str("---\n\n");
+    s.push_str(body);
+    s
 }
 
 /// Scaffold a TypeScript capability as an **npm package** into `dir/<id>/`:

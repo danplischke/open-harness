@@ -234,6 +234,71 @@ impl LoadedCapability {
         Ok(LoadedCapability { manifest, dir })
     }
 
+    /// Load a **single-file** capability: a document (e.g. `SKILL.md`) whose YAML
+    /// frontmatter *is* the manifest and whose body is the content. `id` defaults
+    /// to the directory name and `kind` to `kind_hint` (from the filename) unless
+    /// the frontmatter sets them. The frontmatter's non-reserved keys plus the
+    /// body become the kind's config block, so the same `Kind` impl runs unchanged.
+    pub fn from_doc(doc_path: &Path, kind_hint: KindId) -> Result<Self, String> {
+        let text = std::fs::read_to_string(doc_path)
+            .map_err(|e| format!("read {}: {e}", doc_path.display()))?;
+        let (mut fm, body) = crate::yaml::parse_document(&text)
+            .map_err(|e| format!("{}: {e}", doc_path.display()))?;
+        let dir = doc_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let id = fm
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| dir.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .ok_or_else(|| format!("{}: cannot determine capability id", doc_path.display()))?;
+        let kind = match fm.get("kind").and_then(|v| v.as_str()) {
+            Some(k) => KindId::parse(k)
+                .ok_or_else(|| format!("{}: unknown kind '{k}'", doc_path.display()))?,
+            None => kind_hint,
+        };
+        let kind_str = kind.as_str();
+
+        // Reserved keys populate the manifest header; everything else + the body
+        // becomes the kind's config block. Build the JSON the deserializer wants.
+        fm.remove("id");
+        fm.remove("kind");
+        let mut header = serde_json::Map::new();
+        header.insert("id".into(), serde_json::Value::String(id));
+        header.insert(
+            "kind".into(),
+            serde_json::Value::String(kind_str.to_string()),
+        );
+        for key in [
+            "name",
+            "description",
+            "version",
+            "dependencies",
+            "permissions",
+            "overrides",
+            "protocol",
+            "timeout_ms",
+            "run",
+            "events",
+        ] {
+            if let Some(v) = fm.remove(key) {
+                header.insert(key.to_string(), v);
+            }
+        }
+        let mut config = fm; // whatever remains is kind-specific config
+        if !body.trim().is_empty() {
+            config.insert("body".into(), serde_json::Value::String(body));
+        }
+        header.insert(kind_str.to_string(), serde_json::Value::Object(config));
+
+        let manifest: Manifest = serde_json::from_value(serde_json::Value::Object(header))
+            .map_err(|e| format!("{}: {e}", doc_path.display()))?;
+        Ok(LoadedCapability { manifest, dir })
+    }
+
     /// The first binding that matches this event, if any. A `tool.any` binding
     /// matches any tool event; a specific class matches only its class.
     pub fn matching_binding(&self, ev: &NormEvent) -> Option<&EventBinding> {
@@ -298,14 +363,36 @@ impl LoadedCapability {
     }
 }
 
-/// Scan a directory for `*/capability.json` files.
+/// The single-file capability documents recognized by [`discover`], mapping the
+/// canonical filename to the kind it implies (the frontmatter may override).
+const DOC_FILES: &[(&str, KindId)] = &[
+    ("SKILL.md", KindId::Skill),
+    ("AGENT.md", KindId::Agent),
+    ("COMMAND.md", KindId::Command),
+    ("RULE.md", KindId::Rule),
+    ("INSTRUCTIONS.md", KindId::Instructions),
+];
+
+/// Scan a directory for capabilities. Each subdirectory is one capability,
+/// authored either as a `capability.json` manifest (any kind) or as a **single
+/// file** whose frontmatter is the manifest (`SKILL.md`, `AGENT.md`, …). When
+/// both are present, `capability.json` wins.
 pub fn discover(dir: &Path) -> Result<Vec<LoadedCapability>, String> {
     let mut out = Vec::new();
     let entries = std::fs::read_dir(dir).map_err(|e| format!("scan {}: {e}", dir.display()))?;
     for e in entries.flatten() {
-        let p = e.path().join("capability.json");
-        if p.is_file() {
-            out.push(LoadedCapability::load(&p)?);
+        let sub = e.path();
+        let json = sub.join("capability.json");
+        if json.is_file() {
+            out.push(LoadedCapability::load(&json)?);
+            continue;
+        }
+        for (name, kind) in DOC_FILES {
+            let doc = sub.join(name);
+            if doc.is_file() {
+                out.push(LoadedCapability::from_doc(&doc, *kind)?);
+                break;
+            }
         }
     }
     out.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));

@@ -268,7 +268,7 @@ fn skill_manifest() -> Value {
         "skill": {
             "body": "# Review\n\nCheck the migration.\n",
             "allowed_tools": ["read", "grep"],
-            "frontmatter": { "license": "MIT", "triggers": ["**/*.sql"] }
+            "license": "MIT", "triggers": ["**/*.sql"]
         }
     })
 }
