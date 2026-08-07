@@ -1,8 +1,8 @@
-//! open-harness feasibility spike — library surface.
+//! open-harness — library surface.
 //!
-//! This crate deliberately has a small, binding-friendly API surface: the
-//! intent is that the same core is later exposed to Python/TypeScript via
-//! `uniffi`/`napi`, so hosts embed it rather than shelling out. For the spike,
+//! This crate deliberately has a small, binding-friendly API surface: the same
+//! core is exposed to Python/TypeScript via `uniffi`/`napi`, so hosts embed it
+//! rather than shelling out. [`api`] is the stable facade consumers depend on;
 //! `oh` (see `main.rs`) is the CLI face of the same functions.
 
 pub mod adapters;

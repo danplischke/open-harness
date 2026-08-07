@@ -34,6 +34,12 @@ pub fn protocol_version() -> String {
     api::protocol_version()
 }
 
+/// This build's crate/binding version (semver) — for consumer version checks.
+#[napi]
+pub fn version() -> String {
+    api::version()
+}
+
 /// Plan a capability (its `capability.json` text) for one harness → JSON `Plan`.
 #[napi]
 pub fn plan(manifest_json: String, dir: String, harness: String) -> napi::Result<String> {

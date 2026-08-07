@@ -2,25 +2,26 @@
 
 **Author an AI-coding-agent capability once; run it on every harness.**
 
-Claude Code, Codex, Gemini CLI, Cursor, Windsurf, Cline, OpenCode, Pi, Aider, and
-Copilot all configure the same concepts — hooks, rules, commands, tools, skills,
-permissions — in mutually incompatible ways. `open-harness` is the integration
-layer that owns that un-standardized middle: an OSS author defines a capability
-**once**, a developer **composes** capabilities from different sources, and the
-customization is **programming-language-agnostic**. It stands *beside* the
-existing standards (AGENTS.md for instructions, MCP for tools, SKILL.md for
-skills), not on top of them.
+Claude Code, Codex, Gemini CLI, Cursor, Windsurf, Cline, OpenCode, Pi, Aider,
+Copilot, and Google Antigravity all configure the same concepts — hooks, rules,
+commands, tools, skills, permissions, subagents, instructions — in mutually
+incompatible ways. `open-harness` is the integration layer that owns that
+un-standardized middle: an OSS author defines a capability **once**, a developer
+**composes** capabilities from different sources, and the customization is
+**programming-language-agnostic**. It builds *on* the existing standards
+(AGENTS.md for instructions, MCP for tools, SKILL.md for skills) rather than
+replacing them.
 
-This repository is a complete, working implementation of that design — all six
-capability kinds across **10 harnesses**, composition + a lockfile, a trust
+This repository is a complete, working implementation of that design — all eight
+capability kinds across **11 harnesses**, composition + a lockfile, a trust
 model, Python + Node bindings, and a single `oh` CLI — built to a strict
 **honest-by-design** rule: where a harness can't express a concept, that is
 declared and surfaced (a loud "degraded" note or an "unsupported" reason), never
 silently dropped. It began as a feasibility spike (see
 [`FEASIBILITY.md`](./FEASIBILITY.md)); what's deferred now is precise and listed
-at the end — it is not yet packaged for distribution, and the eight proprietary
-harnesses' adapters are encoded from documentation + recorded fixtures rather
-than exercised against a live install.
+at the end — the language bindings aren't yet published to npm/PyPI, and the
+proprietary harnesses' adapters are encoded from documentation + recorded
+fixtures rather than exercised against a live install.
 
 ## The contract (this is the whole point)
 
@@ -52,8 +53,10 @@ target at all (Aider/Copilot for tool gating), that's reported, not faked.
 # Author
 oh init                                                   # write an open-harness.json profile
 oh scaffold --kind hook --lang python --id my-guard       # a runnable capability starter (py|node|typescript|bash)
+oh scaffold --kind agent --id db-engineer                 # or: skill | rule | command | tool | permission | instructions
 oh scaffold --project  --id my-cap                        # a typed TypeScript capability as an npm package
 oh capture  --harness cursor --event pre.tool.shell --out fixture.json   # record a harness's real native payload
+oh version                                                # binary + protocol version (for consumer version negotiation)
 oh doctor                                                 # check interpreters + capability health
 
 # Run & inspect
@@ -85,21 +88,33 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 112 tests, green on Linux/macOS/Windows
+cargo test                            # 131 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
-cargo run -- matrix                   # the honest support grid across 10 harnesses
+cargo run -- matrix                   # the honest support grid across 11 harnesses
 ```
 
 ## Capability kinds
 
 Capabilities declare a `kind`; each plugs into the same `Kind` trait
-(`src/kind.rs`), so adding one needs no change to the dispatcher core. **All six
+(`src/kind.rs`), so adding one needs no change to the dispatcher core. **All eight
 are implemented.**
 
-- **hook** (runtime) — the stdio contract above, across 10 harnesses; authored in
-  Python, Node, TypeScript (typed, run directly via Node type-stripping), or bash.
-- **skill** (generative) — unifies `SKILL.md` for Claude / Codex / Cursor / Windsurf.
+- **hook** (runtime) — the stdio contract above, across every harness with hooks;
+  authored in Python, Node, TypeScript (typed, run directly via Node
+  type-stripping), or bash.
+- **skill** (generative) — unifies `SKILL.md` for Claude / Codex / Cursor /
+  Windsurf / Copilot / OpenCode / Antigravity, with YAML-safe frontmatter and a
+  portable passthrough that carries the Agent Skills spec + forward-compat fields.
+- **agent** (generative) — one subagent → `.claude/agents/<id>.md`,
+  `.opencode/agents/<id>.md` (tools lowered to OpenCode's `permission` map, with
+  `write` folded into `edit`), or `.github/agents/<id>.agent.md`; a workflow shim
+  on Antigravity; Unsupported elsewhere. `model` is portable; `model_tier` is
+  carried but resolved by the consumer, not the compiler.
+- **instructions** (generative) — one always-on brief → `CLAUDE.md` / `AGENTS.md`
+  / `GEMINI.md` / `.github/copilot-instructions.md` (the AGENTS.md standard plus
+  the vendor-specific names), converged to one shared file where several harnesses
+  read the same path.
 - **rule** (generative) — one glob-scoped rule → each harness's native spelling
   (Cursor `alwaysApply`+`globs`, Copilot `applyTo`, Windsurf `trigger`, Cline /
   Claude `paths`), degrading the activation modes a harness lacks with a loud note.
@@ -116,6 +131,14 @@ are implemented.**
   → **faithful** on Claude/OpenCode, **approximated with a loss report** on
   Codex/Gemini/Cursor/Windsurf/Copilot, and **Unsupported (with a reason)** on
   Cline/Aider/Pi. The honest-degradation showcase — five incompatible models.
+
+The **permission**, **skill**, and **agent** kinds share one canonical tool
+vocabulary (`read`/`edit`/`write`/`grep`/`glob`/`bash`/`web-fetch`/`web-search`/
+`task`) that lowers to each harness's native tokens (with the documented gotchas
+baked in — Claude's `Task`→`Agent` rename, Copilot's `toolReferenceName`s),
+passing unknown names through verbatim. Any generative capability can also carry a
+per-harness **`overrides`** block (`path` / `tools` / `frontmatter`) to tune one
+target without forking.
 
 `oh matrix` prints the full (event × harness) grid, generated from the adapters
 (never hand-maintained) with a CI drift gate.
@@ -231,8 +254,9 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | Path | What |
 |---|---|
 | `src/event.rs` | Normalized event model: `(phase, subject, tool_class?)` |
-| `src/adapters.rs` | 10 harness adapters: event mapping, deny signal, registration format |
-| `src/kind.rs` + `src/kinds/` | The `Kind` trait + the six capability kinds |
+| `src/adapters.rs` | 11 harness adapters: event mapping, deny signal, registration format |
+| `src/kind.rs` + `src/kinds/` | The `Kind` trait + the eight capability kinds |
+| `src/tools.rs` + `src/yaml.rs` | Canonical tool vocabulary (shared by permission/skill/agent) + YAML-safe frontmatter |
 | `src/dispatch.rs` | Single-entrypoint dispatcher: concurrent fan-out, merge, policy-driven fail-closed |
 | `src/runtime.rs` | Hardened execution: per-capability timeout, output cap, error taxonomy, cross-platform interpreters |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
@@ -243,11 +267,11 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `src/scaffold.rs` + `src/capture.rs` + `src/matrix.rs` | `oh scaffold` / `oh capture` / the generated support matrix |
 | `src/api.rs` + `src/main.rs` | Stable embeddable API; the `oh` CLI |
 | `bindings/` | Python (uniffi) + Node/TS (napi) bindings |
-| `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, all six kinds) |
+| `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
 | `docs/` | mdBook site (concepts, authoring guide, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 112 tests: conformance (70) + sourcing (13) + trust (15) + MCP bridge (7) + capture (2) + authoring (5) |
-| `.github/workflows/ci.yml` | CI: test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature |
+| `tests/` | 131 tests: conformance (70) + sourcing (13) + trust (15) + MCP bridge (7) + new kinds (19) + authoring (5) + capture (2) |
+| `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies
 
@@ -269,11 +293,18 @@ hand-rolled to keep it that way.
 - Execution is **cross-platform**: interpreters are resolved per-OS (no `#!`
   reliance — `python3`→`python` on Windows, `PATHEXT` honored), and the Python +
   Node capabilities run on Linux/macOS/Windows in CI.
+- **Packaging:** the crate carries a real version (`0.1.0`), `oh version` reports
+  it for consumer version negotiation, and `release.yml` builds cross-platform
+  `oh` binaries (linux x86_64/aarch64, macOS x86_64/aarch64, windows x86_64) with
+  a `SHA256SUMS`, attaching them to a GitHub Release on a `v*` tag — enough to
+  unblock the shell-out integration path. Still pending: **publishing the Python /
+  Node bindings to PyPI / npm** with a prebuilt-wheel matrix (the publish steps
+  need registry tokens the repo owner arms).
 - **Deferred, tracked as follow-ups on the
   [roadmap epic](https://github.com/danplischke/open-harness/issues/1):** runtime
   **sandbox enforcement** of the permission manifest (real fs/net/exec confinement
   needs OS mechanisms), process-group kill for forking capabilities, full
-  TUF-style registry roles, live-recorded adapter fixtures, and publishing the
-  bindings to npm / PyPI with a prebuilt-binary matrix. See `FEASIBILITY.md`.
+  TUF-style registry roles, and live-recorded adapter fixtures. See
+  `FEASIBILITY.md`.
 
 License: MIT.

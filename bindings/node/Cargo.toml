@@ -4,7 +4,7 @@
 # `build.sh`; the root `cargo build` never touches it.
 [package]
 name = "open-harness-node"
-version = "0.0.0-spike"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 publish = false

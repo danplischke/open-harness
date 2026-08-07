@@ -111,6 +111,8 @@ export interface VerifyResult {
 export function harnesses(): string[];
 export function kinds(): string[];
 export function protocolVersion(): string;
+/** This build's binding version (semver) — for consumer version negotiation. */
+export function version(): string;
 
 export function plan(manifestJson: string, dir: string, harness: string): Plan;
 export function planAll(manifestJson: string, dir: string): Plan[];

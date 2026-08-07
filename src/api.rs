@@ -87,6 +87,13 @@ pub fn protocol_version() -> String {
     crate::model::PROTOCOL_VERSION.to_string()
 }
 
+/// This build's crate/binary version (semver). A consumer that shells out to
+/// `oh` — or embeds the binding — reads this to check it has a compatible
+/// open-harness before depending on newer behavior, and degrades if not.
+pub fn version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 /// Every harness id open-harness knows about.
 pub fn harnesses() -> Vec<String> {
     crate::adapters::ALL
@@ -294,6 +301,11 @@ mod ffi {
     #[uniffi::export]
     pub fn protocol_version() -> String {
         super::protocol_version()
+    }
+
+    #[uniffi::export]
+    pub fn version() -> String {
+        super::version()
     }
 
     #[uniffi::export]

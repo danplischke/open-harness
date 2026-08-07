@@ -1,6 +1,6 @@
 {
   "name": "@open-harness/node",
-  "version": "0.0.0-spike",
+  "version": "0.1.0",
   "description": "Node/TS bindings for open-harness — the cross-harness capability core (plan, dispatch, verify) as a native addon",
   "license": "MIT",
   "type": "module",

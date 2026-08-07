@@ -1,0 +1,91 @@
+name: Release
+
+# Cross-platform `oh` binaries on a version tag — the shell-out integration path
+# a consumer takes first (no Rust toolchain needed downstream). Binaries attach
+# to the GitHub Release via the built-in GITHUB_TOKEN; nothing is pushed to npm
+# or PyPI here (those need registry tokens the repo owner arms explicitly).
+#
+# Dry-run without tagging: run this workflow manually (workflow_dispatch) — it
+# builds and uploads workflow artifacts but skips the Release attach.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # create the Release + upload assets (GITHUB_TOKEN)
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  binaries:
+    name: oh (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install the aarch64 Linux cross-linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - name: Build the oh binary
+        run: cargo build --release --bin oh --target ${{ matrix.target }}
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          bindir="target/${{ matrix.target }}/release"
+          tar -C "$bindir" -czf "oh-${{ matrix.target }}.tar.gz" oh
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/oh.exe" `
+            -DestinationPath "oh-${{ matrix.target }}.zip"
+      - name: Upload the workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oh-${{ matrix.target }}
+          path: oh-${{ matrix.target }}.*
+      - name: Attach to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: oh-${{ matrix.target }}.*
+
+  # A single SHA256SUMS over every asset — integrity matters for a trust-oriented
+  # tool, so a consumer can verify the binary they downloaded.
+  checksums:
+    name: checksums
+    needs: binaries
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Compute SHA256SUMS
+        run: |
+          cd dist
+          sha256sum oh-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Attach checksums to the Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/SHA256SUMS

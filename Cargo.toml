@@ -1,9 +1,10 @@
 [package]
 name = "open-harness"
-version = "0.0.0-spike"
+version = "0.1.0"
 edition = "2021"
-description = "Feasibility spike: cross-harness capability normalization + language-agnostic stdio hook contract"
+description = "Cross-harness capability platform: define a capability once (hook / skill / rule / command / tool / permission / agent / instructions), compile it to every AI coding agent's native config"
 license = "MIT"
+repository = "https://github.com/danplischke/open-harness"
 default-run = "oh"
 
 [[bin]]
