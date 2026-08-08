@@ -51,10 +51,52 @@ pub struct Profile {
     #[serde(default)]
     pub harnesses: Vec<String>,
     pub sources: Vec<Source>,
+    /// What to do about a `requires` edge no declared source satisfies.
+    #[serde(default)]
+    pub resolution: Resolution,
+    /// What a **transitively acquired** capability must prove before it is
+    /// composed. Ignored under `resolution: flat`, where nothing is acquired.
+    #[serde(default)]
+    pub transitive_trust: TransitiveTrust,
+    /// Trust store consulted by that gate, relative to the profile's workdir.
+    /// Without one, only `transitive_trust: any` can admit anything — an empty
+    /// store trusts no key, which is the correct default, not a bug.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<String>,
 }
 
 fn default_profile_name() -> String {
     "default".to_string()
+}
+
+/// How a dependency that no declared source provides is handled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Resolution {
+    /// Only the sources the profile names are used; an unmet dependency is
+    /// reported and nothing is fetched. **The default**, deliberately: a
+    /// capability runs with your agent's privileges, so "installing one thing
+    /// silently clones arbitrary repositories" should be something you ask for.
+    #[default]
+    Flat,
+    /// Additionally fetch the sources capabilities declare for their own
+    /// dependencies, subject to [`TransitiveTrust`].
+    Transitive,
+}
+
+/// What a transitively acquired capability must prove.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransitiveTrust {
+    /// A valid signature by a key already in the trust store. The default.
+    #[default]
+    Trusted,
+    /// Also admit a valid signature by an *unknown* key — trust-on-first-use.
+    /// The content is still verified; only the signer is new.
+    Tofu,
+    /// Admit anything, including unsigned code. Never the default, and every
+    /// admission is reported.
+    Any,
 }
 
 /// Where a set of capabilities comes from. Externally tagged, e.g.
@@ -242,44 +284,27 @@ pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result
     let mut warnings: Vec<String> = Vec::new();
 
     for (source_index, source) in profile.sources.iter().enumerate() {
-        let Some((origin, kind, rev, subdir, mut caps)) =
-            resolve_source(source, workdir, lock, &mut warnings)?
-        else {
-            continue; // a source that resolved to nothing was already warned about
-        };
-        let namespace = source_namespace(source);
-        for cap in &mut caps {
-            cap.adopt_namespace(namespace.as_deref());
-        }
+        ingest_source(
+            source,
+            source_index,
+            workdir,
+            lock,
+            None,
+            &mut candidates,
+            &mut locked_sources,
+            &mut warnings,
+        )?;
+    }
 
-        let mut locked_caps = Vec::new();
-        for cap in caps {
-            let name = cap.qualified_name();
-            locked_caps.push(LockedCap {
-                name: name.clone(),
-                id: cap.manifest.id.clone(),
-                version: cap.manifest.version.clone(),
-                kind: cap.manifest.kind.as_str().to_string(),
-                digest: content_digest(&cap),
-                // Filled in once selection is done — a dependency's resolved
-                // version isn't known until we know which candidate won.
-                dependencies: BTreeMap::new(),
-            });
-            candidates.push(Candidate {
-                version: Version::parse_lenient(&cap.manifest.version),
-                name,
-                origin: origin.clone(),
-                source_index,
-                cap,
-            });
-        }
-        locked_sources.push(LockedSource {
-            kind: kind.to_string(),
-            origin,
-            rev,
-            subdir,
-            capabilities: locked_caps,
-        });
+    if profile.resolution == Resolution::Transitive {
+        acquire_transitively(
+            profile,
+            workdir,
+            lock,
+            &mut candidates,
+            &mut locked_sources,
+            &mut warnings,
+        )?;
     }
 
     let selection = select(candidates, &mut warnings);
@@ -290,6 +315,7 @@ pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result
     // dropped — and order the set so a dependency precedes its dependents.
     let graph = resolve_dependencies(selection.capabilities, &mut warnings);
 
+    warn_on_per_harness_gaps(&graph.capabilities, &graph.edges, &harnesses, &mut warnings);
     record_resolved_dependencies(&mut locked_sources, &graph.edges);
 
     let lock = Lock {
@@ -304,6 +330,227 @@ pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result
         lock,
         warnings,
     })
+}
+
+// ---- transitive acquisition (opt-in) --------------------------------------
+
+/// How many rounds of "fetch a dependency's own source" to run before giving
+/// up. Deep enough for any realistic capability graph, bounded so a
+/// mutually-referential pair of repos cannot spin forever.
+const MAX_TRANSITIVE_ROUNDS: usize = 8;
+
+/// The trust decision applied to capabilities the profile never named.
+struct TrustGate {
+    policy: TransitiveTrust,
+    store: crate::trust::TrustStore,
+}
+
+impl TrustGate {
+    /// May this capability be composed? `Err` carries the reason, which is
+    /// reported and the capability skipped — refusing is the safe outcome, so
+    /// it is never fatal to the whole resolve.
+    fn admit(&self, cap: &LoadedCapability, origin: &str) -> Result<(), String> {
+        use crate::trust::Verification;
+        if self.policy == TransitiveTrust::Any {
+            return Ok(());
+        }
+        let verdict = crate::trust::verify(&cap.dir, &self.store);
+        let name = cap.qualified_name();
+        match (&verdict, self.policy) {
+            (Verification::Trusted { .. }, _) => Ok(()),
+            (Verification::Untrusted { .. }, TransitiveTrust::Tofu) => Ok(()),
+            _ => Err(format!(
+                "refused transitively acquired '{name}' from {origin}: {} \
+                 (transitive_trust: {}). Add the source to the profile explicitly, \
+                 pin the author's key, or relax the policy — deliberately.",
+                verdict.status(),
+                match self.policy {
+                    TransitiveTrust::Trusted => "trusted",
+                    TransitiveTrust::Tofu => "tofu",
+                    TransitiveTrust::Any => "any",
+                }
+            )),
+        }
+    }
+}
+
+/// Fetch sources that capabilities declare for their own unmet dependencies,
+/// repeatedly, until nothing new appears.
+///
+/// This is the part of a package manager that is genuinely dangerous here: a
+/// capability is code that runs with the agent's privileges, so acquiring one
+/// the user never named is a supply-chain decision, not a convenience. Hence:
+/// opt-in per profile, gated on a signature by default, and every refusal and
+/// every acquisition reported.
+fn acquire_transitively(
+    profile: &Profile,
+    workdir: &Path,
+    lock: Option<&Lock>,
+    candidates: &mut Vec<Candidate>,
+    locked_sources: &mut Vec<LockedSource>,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    let store = match &profile.trust {
+        Some(path) => crate::trust::TrustStore::load(&workdir.join(path))?,
+        None => crate::trust::TrustStore::default(),
+    };
+    if profile.trust.is_none() && profile.transitive_trust != TransitiveTrust::Any {
+        warnings.push(format!(
+            "resolution: transitive with no `trust:` store and transitive_trust: {} — \
+             an empty store trusts no key, so nothing can be acquired",
+            match profile.transitive_trust {
+                TransitiveTrust::Trusted => "trusted",
+                TransitiveTrust::Tofu => "tofu",
+                TransitiveTrust::Any => "any",
+            }
+        ));
+    }
+    let gate = TrustGate {
+        policy: profile.transitive_trust,
+        store,
+    };
+
+    // Sources acquired this way sort after every declared source, so a profile's
+    // own sources always keep preference.
+    let mut next_index = profile.sources.len();
+    let mut attempted: Vec<String> = Vec::new();
+
+    for round in 0..MAX_TRANSITIVE_ROUNDS {
+        let wanted = unmet_with_sources(candidates, &attempted);
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        for (name, source_value) in wanted {
+            attempted.push(name.clone());
+            let source: Source = match serde_json::from_value(source_value) {
+                Ok(s) => s,
+                Err(e) => {
+                    warnings.push(format!(
+                        "dependency '{name}' declares an unusable source: {e}"
+                    ));
+                    continue;
+                }
+            };
+            let accepted = ingest_source(
+                &source,
+                next_index,
+                workdir,
+                lock,
+                Some(&gate),
+                candidates,
+                locked_sources,
+                warnings,
+            )?;
+            next_index += 1;
+            if accepted > 0 {
+                warnings.push(format!(
+                    "acquired {accepted} capability(ies) transitively for '{name}' \
+                     (round {})",
+                    round + 1
+                ));
+            }
+        }
+    }
+    warnings.push(format!(
+        "transitive acquisition stopped after {MAX_TRANSITIVE_ROUNDS} rounds — \
+         remaining dependencies are reported as unmet"
+    ));
+    Ok(())
+}
+
+/// Unmet `requires` edges that name a source to fetch them from, skipping any
+/// already attempted (so a source that yields nothing is not retried forever).
+fn unmet_with_sources(
+    candidates: &[Candidate],
+    attempted: &[String],
+) -> Vec<(String, serde_json::Value)> {
+    let present: Vec<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
+    let mut out: Vec<(String, serde_json::Value)> = Vec::new();
+    for c in candidates {
+        for dep in c
+            .cap
+            .manifest
+            .dependencies
+            .with_relation(Relation::Requires)
+        {
+            let Some(source) = &dep.source else { continue };
+            let satisfied = present.contains(&dep.name.as_str())
+                || present
+                    .iter()
+                    .any(|n| n.rsplit('/').next() == Some(&dep.name));
+            if satisfied || attempted.contains(&dep.name) {
+                continue;
+            }
+            if !out.iter().any(|(n, _)| *n == dep.name) {
+                out.push((dep.name.clone(), source.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Resolve one source and append everything it provides to the running
+/// candidate list and lock. `gate`, when present, decides whether each acquired
+/// capability may be composed at all — used for transitive acquisition, where
+/// the profile never named the source.
+#[allow(clippy::too_many_arguments)]
+fn ingest_source(
+    source: &Source,
+    source_index: usize,
+    workdir: &Path,
+    lock: Option<&Lock>,
+    gate: Option<&TrustGate>,
+    candidates: &mut Vec<Candidate>,
+    locked_sources: &mut Vec<LockedSource>,
+    warnings: &mut Vec<String>,
+) -> Result<usize, String> {
+    let Some((origin, kind, rev, subdir, mut caps)) =
+        resolve_source(source, workdir, lock, warnings)?
+    else {
+        return Ok(0); // a source that resolved to nothing was already warned about
+    };
+    let namespace = source_namespace(source);
+    for cap in &mut caps {
+        cap.adopt_namespace(namespace.as_deref());
+    }
+
+    let mut locked_caps = Vec::new();
+    let mut accepted = 0usize;
+    for cap in caps {
+        if let Some(gate) = gate {
+            if let Err(refusal) = gate.admit(&cap, &origin) {
+                warnings.push(refusal);
+                continue;
+            }
+        }
+        let name = cap.qualified_name();
+        locked_caps.push(LockedCap {
+            name: name.clone(),
+            id: cap.manifest.id.clone(),
+            version: cap.manifest.version.clone(),
+            kind: cap.manifest.kind.as_str().to_string(),
+            digest: content_digest(&cap),
+            // Filled in once selection is done — a dependency's resolved
+            // version isn't known until we know which candidate won.
+            dependencies: BTreeMap::new(),
+        });
+        candidates.push(Candidate {
+            version: Version::parse_lenient(&cap.manifest.version),
+            name,
+            origin: origin.clone(),
+            source_index,
+            cap,
+        });
+        accepted += 1;
+    }
+    locked_sources.push(LockedSource {
+        kind: kind.to_string(),
+        origin,
+        rev,
+        subdir,
+        capabilities: locked_caps,
+    });
+    Ok(accepted)
 }
 
 /// One capability offered by one source, before selection.
@@ -810,6 +1057,56 @@ fn resolve_dependencies(caps: Vec<LoadedCapability>, warnings: &mut Vec<String>)
     Graph {
         capabilities: order.into_iter().filter_map(|i| slots[i].take()).collect(),
         edges,
+    }
+}
+
+/// Report dependencies that are satisfied *in the composed set* but not *on
+/// every harness the profile targets*.
+///
+/// "Present" is not the same as "usable here". A skill that depends on a tool
+/// capability is fine on Claude Code and broken on Aider, which has no MCP at
+/// all — the dependency resolves, and then the harness cannot host it. A
+/// name-only check cannot see that, and it is exactly the kind of silent
+/// degradation this project exists to refuse.
+fn warn_on_per_harness_gaps(
+    caps: &[LoadedCapability],
+    edges: &HashMap<String, BTreeMap<String, String>>,
+    harnesses: &[Harness],
+    warnings: &mut Vec<String>,
+) {
+    use crate::kind::{kind_impl, Installability};
+
+    let by_name: HashMap<String, &LoadedCapability> =
+        caps.iter().map(|c| (c.qualified_name(), c)).collect();
+
+    // `plan` is the same call `sync` makes, so this asks the real question.
+    let hosts = |cap: &LoadedCapability, h: Harness| -> bool {
+        !matches!(
+            kind_impl(cap.manifest.kind).plan(cap, h).installability,
+            Installability::Unsupported(_)
+        )
+    };
+
+    for cap in caps {
+        let me = cap.qualified_name();
+        let Some(deps) = edges.get(&me) else { continue };
+        for dep_name in deps.keys() {
+            let Some(dep) = by_name.get(dep_name) else {
+                continue;
+            };
+            let gaps: Vec<&str> = harnesses
+                .iter()
+                .filter(|h| hosts(cap, **h) && !hosts(dep, **h))
+                .map(|h| h.id())
+                .collect();
+            if !gaps.is_empty() {
+                warnings.push(format!(
+                    "capability '{me}' depends on '{dep_name}', which is Unsupported on: {} — \
+                     '{me}' installs there without it",
+                    gaps.join(", ")
+                ));
+            }
+        }
     }
 }
 

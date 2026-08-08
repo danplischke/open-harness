@@ -1103,3 +1103,313 @@ fn a_replacement_satisfies_dependencies_on_what_it_replaced() {
     );
     let _ = std::fs::remove_dir_all(&wd);
 }
+
+// ---- transitive acquisition (0.4) -----------------------------------------
+
+mod transitive {
+    use super::*;
+    use open_harness::trust;
+
+    /// A capability whose `requires` edge names where to fetch the dependency.
+    fn app_pointing_at(dir: &Path) -> String {
+        cap_yaml(
+            "app",
+            "1.0.0",
+            "skill",
+            json!({
+                "dependencies": {
+                    "lib": { "version": "*", "source": { "local": { "path": dir.to_string_lossy() } } }
+                },
+                "skill": { "body": "a" },
+            }),
+        )
+    }
+
+    /// A standalone directory holding one capability, optionally signed.
+    fn lib_source(tag: &str, sign_with: Option<&trust::Keyfile>) -> PathBuf {
+        let dir = tmp(tag);
+        let cap = dir.join("lib");
+        write(
+            &cap.join("capability.yaml"),
+            &cap_yaml("lib", "1.0.0", "skill", json!({ "skill": { "body": "l" } })),
+        );
+        if let Some(key) = sign_with {
+            trust::sign(&cap, key).unwrap().write(&cap).unwrap();
+        }
+        dir
+    }
+
+    fn profile_with(wd: &Path, lib: &Path, extra: serde_json::Value) -> Profile {
+        write(&wd.join("caps/app/capability.yaml"), &app_pointing_at(lib));
+        let mut v = json!({
+            "name": "t", "harnesses": ["claude-code"],
+            "sources": [{ "local": { "path": "caps" } }],
+        });
+        let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) else {
+            unreachable!()
+        };
+        for (k, val) in e {
+            o.insert(k.clone(), val.clone());
+        }
+        profile_from(v)
+    }
+
+    /// Flat is the default: a declared source is never fetched behind your back.
+    #[test]
+    fn flat_resolution_never_fetches_a_declared_dependency_source() {
+        let lib = lib_source("flat-lib", None);
+        let wd = tmp("flat");
+        let profile = profile_with(&wd, &lib, json!({}));
+
+        let r = profile::resolve(&profile, &wd, None).unwrap();
+        let ids: Vec<&str> = r
+            .capabilities
+            .iter()
+            .map(|c| c.manifest.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["app"], "nothing was acquired: {ids:?}");
+        assert!(
+            r.warnings.iter().any(|w| w.contains("no source provides")),
+            "the dependency is simply reported unmet: {:?}",
+            r.warnings
+        );
+        let _ = std::fs::remove_dir_all(&wd);
+        let _ = std::fs::remove_dir_all(&lib);
+    }
+
+    /// Opting in without pinning a key acquires nothing — an empty trust store
+    /// trusts nobody, and that is the correct default rather than a bug.
+    #[test]
+    fn transitive_refuses_unsigned_capabilities_by_default() {
+        let lib = lib_source("unsigned-lib", None);
+        let wd = tmp("unsigned");
+        let profile = profile_with(&wd, &lib, json!({ "resolution": "transitive" }));
+
+        let r = profile::resolve(&profile, &wd, None).unwrap();
+        let ids: Vec<&str> = r
+            .capabilities
+            .iter()
+            .map(|c| c.manifest.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["app"], "the unsigned capability is refused");
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("refused transitively acquired 'lib'")),
+            "and the refusal says so: {:?}",
+            r.warnings
+        );
+        let _ = std::fs::remove_dir_all(&wd);
+        let _ = std::fs::remove_dir_all(&lib);
+    }
+
+    /// A signature by a key in the trust store is what the default policy wants.
+    #[test]
+    fn transitive_admits_a_capability_signed_by_a_trusted_key() {
+        let key = trust::generate_keyfile("alice").unwrap();
+        let lib = lib_source("trusted-lib", Some(&key));
+        let wd = tmp("trusted");
+
+        let mut store = trust::TrustStore::default();
+        store.add(&key.public_key, "alice");
+        store.write(&wd.join("trust.yaml")).unwrap();
+
+        let profile = profile_with(
+            &wd,
+            &lib,
+            json!({ "resolution": "transitive", "trust": "trust.yaml" }),
+        );
+        let r = profile::resolve(&profile, &wd, None).unwrap();
+        let ids: Vec<&str> = r
+            .capabilities
+            .iter()
+            .map(|c| c.manifest.id.as_str())
+            .collect();
+        assert!(
+            ids.contains(&"lib"),
+            "a trusted signature is admitted: {ids:?} / {:?}",
+            r.warnings
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("acquired") && w.contains("transitively")),
+            "and the acquisition is reported, never silent: {:?}",
+            r.warnings
+        );
+        let _ = std::fs::remove_dir_all(&wd);
+        let _ = std::fs::remove_dir_all(&lib);
+    }
+
+    /// `tofu` admits an unknown *signer*, but the content is still verified.
+    #[test]
+    fn tofu_admits_an_unknown_signer_but_still_refuses_unsigned() {
+        let key = trust::generate_keyfile("stranger").unwrap();
+        let signed = lib_source("tofu-signed", Some(&key));
+        let wd = tmp("tofu");
+        let profile = profile_with(
+            &wd,
+            &signed,
+            json!({ "resolution": "transitive", "transitive_trust": "tofu" }),
+        );
+        let r = profile::resolve(&profile, &wd, None).unwrap();
+        assert!(
+            r.capabilities.iter().any(|c| c.manifest.id == "lib"),
+            "an unknown but valid signer passes tofu: {:?}",
+            r.warnings
+        );
+        let _ = std::fs::remove_dir_all(&wd);
+        let _ = std::fs::remove_dir_all(&signed);
+
+        // The same policy still refuses something carrying no signature at all.
+        let unsigned = lib_source("tofu-unsigned", None);
+        let wd2 = tmp("tofu2");
+        let profile = profile_with(
+            &wd2,
+            &unsigned,
+            json!({ "resolution": "transitive", "transitive_trust": "tofu" }),
+        );
+        let r = profile::resolve(&profile, &wd2, None).unwrap();
+        assert!(
+            !r.capabilities.iter().any(|c| c.manifest.id == "lib"),
+            "tofu is not 'anything goes'"
+        );
+        let _ = std::fs::remove_dir_all(&wd2);
+        let _ = std::fs::remove_dir_all(&unsigned);
+    }
+
+    /// Tampering is caught before the signer is even considered.
+    #[test]
+    fn transitive_refuses_a_capability_whose_content_was_tampered_with() {
+        let key = trust::generate_keyfile("alice").unwrap();
+        let lib = lib_source("tampered-lib", Some(&key));
+        // Change the content after signing: the recomputed digest no longer
+        // matches, so the signature is over something else.
+        write(&lib.join("lib/extra.md"), "smuggled payload");
+
+        let wd = tmp("tampered");
+        let mut store = trust::TrustStore::default();
+        store.add(&key.public_key, "alice");
+        store.write(&wd.join("trust.yaml")).unwrap();
+
+        let profile = profile_with(
+            &wd,
+            &lib,
+            json!({ "resolution": "transitive", "trust": "trust.yaml" }),
+        );
+        let r = profile::resolve(&profile, &wd, None).unwrap();
+        assert!(
+            !r.capabilities.iter().any(|c| c.manifest.id == "lib"),
+            "tampered content is refused even from a trusted key"
+        );
+        let _ = std::fs::remove_dir_all(&wd);
+        let _ = std::fs::remove_dir_all(&lib);
+    }
+
+    /// `any` is the escape hatch, and it says what it let through.
+    #[test]
+    fn transitive_trust_any_admits_unsigned_and_reports_it() {
+        let lib = lib_source("any-lib", None);
+        let wd = tmp("any");
+        let profile = profile_with(
+            &wd,
+            &lib,
+            json!({ "resolution": "transitive", "transitive_trust": "any" }),
+        );
+        let r = profile::resolve(&profile, &wd, None).unwrap();
+        assert!(
+            r.capabilities.iter().any(|c| c.manifest.id == "lib"),
+            "any admits unsigned code: {:?}",
+            r.warnings
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("acquired") && w.contains("transitively")),
+            "every acquisition is reported: {:?}",
+            r.warnings
+        );
+        let _ = std::fs::remove_dir_all(&wd);
+        let _ = std::fs::remove_dir_all(&lib);
+    }
+
+    /// An acquired source never outranks one the profile named.
+    #[test]
+    fn declared_sources_keep_preference_over_acquired_ones() {
+        let lib = lib_source("pref-lib", None);
+        let wd = tmp("pref");
+        // The profile's own source also provides `lib`, at a different version.
+        write(
+            &wd.join("caps/lib/capability.yaml"),
+            &cap_yaml(
+                "lib",
+                "9.9.9",
+                "skill",
+                json!({ "skill": { "body": "mine" } }),
+            ),
+        );
+        let profile = profile_with(
+            &wd,
+            &lib,
+            json!({ "resolution": "transitive", "transitive_trust": "any" }),
+        );
+        let r = profile::resolve(&profile, &wd, None).unwrap();
+        let lib_cap = r
+            .capabilities
+            .iter()
+            .find(|c| c.manifest.id == "lib")
+            .unwrap();
+        assert_eq!(
+            lib_cap.manifest.version, "9.9.9",
+            "the profile's own source wins"
+        );
+        let _ = std::fs::remove_dir_all(&wd);
+        let _ = std::fs::remove_dir_all(&lib);
+    }
+}
+
+/// "Present" is not "usable here": a dependency the composed set satisfies may
+/// still be Unsupported on some of the harnesses the profile targets.
+#[test]
+fn a_dependency_unsupported_on_a_target_harness_is_reported() {
+    let wd = tmp("per-harness");
+    // A rule (Cline hosts rules) depending on a permission policy (Cline has no
+    // committed allowlist, so the permission kind is Unsupported there).
+    write(
+        &wd.join("caps/app/capability.yaml"),
+        &cap_yaml(
+            "app",
+            "1.0.0",
+            "rule",
+            json!({ "dependencies": ["policy"], "rule": { "body": "r", "globs": ["src/**"] } }),
+        ),
+    );
+    write(
+        &wd.join("caps/policy/capability.yaml"),
+        &cap_yaml(
+            "policy",
+            "1.0.0",
+            "permission",
+            json!({ "permission": {
+                "default": "ask",
+                "rules": [{ "tool": "bash", "pattern": "git *", "verdict": "allow" }],
+            } }),
+        ),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code", "cline"],
+        "sources": [{ "local": { "path": "caps" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+
+    let gap = r
+        .warnings
+        .iter()
+        .find(|w| w.contains("Unsupported on"))
+        .unwrap_or_else(|| panic!("expected a per-harness gap: {:?}", r.warnings));
+    assert!(
+        gap.contains("cline") && !gap.contains("claude-code"),
+        "names only the harness that cannot host it: {gap}"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
