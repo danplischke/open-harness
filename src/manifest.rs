@@ -198,10 +198,12 @@ pub struct Manifest {
     /// a resolved capability set is pinned + reproducible. Defaults to `0.0.0`.
     #[serde(default = "default_version")]
     pub version: String,
-    /// Other capability ids this one expects to be composed alongside. The
-    /// resolver warns if a declared dependency is absent from the profile.
+    /// Other capabilities this one relates to — `requires` / `suggests` /
+    /// `conflicts` / `replaces`, each with a version requirement. Accepts a bare
+    /// list of names (any version, `requires`) or a name → requirement map. See
+    /// [`crate::deps`].
     #[serde(default)]
-    pub dependencies: Vec<String>,
+    pub dependencies: crate::deps::Dependencies,
     /// Declared permission manifest (read / exec / network). Surfaced for
     /// consent and checked against the host policy (advisory).
     #[serde(default)]

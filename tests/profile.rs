@@ -336,8 +336,8 @@ fn resolved_dependencies_are_recorded_in_the_lock() {
         .unwrap();
     assert_eq!(
         a.dependencies,
-        vec!["b".to_string()],
-        "the lock pins the dependency graph"
+        std::collections::BTreeMap::from([("b".to_string(), "1.0.0".to_string())]),
+        "the lock pins the resolved graph: name AND the version it resolved to"
     );
     assert_eq!(
         lock,
@@ -729,6 +729,377 @@ fn colliding_bare_ids_compose_but_are_reported() {
             .any(|w| w.contains("bare id 'mem-search'")),
         "the on-disk path clash is reported: {:?}",
         r.warnings
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+// ---- version requirements + relations (0.3 / 0.5) -------------------------
+
+/// A satisfied requirement resolves quietly and pins the resolved version.
+#[test]
+fn a_satisfied_version_requirement_resolves_cleanly() {
+    let wd = tmp("req-ok");
+    write(
+        &wd.join("caps/app/capability.yaml"),
+        &cap_yaml(
+            "app",
+            "1.0.0",
+            "skill",
+            json!({ "dependencies": { "lib": "^1.2" }, "skill": { "body": "a" } }),
+        ),
+    );
+    write(
+        &wd.join("caps/lib/capability.yaml"),
+        &cap_yaml("lib", "1.5.0", "skill", json!({ "skill": { "body": "l" } })),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "caps" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    assert!(
+        !r.warnings.iter().any(|w| w.contains("requires")),
+        "a satisfied requirement is silent: {:?}",
+        r.warnings
+    );
+    let app = r.lock.sources[0]
+        .capabilities
+        .iter()
+        .find(|c| c.id == "app")
+        .unwrap();
+    assert_eq!(
+        app.dependencies.get("lib").map(String::as_str),
+        Some("1.5.0")
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+/// An unsatisfied requirement names what was asked for and what is there.
+#[test]
+fn an_unsatisfied_version_requirement_is_reported_with_both_versions() {
+    let wd = tmp("req-bad");
+    write(
+        &wd.join("caps/app/capability.yaml"),
+        &cap_yaml(
+            "app",
+            "1.0.0",
+            "skill",
+            json!({ "dependencies": { "lib": "^2" }, "skill": { "body": "a" } }),
+        ),
+    );
+    write(
+        &wd.join("caps/lib/capability.yaml"),
+        &cap_yaml("lib", "1.5.0", "skill", json!({ "skill": { "body": "l" } })),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "caps" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    let warning = r
+        .warnings
+        .iter()
+        .find(|w| w.contains("requires 'lib'"))
+        .unwrap_or_else(|| panic!("expected a requirement warning: {:?}", r.warnings));
+    assert!(
+        warning.contains("^2") && warning.contains("1.5.0"),
+        "says what was asked and what is composed: {warning}"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+/// Sources are a preference order, but a requirement can veto the preferred
+/// candidate and push selection to a later source that satisfies it.
+#[test]
+fn a_requirement_vetoes_the_preferred_candidate() {
+    let wd = tmp("veto");
+    // The app requires lib ^2; the first source only offers 1.0.0.
+    write(
+        &wd.join("first/lib/capability.yaml"),
+        &cap_yaml(
+            "lib",
+            "1.0.0",
+            "skill",
+            json!({ "skill": { "body": "old" } }),
+        ),
+    );
+    write(
+        &wd.join("second/lib/capability.yaml"),
+        &cap_yaml(
+            "lib",
+            "2.3.0",
+            "skill",
+            json!({ "skill": { "body": "new" } }),
+        ),
+    );
+    write(
+        &wd.join("first/app/capability.yaml"),
+        &cap_yaml(
+            "app",
+            "1.0.0",
+            "skill",
+            json!({ "dependencies": { "lib": "^2" }, "skill": { "body": "a" } }),
+        ),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "first" } }, { "local": { "path": "second" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    let lib = r
+        .capabilities
+        .iter()
+        .find(|c| c.manifest.id == "lib")
+        .unwrap();
+    assert_eq!(
+        lib.manifest.version, "2.3.0",
+        "the later source wins because the earlier one is vetoed"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+/// When nothing on offer satisfies every dependent, say who asked for what —
+/// the part of a solver people actually need.
+#[test]
+fn an_unsatisfiable_conflict_names_every_requirer() {
+    let wd = tmp("conflict");
+    write(
+        &wd.join("caps/lib/capability.yaml"),
+        &cap_yaml("lib", "1.0.0", "skill", json!({ "skill": { "body": "l" } })),
+    );
+    for (id, want) in [("app-a", "^1"), ("app-b", ">=2")] {
+        write(
+            &wd.join(format!("caps/{id}/capability.yaml")),
+            &cap_yaml(
+                id,
+                "1.0.0",
+                "skill",
+                json!({ "dependencies": { "lib": want }, "skill": { "body": id } }),
+            ),
+        );
+    }
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "caps" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    let conflict = r
+        .warnings
+        .iter()
+        .find(|w| w.starts_with("version conflict on 'lib'"))
+        .unwrap_or_else(|| panic!("expected a conflict report: {:?}", r.warnings));
+    assert!(
+        conflict.contains("app-b requires >=2"),
+        "names the requirer and its requirement: {conflict}"
+    );
+    assert!(
+        conflict.contains("offers 1.0.0"),
+        "names what was actually available: {conflict}"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+/// Capabilities in one repo keep referring to each other by bare id, even
+/// though the source namespaces them.
+#[test]
+fn a_sibling_dependency_resolves_by_bare_id_within_its_namespace() {
+    let wd = tmp("sibling");
+    write(
+        &wd.join("caps/app/capability.yaml"),
+        &cap_yaml(
+            "app",
+            "1.0.0",
+            "skill",
+            json!({ "namespace": "acme", "dependencies": ["lib"], "skill": { "body": "a" } }),
+        ),
+    );
+    write(
+        &wd.join("caps/lib/capability.yaml"),
+        &cap_yaml(
+            "lib",
+            "1.0.0",
+            "skill",
+            json!({ "namespace": "acme", "skill": { "body": "l" } }),
+        ),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "caps" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    assert!(
+        !r.warnings.iter().any(|w| w.contains("no source provides")),
+        "a bare sibling id resolves inside its own namespace: {:?}",
+        r.warnings
+    );
+    let app = r.lock.sources[0]
+        .capabilities
+        .iter()
+        .find(|c| c.id == "app")
+        .unwrap();
+    assert!(
+        app.dependencies.contains_key("acme/lib"),
+        "and is pinned by its qualified name: {:?}",
+        app.dependencies
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+/// An ambiguous bare id resolves to nothing rather than guessing between two
+/// strangers' capabilities — the failure qualified names exist to prevent.
+#[test]
+fn an_ambiguous_bare_dependency_is_unmet_not_guessed() {
+    let wd = tmp("ambiguous");
+    for ns in ["alice", "bob"] {
+        write(
+            &wd.join(format!("caps/{ns}-lib/capability.yaml")),
+            &cap_yaml(
+                "lib",
+                "1.0.0",
+                "skill",
+                json!({ "namespace": ns, "skill": { "body": ns } }),
+            ),
+        );
+    }
+    write(
+        &wd.join("caps/app/capability.yaml"),
+        &cap_yaml(
+            "app",
+            "1.0.0",
+            "skill",
+            json!({ "namespace": "carol", "dependencies": ["lib"], "skill": { "body": "a" } }),
+        ),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "caps" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("requires 'lib'") && w.contains("no source provides")),
+        "an ambiguous bare id is reported unmet: {:?}",
+        r.warnings
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+/// `suggests` is advice: an absent target is a note, and it never creates an
+/// ordering edge (so it can never manufacture a cycle).
+#[test]
+fn a_suggestion_is_a_note_not_a_failure() {
+    let wd = tmp("suggests");
+    write(
+        &wd.join("caps/app/capability.yaml"),
+        &cap_yaml(
+            "app",
+            "1.0.0",
+            "skill",
+            json!({
+                "dependencies": { "nice-to-have": { "relation": "suggests" } },
+                "skill": { "body": "a" },
+            }),
+        ),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "caps" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    let note = r
+        .warnings
+        .iter()
+        .find(|w| w.contains("nice-to-have"))
+        .unwrap_or_else(|| panic!("expected a note: {:?}", r.warnings));
+    assert!(
+        note.contains("suggests") && note.contains("optional"),
+        "reported as optional, not as a failure: {note}"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+/// `conflicts` matters more here than in a normal package manager: same-path
+/// config merges deny-wins, so two contradictory policies silently produce the
+/// strictest union.
+#[test]
+fn a_declared_conflict_between_two_composed_capabilities_is_reported() {
+    let wd = tmp("conflicts");
+    write(
+        &wd.join("caps/strict/capability.yaml"),
+        &cap_yaml(
+            "strict",
+            "1.0.0",
+            "skill",
+            json!({
+                "dependencies": { "lax": { "relation": "conflicts" } },
+                "skill": { "body": "s" },
+            }),
+        ),
+    );
+    write(
+        &wd.join("caps/lax/capability.yaml"),
+        &cap_yaml("lax", "1.0.0", "skill", json!({ "skill": { "body": "l" } })),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "caps" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("conflict with 'lax'") && w.contains("deny-wins")),
+        "a live conflict is reported with why it matters: {:?}",
+        r.warnings
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+/// A fork that `replaces` the original satisfies dependencies aimed at it.
+#[test]
+fn a_replacement_satisfies_dependencies_on_what_it_replaced() {
+    let wd = tmp("replaces");
+    write(
+        &wd.join("caps/fork/capability.yaml"),
+        &cap_yaml(
+            "fork",
+            "2.0.0",
+            "skill",
+            json!({
+                "dependencies": { "acme/original": { "relation": "replaces" } },
+                "skill": { "body": "f" },
+            }),
+        ),
+    );
+    write(
+        &wd.join("caps/app/capability.yaml"),
+        &cap_yaml(
+            "app",
+            "1.0.0",
+            "skill",
+            json!({ "dependencies": ["acme/original"], "skill": { "body": "a" } }),
+        ),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "caps" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    assert!(
+        !r.warnings.iter().any(|w| w.contains("no source provides")),
+        "the replacement stands in for the original: {:?}",
+        r.warnings
+    );
+    let app = r.lock.sources[0]
+        .capabilities
+        .iter()
+        .find(|c| c.id == "app")
+        .unwrap();
+    assert!(
+        app.dependencies.contains_key("fork"),
+        "and the lock pins what it actually resolved to: {:?}",
+        app.dependencies
     );
     let _ = std::fs::remove_dir_all(&wd);
 }

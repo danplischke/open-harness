@@ -23,9 +23,10 @@
 //! offline against a throwaway local repo.
 
 use crate::adapters::Harness;
+use crate::deps::{Relation, Requirement, Version};
 use crate::manifest::LoadedCapability;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -165,10 +166,11 @@ pub struct LockedCap {
     /// `sha256` over the capability's whole file tree — the same digest
     /// signatures are made over, so a changed body changes the lock.
     pub digest: String,
-    /// Direct capability dependencies (qualified names). Recorded so the
-    /// resolved dependency graph is pinned and auditable in the lock.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dependencies: Vec<String>,
+    /// The resolved dependency graph for this capability: qualified name → the
+    /// exact version it resolved to. Pinned so the graph is reproducible and
+    /// auditable, not just the individual capabilities.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dependencies: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -235,13 +237,11 @@ pub struct Resolved {
 /// the resulting SHA is recorded.
 pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result<Resolved, String> {
     let harnesses = profile.harness_set()?;
-    let mut composed: Vec<LoadedCapability> = Vec::new();
-    let mut seen_ids: Vec<String> = Vec::new();
-    let mut kept_version: HashMap<String, String> = HashMap::new();
+    let mut candidates: Vec<Candidate> = Vec::new();
     let mut locked_sources: Vec<LockedSource> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
-    for source in &profile.sources {
+    for (source_index, source) in profile.sources.iter().enumerate() {
         let Some((origin, kind, rev, subdir, mut caps)) =
             resolve_source(source, workdir, lock, &mut warnings)?
         else {
@@ -261,26 +261,17 @@ pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result
                 version: cap.manifest.version.clone(),
                 kind: cap.manifest.kind.as_str().to_string(),
                 digest: content_digest(&cap),
-                dependencies: cap.manifest.dependencies.clone(),
+                // Filled in once selection is done — a dependency's resolved
+                // version isn't known until we know which candidate won.
+                dependencies: BTreeMap::new(),
             });
-            // Shadowing is now judged on the *qualified* name: two authors'
-            // `mem-search` are different capabilities and both compose. Earlier
-            // sources still win for a genuine duplicate, noting a version
-            // conflict when the shadowed copy differs.
-            if let Some(kept) = kept_version.get(&name) {
-                let conflict = if *kept != cap.manifest.version {
-                    format!(" (kept {kept}, ignored {})", cap.manifest.version)
-                } else {
-                    String::new()
-                };
-                warnings.push(format!(
-                    "capability '{name}' from {origin} shadowed by an earlier source{conflict}"
-                ));
-            } else {
-                kept_version.insert(name.clone(), cap.manifest.version.clone());
-                seen_ids.push(name);
-                composed.push(cap);
-            }
+            candidates.push(Candidate {
+                version: Version::parse_lenient(&cap.manifest.version),
+                name,
+                origin: origin.clone(),
+                source_index,
+                cap,
+            });
         }
         locked_sources.push(LockedSource {
             kind: kind.to_string(),
@@ -291,12 +282,15 @@ pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result
         });
     }
 
-    warn_on_bare_id_collisions(&composed, &mut warnings);
+    let selection = select(candidates, &mut warnings);
+    warn_on_bare_id_collisions(&selection.capabilities, &mut warnings);
 
-    // Resolve the dependency graph: report unmet dependencies (transitively) and
-    // cycles — loudly, but non-fatally, so nothing is silently dropped — and
-    // order the set so a dependency is composed before whatever depends on it.
-    let composed = resolve_dependencies(composed, &seen_ids, &mut warnings);
+    // Resolve the dependency graph: report unmet requirements (transitively),
+    // conflicts and cycles — loudly, but non-fatally, so nothing is silently
+    // dropped — and order the set so a dependency precedes its dependents.
+    let graph = resolve_dependencies(selection.capabilities, &mut warnings);
+
+    record_resolved_dependencies(&mut locked_sources, &graph.edges);
 
     let lock = Lock {
         version: 1,
@@ -306,10 +300,199 @@ pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result
     Ok(Resolved {
         profile: profile.name.clone(),
         harnesses,
-        capabilities: composed,
+        capabilities: graph.capabilities,
         lock,
         warnings,
     })
+}
+
+/// One capability offered by one source, before selection.
+struct Candidate {
+    cap: LoadedCapability,
+    /// Position of the providing source in the profile — the preference order.
+    source_index: usize,
+    origin: String,
+    name: String,
+    version: Version,
+}
+
+struct Selection {
+    capabilities: Vec<LoadedCapability>,
+}
+
+/// Choose one capability per qualified name.
+///
+/// **Sources are a preference order**: the earliest source that provides a name
+/// wins, exactly as before. A version requirement can *veto* that choice — if
+/// the preferred candidate does not satisfy what its dependents ask for, the
+/// next satisfying candidate is taken instead — but it never reorders sources
+/// for its own sake. That keeps the common case ("my sources, in the order I
+/// listed them") predictable, and makes requirements a constraint rather than a
+/// competing ranking.
+///
+/// Requirements are collected from the *preferred* candidate of each name, and
+/// selection runs once. There is no backtracking: a requirement that only
+/// appears in a version that a different requirement rules out will not be
+/// discovered. That limit is deliberate at this scale, and the conflict report
+/// says what was asked and by whom rather than pretending to have searched.
+fn select(candidates: Vec<Candidate>, warnings: &mut Vec<String>) -> Selection {
+    // Group by qualified name, preserving source order within each group.
+    let mut groups: Vec<(String, Vec<Candidate>)> = Vec::new();
+    for c in candidates {
+        match groups.iter_mut().find(|(n, _)| *n == c.name) {
+            Some((_, list)) => list.push(c),
+            None => groups.push((c.name.clone(), vec![c])),
+        }
+    }
+    for (_, list) in &mut groups {
+        list.sort_by_key(|c| c.source_index);
+    }
+
+    // Pass 1: the preferred candidate of each name, used only to read
+    // requirements off (see the note about backtracking above).
+    let preferred: Vec<&Candidate> = groups.iter().filter_map(|(_, l)| l.first()).collect();
+    let known: Vec<String> = groups.iter().map(|(n, _)| n.clone()).collect();
+    let aliases = build_aliases(&preferred);
+
+    // Pass 2: every `requires` edge, indexed by the name it constrains.
+    let mut demands: HashMap<String, Vec<(String, Requirement)>> = HashMap::new();
+    for c in &preferred {
+        for dep in c
+            .cap
+            .manifest
+            .dependencies
+            .with_relation(Relation::Requires)
+        {
+            if dep.requirement.is_any() {
+                continue; // "any" constrains nothing; unmet-ness is checked later
+            }
+            if let Some(target) = resolve_dep_name(&dep.name, &c.cap, &known, &aliases) {
+                demands
+                    .entry(target)
+                    .or_default()
+                    .push((c.name.clone(), dep.requirement.clone()));
+            }
+        }
+    }
+
+    // Pass 3: pick, honoring source order but skipping vetoed candidates.
+    let mut capabilities = Vec::new();
+    for (name, list) in groups {
+        let asks = demands.get(&name).cloned().unwrap_or_default();
+        let combined = asks
+            .iter()
+            .fold(Requirement::any(), |acc, (_, r)| acc.intersect(r));
+
+        let chosen = list.iter().position(|c| combined.matches(&c.version));
+        match chosen {
+            Some(index) => {
+                report_shadowed(&name, &list, index, warnings);
+                let mut list = list;
+                capabilities.push(list.remove(index).cap);
+            }
+            None => {
+                // Nothing on offer satisfies every dependent. Say who asked for
+                // what and what was actually available — the part of a solver
+                // people actually need.
+                let asked = asks
+                    .iter()
+                    .map(|(who, r)| format!("\n    {who} requires {r}"))
+                    .collect::<String>();
+                let offered = list
+                    .iter()
+                    .map(|c| format!("\n    {} offers {}", c.origin, c.version))
+                    .collect::<String>();
+                warnings.push(format!(
+                    "version conflict on '{name}': no available version satisfies every \
+                     dependent{asked}{offered}\n    keeping {} (from {}) — \
+                     the dependents' requirements are NOT met",
+                    list[0].version, list[0].origin
+                ));
+                let mut list = list;
+                capabilities.push(list.remove(0).cap);
+            }
+        }
+    }
+    Selection { capabilities }
+}
+
+/// Note the candidates a selection passed over, and why.
+fn report_shadowed(name: &str, list: &[Candidate], chosen: usize, warnings: &mut Vec<String>) {
+    for (i, c) in list.iter().enumerate() {
+        if i == chosen {
+            continue;
+        }
+        let why = if i < chosen {
+            " (does not satisfy a dependent's version requirement)"
+        } else {
+            ""
+        };
+        let version_note = if c.version != list[chosen].version {
+            format!(" (kept {}, ignored {})", list[chosen].version, c.version)
+        } else {
+            String::new()
+        };
+        warnings.push(format!(
+            "capability '{name}' from {} shadowed by an earlier source{version_note}{why}",
+            c.origin
+        ));
+    }
+}
+
+/// Names a capability answers to besides its own: the targets of its `replaces`
+/// edges. A fork standing in for the original satisfies dependencies on it.
+fn build_aliases(candidates: &[&Candidate]) -> HashMap<String, String> {
+    let mut aliases = HashMap::new();
+    for c in candidates {
+        for dep in c
+            .cap
+            .manifest
+            .dependencies
+            .with_relation(Relation::Replaces)
+        {
+            aliases.insert(dep.name.clone(), c.name.clone());
+        }
+    }
+    aliases
+}
+
+/// Resolve a dependency's written name to a composed capability's qualified
+/// name, in decreasing order of specificity:
+///
+/// 1. an exact qualified-name match;
+/// 2. a **sibling** — the bare name inside the requirer's own namespace, so
+///    capabilities in one repo keep referring to each other by bare id;
+/// 3. a `replaces` alias;
+/// 4. a bare id that is unique across everything composed.
+///
+/// An ambiguous bare id (step 4 with several matches) resolves to nothing, and
+/// the caller reports it as unmet — guessing between two strangers' capabilities
+/// is exactly the failure qualified names exist to prevent.
+fn resolve_dep_name(
+    written: &str,
+    requirer: &LoadedCapability,
+    known: &[String],
+    aliases: &HashMap<String, String>,
+) -> Option<String> {
+    if known.iter().any(|n| n == written) {
+        return Some(written.to_string());
+    }
+    if let Some(ns) = &requirer.manifest.namespace {
+        let sibling = format!("{ns}/{written}");
+        if known.contains(&sibling) {
+            return Some(sibling);
+        }
+    }
+    if let Some(target) = aliases.get(written) {
+        return Some(target.clone());
+    }
+    let mut bare = known
+        .iter()
+        .filter(|n| n.rsplit('/').next() == Some(written));
+    match (bare.next(), bare.next()) {
+        (Some(only), None) => Some(only.clone()),
+        _ => None,
+    }
 }
 
 /// A resolved source: `(origin, kind, pinned rev, subdir, capabilities)`. The
@@ -472,51 +655,121 @@ fn resolve_registry(
         .map(|(_, _, rev, subdir, caps)| (origin, "registry", rev, subdir, caps)))
 }
 
-/// Resolve the dependency graph over the composed set: warn on unmet
-/// dependencies and cycles (loud, non-fatal — nothing is dropped), and return the
-/// set ordered so every dependency precedes the capabilities that declare it (a
-/// stable topological sort; ties keep source order, so a dependency-free set is
-/// returned unchanged).
+/// The composed set plus the dependency edges that were actually resolved.
+pub struct Graph {
+    pub capabilities: Vec<LoadedCapability>,
+    /// Requirer's qualified name → (resolved dependency name → its version).
+    /// Recorded in the lock so the resolved graph is pinned and auditable.
+    pub edges: HashMap<String, BTreeMap<String, String>>,
+}
+
+/// Resolve the dependency graph over the composed set.
+///
+/// Every relation is checked and reported — loudly, non-fatally, nothing
+/// dropped:
+///
+/// * **requires** — unmet (no source provides it, or the name is an ambiguous
+///   bare id) and version-unsatisfied edges are warned. Only these create
+///   ordering edges.
+/// * **suggests** — an absent target is a note, not a problem.
+/// * **conflicts** — both composed is warned. This matters here more than in a
+///   normal package manager: `sync` merges same-path config deny-wins, so two
+///   contradictory policies silently produce the strictest union, which may be
+///   neither author's intent.
+/// * **replaces** — the fork *and* the original both composed is warned; they
+///   will fight over the same emitted paths.
+///
+/// The returned set is ordered so every dependency precedes the capabilities
+/// that declare it (a stable topological sort; ties keep source order, so a
+/// dependency-free set is returned unchanged).
 ///
 /// Unmet dependencies are reported transitively for free: an intermediate
 /// dependency's own missing dependencies surface when that capability is visited.
-fn resolve_dependencies(
-    caps: Vec<LoadedCapability>,
-    present: &[String],
-    warnings: &mut Vec<String>,
-) -> Vec<LoadedCapability> {
+fn resolve_dependencies(caps: Vec<LoadedCapability>, warnings: &mut Vec<String>) -> Graph {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
 
-    for cap in &caps {
+    let names: Vec<String> = caps.iter().map(|c| c.qualified_name()).collect();
+    let versions: HashMap<&str, Version> = caps
+        .iter()
+        .zip(&names)
+        .map(|(c, n)| (n.as_str(), Version::parse_lenient(&c.manifest.version)))
+        .collect();
+    let aliases: HashMap<String, String> = caps
+        .iter()
+        .zip(&names)
+        .flat_map(|(c, n)| {
+            c.manifest
+                .dependencies
+                .with_relation(Relation::Replaces)
+                .map(move |d| (d.name.clone(), n.clone()))
+        })
+        .collect();
+
+    let mut edges: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    // Ordering edges, as (dependency index → dependent index).
+    let mut requires_edges: Vec<(usize, usize)> = Vec::new();
+
+    for (i, cap) in caps.iter().enumerate() {
+        let me = &names[i];
         for dep in &cap.manifest.dependencies {
-            if dep != &cap.manifest.id && !present.contains(dep) {
-                warnings.push(format!(
-                    "capability '{}' depends on '{dep}', which no source provides",
-                    cap.manifest.id
-                ));
+            let target = resolve_dep_name(&dep.name, cap, &names, &aliases);
+            match (dep.relation, &target) {
+                (Relation::Requires, None) => warnings.push(format!(
+                    "capability '{me}' requires '{}', which no source provides",
+                    dep.name
+                )),
+                (Relation::Suggests, None) => warnings.push(format!(
+                    "capability '{me}' suggests '{}', which is not composed (optional)",
+                    dep.name
+                )),
+                // An absent conflict/replace target is the good outcome.
+                (Relation::Conflicts, None) | (Relation::Replaces, None) => {}
+
+                (Relation::Conflicts, Some(t)) => warnings.push(format!(
+                    "capability '{me}' declares a conflict with '{t}', but both are composed — \
+                     same-path config merges deny-wins, so the result may be neither author's intent"
+                )),
+                (Relation::Replaces, Some(t)) if t != me => warnings.push(format!(
+                    "capability '{me}' replaces '{t}', but '{t}' is also composed — \
+                     both will emit to the same paths; drop one"
+                )),
+                (Relation::Replaces, Some(_)) => {}
+
+                (Relation::Requires | Relation::Suggests, Some(t)) => {
+                    let version = versions.get(t.as_str()).cloned().unwrap_or_default();
+                    if dep.relation == Relation::Requires && !dep.requirement.matches(&version) {
+                        warnings.push(format!(
+                            "capability '{me}' requires '{}' {}, but the composed version is {version}",
+                            dep.name, dep.requirement
+                        ));
+                    }
+                    edges
+                        .entry(me.clone())
+                        .or_default()
+                        .insert(t.clone(), version.to_string());
+                    // Only a hard requirement constrains ordering; a suggestion
+                    // that created ordering edges would turn optional advice
+                    // into a cycle.
+                    if dep.relation == Relation::Requires {
+                        if let Some(j) = names.iter().position(|n| n == t) {
+                            if j != i {
+                                requires_edges.push((j, i));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
     let n = caps.len();
-    let index: HashMap<&str, usize> = caps
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (c.manifest.id.as_str(), i))
-        .collect();
     // Edge dependency → dependent; a node's in-degree is its count of present deps.
     let mut in_degree = vec![0usize; n];
     let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (i, c) in caps.iter().enumerate() {
-        for dep in &c.manifest.dependencies {
-            if let Some(&j) = index.get(dep.as_str()) {
-                if j != i {
-                    dependents[j].push(i);
-                    in_degree[i] += 1;
-                }
-            }
-        }
+    for (dependency, dependent) in requires_edges {
+        dependents[dependency].push(dependent);
+        in_degree[dependent] += 1;
     }
 
     // Kahn's algorithm with a stable, lowest-source-index-first tie-break.
@@ -540,7 +793,7 @@ fn resolve_dependencies(
     if order.len() < n {
         let cyclic: Vec<&str> = (0..n)
             .filter(|&i| !emitted[i])
-            .map(|i| caps[i].manifest.id.as_str())
+            .map(|i| names[i].as_str())
             .collect();
         warnings.push(format!(
             "dependency cycle among [{}] — kept in source order",
@@ -554,7 +807,26 @@ fn resolve_dependencies(
     }
 
     let mut slots: Vec<Option<LoadedCapability>> = caps.into_iter().map(Some).collect();
-    order.into_iter().filter_map(|i| slots[i].take()).collect()
+    Graph {
+        capabilities: order.into_iter().filter_map(|i| slots[i].take()).collect(),
+        edges,
+    }
+}
+
+/// Copy the resolved dependency edges onto the locked capabilities, so the lock
+/// pins the graph that was actually resolved — name *and* version — rather than
+/// the names the author happened to write.
+fn record_resolved_dependencies(
+    sources: &mut [LockedSource],
+    edges: &HashMap<String, BTreeMap<String, String>>,
+) {
+    for source in sources {
+        for cap in &mut source.capabilities {
+            if let Some(resolved) = edges.get(&cap.name) {
+                cap.dependencies = resolved.clone();
+            }
+        }
+    }
 }
 
 /// The content digest pinned in the lock: a `sha256` over the capability's whole

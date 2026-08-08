@@ -9,6 +9,7 @@ pub mod adapters;
 pub mod api;
 pub mod capture;
 pub mod config;
+pub mod deps;
 pub mod dispatch;
 pub mod event;
 pub mod kind;
@@ -31,6 +32,7 @@ pub mod yaml;
 uniffi::setup_scaffolding!();
 
 pub use adapters::{Harness, Support};
+pub use deps::{Dependencies, Dependency, Relation, Requirement, Version};
 pub use dispatch::{dispatch, dispatch_with_limits, DispatchOutcome};
 pub use event::NormEvent;
 pub use kind::{kind_impl, Artifact, Installability, Kind, KindId, KindPlan};

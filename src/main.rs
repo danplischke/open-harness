@@ -53,7 +53,7 @@ fn main() {
         "remove" => cmd_remove(&rest),
         _ => {
             eprintln!(
-                "oh <init|migrate|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix|version> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh migrate (JSON configs → YAML) · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
+                "oh <init|migrate|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix|version> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--locked] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh migrate (JSON configs → YAML) · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
             );
             exit(2);
         }
@@ -69,6 +69,8 @@ struct Opts {
     dry_run: bool,
     uninstall: bool,
     ci: bool,
+    /// Treat the lockfile as a contract: never rewrite it, fail if it is stale.
+    locked: bool,
     explain: bool,
     timeout_ms: u64,
     max_output_bytes: u64,
@@ -111,6 +113,7 @@ fn parse_opts(rest: &[String]) -> Opts {
         dry_run: false,
         uninstall: false,
         ci: false,
+        locked: false,
         explain: false,
         timeout_ms: 0,
         max_output_bytes: 0,
@@ -281,6 +284,10 @@ fn parse_opts(rest: &[String]) -> Opts {
             }
             "--uninstall" => {
                 o.uninstall = true;
+                i += 1;
+            }
+            "--locked" => {
+                o.locked = true;
                 i += 1;
             }
             "--ci" => {
@@ -798,7 +805,12 @@ fn enforce_trust(caps: &[LoadedCapability], o: &Opts) {
 /// Resolve a profile file: load it (and any lockfile next to it), resolve every
 /// source, rewrite the lockfile, and print the composed set + warnings. The
 /// profile file's directory is the workdir (roots relative paths + the git cache).
-fn resolve_profile(path: &std::path::Path) -> Resolved {
+///
+/// Under `--locked` the lockfile becomes a contract instead of an output: it
+/// must exist, the resolution must match it exactly, and nothing is written.
+/// That is what makes a lock worth having in CI — a resolve that quietly
+/// rewrites the lock it was supposed to honor verifies nothing.
+fn resolve_profile_opts(path: &std::path::Path, locked: bool) -> Resolved {
     let profile = Profile::load(path).unwrap_or_else(|e| {
         eprintln!("{e}");
         exit(2);
@@ -809,10 +821,42 @@ fn resolve_profile(path: &std::path::Path) -> Resolved {
         .ok()
         .and_then(|t| Lock::from_text(&t).ok());
 
+    if locked && existing.is_none() {
+        eprintln!(
+            "--locked requires an existing {}; run `oh resolve --profile {}` first",
+            lock_path.display(),
+            path.display()
+        );
+        exit(1);
+    }
+
     let resolved = profile::resolve(&profile, workdir, existing.as_ref()).unwrap_or_else(|e| {
         eprintln!("resolve failed: {e}");
         exit(1);
     });
+
+    if locked {
+        let recorded = existing.expect("checked above");
+        if resolved.lock != recorded {
+            eprintln!(
+                "lockfile is stale — {} does not match the profile as resolved:",
+                lock_path.display()
+            );
+            for line in lock_drift(&recorded, &resolved.lock) {
+                eprintln!("  {line}");
+            }
+            eprintln!(
+                "\nre-run `oh resolve --profile {}` and commit the result",
+                path.display()
+            );
+            exit(1);
+        }
+        for w in &resolved.warnings {
+            eprintln!("warning: {w}");
+        }
+        return resolved;
+    }
+
     if let Err(e) = resolved.lock.write(&lock_path) {
         eprintln!("could not write {}: {e}", lock_path.display());
     }
@@ -828,7 +872,7 @@ fn cmd_resolve(rest: &[String]) {
         eprintln!("resolve requires --profile <file>");
         exit(2);
     };
-    let resolved = resolve_profile(&profile_path);
+    let resolved = resolve_profile_opts(&profile_path, o.locked);
     let workdir = profile_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
@@ -883,7 +927,7 @@ fn cmd_sync(rest: &[String]) {
     // Profile mode (#15): resolve sources + harnesses from the profile; else the
     // ad-hoc `--capabilities` / `--harness` mode.
     let (caps, harnesses) = if let Some(profile_path) = o.profile.clone() {
-        let resolved = resolve_profile(&profile_path);
+        let resolved = resolve_profile_opts(&profile_path, o.locked);
         if resolved.harnesses.is_empty() {
             eprintln!("profile '{}' targets no harnesses", resolved.profile);
             exit(1);
@@ -922,7 +966,7 @@ fn cmd_check(rest: &[String]) {
     // exactly what you profile-synced.
     if let Some(into) = o.into.clone() {
         let (caps, harnesses) = if let Some(profile_path) = o.profile.clone() {
-            let resolved = resolve_profile(&profile_path);
+            let resolved = resolve_profile_opts(&profile_path, o.locked);
             if resolved.harnesses.is_empty() {
                 eprintln!("profile '{}' targets no harnesses", resolved.profile);
                 exit(1);
@@ -1460,6 +1504,55 @@ fn cmd_remove(rest: &[String]) {
         write_profile_value(&pf, &v);
         println!("removed {removed} source(s) from {}", pf.display());
     }
+}
+
+/// A human-readable summary of how a recorded lock differs from a fresh
+/// resolution — which capabilities appeared, vanished, or moved. Enough to see
+/// *what* went stale without diffing the file by hand.
+fn lock_drift(recorded: &Lock, fresh: &Lock) -> Vec<String> {
+    use std::collections::BTreeMap;
+
+    fn index(lock: &Lock) -> BTreeMap<String, (String, String)> {
+        lock.sources
+            .iter()
+            .flat_map(|s| &s.capabilities)
+            .map(|c| (c.name.clone(), (c.version.clone(), c.digest.clone())))
+            .collect()
+    }
+    let (old, new) = (index(recorded), index(fresh));
+    let mut out = Vec::new();
+
+    for (name, (version, digest)) in &new {
+        match old.get(name) {
+            None => out.push(format!("+ {name} {version} (not in the lock)")),
+            Some((old_version, _)) if old_version != version => {
+                out.push(format!("~ {name} {old_version} → {version}"))
+            }
+            Some((_, old_digest)) if old_digest != digest => {
+                out.push(format!("~ {name} {version} — content changed"))
+            }
+            Some(_) => {}
+        }
+    }
+    for name in old.keys().filter(|n| !new.contains_key(*n)) {
+        out.push(format!("- {name} (locked, but no source provides it)"));
+    }
+
+    // Sources move independently of the capabilities they carry.
+    for (a, b) in recorded.sources.iter().zip(&fresh.sources) {
+        if a.origin == b.origin && a.rev != b.rev {
+            out.push(format!(
+                "~ {} @ {} → {}",
+                a.origin,
+                a.rev.as_deref().unwrap_or("-"),
+                b.rev.as_deref().unwrap_or("-")
+            ));
+        }
+    }
+    if out.is_empty() {
+        out.push("(source list or ordering changed)".to_string());
+    }
+    out
 }
 
 /// Load the capability manifest in `dir`, whichever spelling it uses.
