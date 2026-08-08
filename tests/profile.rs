@@ -362,10 +362,11 @@ fn unknown_harness_is_rejected() {
 
 #[cfg(unix)]
 mod git_backed {
+    #![allow(unused_imports)]
     use super::*;
     use std::process::Command;
 
-    fn git(args: &[&str], cwd: &Path) {
+    pub(super) fn git(args: &[&str], cwd: &Path) {
         let ok = Command::new("git")
             .args(args)
             .current_dir(cwd)
@@ -375,7 +376,7 @@ mod git_backed {
         assert!(ok, "git {args:?} failed");
     }
 
-    fn init_repo_with(cap_rel: &str, cap: &str) -> (PathBuf, String) {
+    pub(super) fn init_repo_with(cap_rel: &str, cap: &str) -> (PathBuf, String) {
         let repo = tmp("gitrepo");
         write(&repo.join(cap_rel), cap);
         git(&["init", "-q"], &repo);
@@ -1412,4 +1413,56 @@ fn a_dependency_unsupported_on_a_target_harness_is_reported() {
         "names only the harness that cannot host it: {gap}"
     );
     let _ = std::fs::remove_dir_all(&wd);
+}
+
+/// A lock keeps a branch pinned across upstream commits — that is what a lock is
+/// for — but it must not also override the *profile*. Editing `rev:` has to win
+/// over the pin, or the lock would silently serve the old revision forever.
+#[cfg(unix)]
+#[test]
+fn changing_the_requested_rev_invalidates_the_pin() {
+    use git_backed::*;
+
+    let (repo, sha1) = init_repo_with(
+        "caps/x/capability.yaml",
+        &cap_yaml("x", "1.0.0", "skill", json!({ "skill": { "body": "v1" } })),
+    );
+    git(&["tag", "v1"], &repo);
+
+    write(
+        &repo.join("caps/x/capability.yaml"),
+        &cap_yaml("x", "2.0.0", "skill", json!({ "skill": { "body": "v2" } })),
+    );
+    git(&["add", "-A"], &repo);
+    git(&["commit", "-qm", "v2"], &repo);
+    git(&["tag", "v2"], &repo);
+
+    let wd = tmp("retag");
+    let at = |rev: &str| {
+        profile_from(json!({
+            "name": "r", "harnesses": ["claude-code"],
+            "sources": [{ "git": {
+                "url": repo.to_string_lossy(), "rev": rev, "subdir": "caps" } }],
+        }))
+    };
+
+    let lock1 = profile::resolve(&at("v1"), &wd, None).unwrap().lock;
+    assert_eq!(lock1.sources[0].rev.as_deref(), Some(sha1.as_str()));
+    assert_eq!(lock1.sources[0].requested.as_deref(), Some("v1"));
+
+    // Same profile, same lock: the pin holds.
+    let same = profile::resolve(&at("v1"), &wd, Some(&lock1)).unwrap();
+    assert_eq!(same.lock.sources[0].rev.as_deref(), Some(sha1.as_str()));
+
+    // Profile now asks for v2: the pin must give way.
+    let moved = profile::resolve(&at("v2"), &wd, Some(&lock1)).unwrap();
+    assert_ne!(
+        moved.lock.sources[0].rev.as_deref(),
+        Some(sha1.as_str()),
+        "editing `rev:` overrides the lock's pin"
+    );
+    assert_eq!(moved.capabilities[0].manifest.version, "2.0.0");
+
+    let _ = std::fs::remove_dir_all(&wd);
+    let _ = std::fs::remove_dir_all(&repo);
 }

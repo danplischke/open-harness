@@ -261,6 +261,13 @@ lockfile is stale — open-harness.lock does not match the profile as resolved:
 This is the flag that makes a lock worth having in CI. A `--locked` run that
 quietly rewrote the lock it was meant to verify would verify nothing.
 
+Note what `--locked` does *not* fail on: a git source whose branch has moved
+upstream. That is the whole point of a lock — `rev: main` stays at the recorded
+commit until you re-resolve, so somebody else's push cannot change your build.
+Editing `rev:` in the profile is a different thing entirely, and it *does* win
+over the pin; the lock records the revision that was requested alongside the
+commit it resolved to, precisely so the two cases can be told apart.
+
 ## Cycles
 
 A `requires` cycle is reported and the capabilities are kept in source order,

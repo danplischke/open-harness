@@ -151,9 +151,9 @@ pub struct RegistrySource {
     #[serde(default)]
     pub version: Option<String>,
     /// Path to the registry index (YAML, or legacy JSON), relative to the
-    /// profile workdir. The
-    /// index maps names → real sources (local/git), giving one point of
-    /// indirection over many repos. Without it the source is a loud no-op.
+    /// profile workdir. The index maps names → real sources (local/git), giving
+    /// one point of indirection over many repos. Without it the source is a
+    /// loud no-op.
     #[serde(default)]
     pub index: Option<String>,
 }
@@ -245,6 +245,11 @@ pub struct LockedSource {
     /// Resolved commit SHA for a git source; `None` for local.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
+    /// The revision the profile *asked* for (branch / tag / SHA), as distinct
+    /// from the commit it resolved to. Recorded so that editing `rev:` in the
+    /// profile invalidates the pin instead of being silently overridden by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subdir: Option<String>,
     pub capabilities: Vec<LockedCap>,
@@ -274,11 +279,27 @@ impl Lock {
     }
 
     /// The resolved rev pinned for a git source at `url`, if any.
-    fn pinned_rev(&self, url: &str) -> Option<&str> {
-        self.sources
+    /// The commit pinned for the git source at `url`, **provided the profile is
+    /// still asking for the same revision**.
+    ///
+    /// A lock exists so upstream movement does not change your build — that is
+    /// why a re-resolve against a lock keeps `main` at the recorded commit even
+    /// after `main` advances. But it must not also override the *profile*: if
+    /// someone edits `rev: v1.0` to `rev: v2.0`, the pin has to give way, or the
+    /// lock would silently keep serving v1.0 forever. Comparing the recorded
+    /// request to the current one is what separates those two cases.
+    ///
+    /// A lockfile written before `requested` was recorded has `None` there; its
+    /// pin is honored, so an older lock keeps working.
+    fn pinned_rev(&self, url: &str, requested: &str) -> Option<&str> {
+        let source = self
+            .sources
             .iter()
-            .find(|s| s.kind == "git" && s.origin == url)
-            .and_then(|s| s.rev.as_deref())
+            .find(|s| s.kind == "git" && s.origin == url)?;
+        match source.requested.as_deref() {
+            Some(recorded) if recorded != requested => None,
+            _ => source.rev.as_deref(),
+        }
     }
 }
 
@@ -525,8 +546,14 @@ fn ingest_source(
     locked_sources: &mut Vec<LockedSource>,
     warnings: &mut Vec<String>,
 ) -> Result<usize, String> {
-    let Some((origin, kind, rev, subdir, mut caps)) =
-        resolve_source(source, workdir, lock, warnings)?
+    let Some(ResolvedSource {
+        origin,
+        kind,
+        rev,
+        requested,
+        subdir,
+        mut caps,
+    }) = resolve_source(source, workdir, lock, warnings)?
     else {
         return Ok(0); // a source that resolved to nothing was already warned about
     };
@@ -568,6 +595,7 @@ fn ingest_source(
         kind: kind.to_string(),
         origin,
         rev,
+        requested,
         subdir,
         capabilities: locked_caps,
     });
@@ -763,15 +791,21 @@ fn resolve_dep_name(
     }
 }
 
-/// A resolved source: `(origin, kind, pinned rev, subdir, capabilities)`. The
-/// capabilities already carry the source's namespace (see [`source_namespace`]).
-type ResolvedSource = (
-    String,
-    &'static str,
-    Option<String>,
-    Option<String>,
-    Vec<LoadedCapability>,
-);
+/// What one source resolved to. The capabilities do not yet carry the source's
+/// namespace — [`ingest_source`] applies it (see [`source_namespace`]).
+struct ResolvedSource {
+    /// Path (local), url (git), or `index#name` (registry).
+    origin: String,
+    /// `"local"` | `"git"` | `"registry"`.
+    kind: &'static str,
+    /// The commit a git source resolved to.
+    rev: Option<String>,
+    /// The revision the profile asked for, kept so a later resolve can tell
+    /// "the lock pinned this" from "the profile now asks for something else".
+    requested: Option<String>,
+    subdir: Option<String>,
+    caps: Vec<LoadedCapability>,
+}
 
 /// Warn when two distinct capabilities share a bare `id`.
 ///
@@ -854,23 +888,31 @@ fn resolve_source(
     match source {
         Source::Local(l) => {
             let caps = crate::manifest::discover(&workdir.join(&l.path))?;
-            Ok(Some((l.path.clone(), "local", None, None, caps)))
+            Ok(Some(ResolvedSource {
+                origin: l.path.clone(),
+                kind: "local",
+                rev: None,
+                requested: None,
+                subdir: None,
+                caps,
+            }))
         }
         Source::Git(g) => {
-            let pin = lock.and_then(|lk| lk.pinned_rev(&g.url));
+            let pin = lock.and_then(|lk| lk.pinned_rev(&g.url, &g.rev));
             let (checkout_dir, sha) = git_sync(&g.url, pin.unwrap_or(&g.rev), workdir)?;
             let scan = match &g.subdir {
                 Some(s) => checkout_dir.join(s),
                 None => checkout_dir,
             };
             let caps = crate::manifest::discover(&scan)?;
-            Ok(Some((
-                g.url.clone(),
-                "git",
-                Some(sha),
-                g.subdir.clone(),
+            Ok(Some(ResolvedSource {
+                origin: g.url.clone(),
+                kind: "git",
+                rev: Some(sha),
+                requested: Some(g.rev.clone()),
+                subdir: g.subdir.clone(),
                 caps,
-            )))
+            }))
         }
         Source::Registry(r) => resolve_registry(r, workdir, lock, warnings),
     }
@@ -919,8 +961,13 @@ fn resolve_registry(
     // Resolve the leaf source, then relabel it with registry provenance (the
     // resolved git rev, if any, is still recorded for auditability).
     let origin = format!("{index_rel}#{}", r.name);
-    Ok(resolve_source(&entry.source, workdir, lock, warnings)?
-        .map(|(_, _, rev, subdir, caps)| (origin, "registry", rev, subdir, caps)))
+    Ok(
+        resolve_source(&entry.source, workdir, lock, warnings)?.map(|leaf| ResolvedSource {
+            origin,
+            kind: "registry",
+            ..leaf
+        }),
+    )
 }
 
 /// The composed set plus the dependency edges that were actually resolved.
