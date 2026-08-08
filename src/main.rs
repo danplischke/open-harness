@@ -1005,6 +1005,20 @@ fn cmd_check(rest: &[String]) {
             cap.manifest.name,
             cap.manifest.kind.as_str()
         );
+        // Installability is a per-harness question ("can this kind be written
+        // there"); the runtime is a per-*host* one ("will it actually run").
+        // Both have to be answered, or a capability that denies every tool call
+        // reads as "installable — clean" on all eleven harnesses.
+        if !cap.manifest.runtime.requires.is_empty() {
+            match open_harness::runtime::missing_requirements(&cap.manifest.runtime) {
+                None => println!(
+                    "  {:<12} ready — {}",
+                    "runtime",
+                    cap.manifest.runtime.requires.join(", ")
+                ),
+                Some(gap) => println!("  {:<12} MISSING — {gap}", "runtime"),
+            }
+        }
         let k = kind_impl(cap.manifest.kind);
         for h in ALL {
             let plan = k.plan(cap, h);
@@ -1371,7 +1385,7 @@ fn cmd_doctor(rest: &[String]) {
         ("sh", "bash capabilities + MCP bridge wrappers"),
         ("git", "git sources (personal-repo sync)"),
     ] {
-        let found = which_on_path(name);
+        let found = open_harness::runtime::find_executable(name);
         println!(
             "  {:<8} {}",
             name,
@@ -1379,7 +1393,10 @@ fn cmd_doctor(rest: &[String]) {
                 Some(p) => format!("✓ {p}"),
                 None => {
                     missing += 1;
-                    format!("✗ not found — needed for {why}")
+                    let hint = open_harness::runtime::install_hint(name)
+                        .map(|h| format!(" · install: {h}"))
+                        .unwrap_or_default();
+                    format!("✗ not found — needed for {why}{hint}")
                 }
             }
         );
@@ -1390,19 +1407,32 @@ fn cmd_doctor(rest: &[String]) {
         Ok(caps) if caps.is_empty() => println!("  (none found)"),
         Ok(caps) => {
             for cap in &caps {
-                // A capability is "healthy" if it plans on at least one harness.
+                // A capability is "healthy" if it plans on at least one harness
+                // *and* the runtime its entrypoint needs is actually present.
+                // Reporting only the first would call a capability that denies
+                // every tool call "✓".
                 let installable = ALL.iter().any(|&h| {
                     matches!(
                         kind_impl(cap.manifest.kind).plan(cap, h).installability,
                         Installability::Clean | Installability::Degraded(_)
                     )
                 });
+                let runtime_gap =
+                    open_harness::runtime::missing_requirements(&cap.manifest.runtime);
                 println!(
                     "  {} {:<16} [{}]",
-                    if installable { "✓" } else { "✗" },
+                    if installable && runtime_gap.is_none() {
+                        "✓"
+                    } else {
+                        "✗"
+                    },
                     cap.manifest.id,
                     cap.manifest.kind.as_str()
                 );
+                if let Some(gap) = runtime_gap {
+                    println!("      runtime missing: {gap}");
+                    missing += 1;
+                }
             }
         }
         Err(e) => {
@@ -1416,30 +1446,6 @@ fn cmd_doctor(rest: &[String]) {
         exit(1);
     }
     println!("\nall good.");
-}
-
-/// Minimal PATH lookup for `doctor` (honors PATHEXT on Windows).
-fn which_on_path(program: &str) -> Option<String> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let direct = dir.join(program);
-        if direct.is_file() {
-            return Some(direct.to_string_lossy().into_owned());
-        }
-        if cfg!(windows) {
-            for ext in std::env::var("PATHEXT")
-                .unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
-                .split(';')
-                .filter(|e| !e.is_empty())
-            {
-                let cand = dir.join(format!("{program}{ext}"));
-                if cand.is_file() {
-                    return Some(cand.to_string_lossy().into_owned());
-                }
-            }
-        }
-    }
-    None
 }
 
 fn cmd_add(rest: &[String]) {

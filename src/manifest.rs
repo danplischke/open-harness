@@ -147,6 +147,36 @@ impl Permissions {
     }
 }
 
+/// What must already exist on the host for a capability's `run` entrypoint to
+/// work — the *runtime* it needs, as opposed to the capabilities it depends on.
+///
+/// open-harness deliberately does not install any of this. A capability's
+/// dependencies are its ecosystem's problem, and there are better answers than a
+/// package manager we would have to write: ship a compiled binary, vendor the
+/// dependencies into the capability (which puts them inside the content digest,
+/// so the author's signature covers them), or declare them the language-native
+/// way and let `uv` / `npm` provision. See `docs/src/runtimes.md`.
+///
+/// What open-harness owes you is to *notice* — before a missing interpreter
+/// turns into a denied tool call.
+///
+/// `deny_unknown_fields` so `require:` or `requires_bin:` is a loud error rather
+/// than a block that silently checks nothing.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Runtime {
+    /// Executables that must be resolvable on `PATH`, e.g. `[uv]` or `[node]`.
+    /// Checked before spawning, and reported by `oh check` / `oh doctor`.
+    #[serde(default)]
+    pub requires: Vec<String>,
+}
+
+impl Runtime {
+    pub fn is_empty(&self) -> bool {
+        self.requires.is_empty()
+    }
+}
+
 /// What the host permits capabilities to do. A violation is advisory by default.
 #[derive(Debug, Clone, Copy)]
 pub struct PermissionPolicy {
@@ -208,6 +238,10 @@ pub struct Manifest {
     /// consent and checked against the host policy (advisory).
     #[serde(default)]
     pub permissions: Permissions,
+    /// Executables this capability's `run` entrypoint needs on `PATH`. Checked
+    /// before spawning and reported by `oh check` / `oh doctor`; never installed.
+    #[serde(default)]
+    pub runtime: Runtime,
     /// Per-harness overrides: `{"<harness-id>": { "path": …, "tools": […],
     /// "frontmatter": { … } }}`. Lets one canonical capability tune its own
     /// output for a specific target without forking it (adopted by the skill and
@@ -323,6 +357,7 @@ impl LoadedCapability {
         // be captured as the sandbox and silently loosen `ask` to `allow`.
         for key in [
             "namespace",
+            "runtime",
             "name",
             "description",
             "version",

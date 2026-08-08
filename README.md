@@ -58,7 +58,7 @@ oh scaffold --kind agent --id db-engineer                 # or: skill | rule | c
 oh scaffold --project  --id my-cap                        # a typed TypeScript capability as an npm package
 oh capture  --harness cursor --event pre.tool.shell --out fixture.json   # record a harness's real native payload
 oh version                                                # binary + protocol version (for consumer version negotiation)
-oh doctor                                                 # check interpreters + capability health
+oh doctor                                                 # check interpreters, runtimes + capability health
 
 # Run & inspect
 oh run    --harness claude-code --event pre.tool.any      # a harness's single native hook entrypoint
@@ -90,7 +90,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 246 tests, green on Linux/macOS/Windows
+cargo test                            # 258 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -258,6 +258,36 @@ it must exist, the resolution must match, nothing is written, and a mismatch
 prints exactly what drifted. See [`docs/src/dependencies.md`](./docs/src/dependencies.md)
 for the full model.
 
+## Runtimes
+
+A capability is any executable, so it can need things the host lacks. A hook
+whose import fails exits non-zero, and on a blocking event that is a **deny** —
+every tool call refused, with a stack trace as the reason. So a capability can
+declare what its entrypoint needs on `PATH`:
+
+```yaml
+runtime:
+  requires: [uv]
+run:
+  command: uv
+  args: [run, --script, guard.py]
+```
+
+`oh check` and `oh doctor` report the gap with a per-OS install hint before a
+session ever starts, and if it still reaches dispatch the failure has its own
+class (`runtime-missing`) naming the tool instead of a traceback. The verdict is
+deliberately unchanged — a guard that cannot run leaves you unguarded.
+
+**open-harness installs nothing and bundles nobody else's toolchain.** `pip` and
+`npm` execute arbitrary code at install time, which is a bigger hole than the
+one gating transitive acquisition closes; and vendoring `uv` (50 MB) or `node`
+(119 MB) into a 2.8 MB static binary would ship third-party code with none of
+the verification capabilities themselves must pass. It checks, it reports, you
+decide. [`docs/src/runtimes.md`](./docs/src/runtimes.md) has the full ladder —
+compiled binary, vendored deps (which fall inside the content digest, so a
+signature covers them), ecosystem-provisioned, system packages — and which
+languages are paved versus merely resolvable.
+
 ## Trust & signing
 
 Installing a capability runs someone else's code with your agent's privileges, so
@@ -325,7 +355,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `src/tools.rs` + `src/yaml.rs` | Canonical tool vocabulary (shared by permission/skill/agent) + YAML (hand-rolled block emit; read via `yaml-rust2`) |
 | `src/config.rs` | open-harness's own config files: YAML out, YAML-or-JSON in — the boundary against a harness's native formats |
 | `src/dispatch.rs` | Single-entrypoint dispatcher: concurrent fan-out, merge, policy-driven fail-closed |
-| `src/runtime.rs` | Hardened execution: per-capability timeout, output cap, error taxonomy, cross-platform interpreters |
+| `src/runtime.rs` | Hardened execution: per-capability timeout, output cap, error taxonomy, cross-platform interpreters, `runtime.requires` pre-flight |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
 | `src/profile.rs` | Profiles + sources (local / git / registry), qualified names, selection, opt-in transitive acquisition → `open-harness.lock` |
@@ -336,9 +366,9 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `src/api.rs` + `src/main.rs` | Stable embeddable API; the `oh` CLI |
 | `bindings/` | Python (uniffi) + Node/TS (napi) bindings |
 | `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
-| `docs/` | mdBook site (concepts, authoring guide, dependencies, generated matrix) |
+| `docs/` | mdBook site (concepts, authoring guide, dependencies, runtimes, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 246 tests: conformance (70) + sourcing & dependencies (40) + new kinds (24) + deps vocabulary (21) + config/YAML (20) + single-file (19) + trust (15) + JSON→YAML migration (12) + `--locked` (9) + MCP bridge (7) + authoring (5) + capture (2) + unit (2) |
+| `tests/` | 258 tests: conformance (70) + sourcing & dependencies (40) + new kinds (24) + deps vocabulary (21) + config/YAML (20) + single-file (19) + trust (15) + runtimes (12) + JSON→YAML migration (12) + `--locked` (9) + MCP bridge (7) + authoring (5) + capture (2) + unit (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies

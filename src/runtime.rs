@@ -48,6 +48,11 @@ impl Default for RunLimits {
 pub enum RunError {
     /// The process could not be started (bad interpreter, not found, …).
     Spawn(String),
+    /// A declared `runtime.requires` executable is not on `PATH`. Distinct from
+    /// [`RunError::Spawn`] and from a non-zero exit because the *diagnosis* is
+    /// completely different: nothing is wrong with the capability or its
+    /// decision, the host is missing a tool. Carries the install hint.
+    RuntimeMissing(String),
     /// Killed after exceeding its timeout (ms).
     Timeout(u64),
     /// Exited non-zero; carries the code and captured (capped) stderr.
@@ -67,6 +72,7 @@ impl RunError {
     pub fn class(&self) -> &'static str {
         match self {
             RunError::Spawn(_) => "spawn-error",
+            RunError::RuntimeMissing(_) => "runtime-missing",
             RunError::Timeout(_) => "timeout",
             RunError::NonZeroExit(_, _) => "non-zero-exit",
             RunError::BadJson(_) => "bad-json",
@@ -81,6 +87,7 @@ impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RunError::Spawn(m) => write!(f, "spawn failed: {m}"),
+            RunError::RuntimeMissing(m) => write!(f, "runtime missing: {m}"),
             RunError::Timeout(ms) => write!(f, "timed out after {ms}ms (killed)"),
             RunError::NonZeroExit(code, err) => {
                 write!(f, "exit {code}")?;
@@ -114,6 +121,15 @@ pub fn run_capability(
         .run
         .as_ref()
         .ok_or_else(|| RunError::Spawn("hook capability has no `run` entrypoint".into()))?;
+
+    // Pre-flight the declared runtime. Without this a missing `uv` surfaces as
+    // a language traceback on stderr and a non-zero exit — which, on a blocking
+    // event, the default failure policy turns into a *deny*. The verdict stays
+    // the same (a guard that cannot run leaves you unguarded), but the reason
+    // now says which tool is missing and how to get it.
+    if let Some(missing) = missing_requirements(&cap.manifest.runtime) {
+        return Err(RunError::RuntimeMissing(missing));
+    }
 
     let input = serde_json::to_string(payload).map_err(|e| RunError::Io(e.to_string()))?;
 
@@ -297,6 +313,106 @@ fn interpreter_for_ext(command: &str) -> Option<&'static str> {
 /// The first candidate found on `PATH` (its full path), or `None`.
 fn first_on_path(cands: &[String]) -> Option<String> {
     cands.iter().find_map(|c| which(c))
+}
+
+// ---- runtime requirements -------------------------------------------------
+
+/// Resolve `program` to a full path via `PATH`, honoring `PATHEXT` on Windows.
+/// A name containing a path separator is treated as a path, not a lookup.
+///
+/// The single executable probe for the whole crate — the CLI's `doctor` and
+/// `check` ask exactly the question the dispatcher will ask at spawn time, so
+/// they cannot disagree.
+pub fn find_executable(program: &str) -> Option<String> {
+    which(program)
+}
+
+/// The executables a capability declares but the host does not have, rendered
+/// with install hints. `None` when everything is present.
+pub fn missing_requirements(runtime: &crate::manifest::Runtime) -> Option<String> {
+    let missing: Vec<&String> = runtime
+        .requires
+        .iter()
+        .filter(|exe| find_executable(exe).is_none())
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    let rendered: Vec<String> = missing
+        .iter()
+        .map(|exe| match install_hint(exe) {
+            Some(hint) => format!("{exe} (install: {hint})"),
+            None => format!("{exe} (not on PATH)"),
+        })
+        .collect();
+    Some(rendered.join(", "))
+}
+
+/// How to obtain `program` on *this* OS.
+///
+/// A hint, printed for a human to act on — open-harness never runs these. It
+/// prefers a package manager over a pipe-to-shell installer even where the
+/// vendor documents the latter, and falls back to the vendor's own
+/// documentation rather than guessing a package identifier it isn't sure of.
+/// An unrecognized tool gets no hint at all, which is more useful than a wrong
+/// one.
+pub fn install_hint(program: &str) -> Option<&'static str> {
+    let macos = cfg!(target_os = "macos");
+    let windows = cfg!(windows);
+    Some(match program {
+        "uv" | "uvx" => {
+            if macos {
+                "brew install uv"
+            } else {
+                "https://docs.astral.sh/uv/getting-started/installation/"
+            }
+        }
+        "node" | "npm" | "npx" => {
+            if macos {
+                "brew install node"
+            } else if windows {
+                "https://nodejs.org/en/download"
+            } else {
+                "your package manager (e.g. apt install nodejs npm), or https://nodejs.org/en/download"
+            }
+        }
+        "python" | "python3" | "py" => {
+            if macos {
+                "brew install python"
+            } else if windows {
+                "https://www.python.org/downloads/windows/"
+            } else {
+                "your package manager (e.g. apt install python3)"
+            }
+        }
+        "deno" => {
+            if macos {
+                "brew install deno"
+            } else {
+                "https://docs.deno.com/runtime/getting_started/installation/"
+            }
+        }
+        "bun" => "https://bun.sh/docs/installation",
+        "ruby" => {
+            if macos {
+                "brew install ruby"
+            } else if windows {
+                "https://rubyinstaller.org/"
+            } else {
+                "your package manager (e.g. apt install ruby)"
+            }
+        }
+        "git" => {
+            if macos {
+                "brew install git (or xcode-select --install)"
+            } else if windows {
+                "https://git-scm.com/download/win"
+            } else {
+                "your package manager (e.g. apt install git)"
+            }
+        }
+        _ => return None,
+    })
 }
 
 /// A minimal `which`: resolve `program` to a full path via `PATH`, honoring
