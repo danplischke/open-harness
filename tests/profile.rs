@@ -95,7 +95,7 @@ fn resolve_is_deterministic_for_local() {
 }
 
 #[test]
-fn lock_round_trips_through_json() {
+fn lock_round_trips_through_yaml() {
     let wd = tmp("lockrt");
     write(
         &wd.join("caps/a/capability.yaml"),
@@ -497,4 +497,238 @@ mod git_backed {
         let _ = std::fs::remove_dir_all(&wd);
         let _ = std::fs::remove_dir_all(&repo);
     }
+
+    /// Regression: a git source must actually advance when the branch does.
+    ///
+    /// `fetch` updates `origin/<branch>` but never fast-forwards the cache's
+    /// local branch of the same name, so `checkout <branch>` used to resolve to
+    /// whatever commit was HEAD at first clone — permanently. Every git source
+    /// was frozen at the moment it was first cloned, and no amount of
+    /// re-resolving would pick up upstream work.
+    #[test]
+    fn a_branch_source_picks_up_new_upstream_commits() {
+        let (repo, sha1) = init_repo_with(
+            "caps/x/capability.yaml",
+            &cap_yaml("x", "1.0.0", "skill", json!({ "skill": { "body": "v1" } })),
+        );
+        let branch = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        let wd = tmp("advance");
+        let profile = profile_from(json!({
+            "name": "a", "harnesses": ["claude-code"],
+            "sources": [{ "git": {
+                "url": repo.to_string_lossy(), "rev": branch, "subdir": "caps" } }],
+        }));
+
+        // First resolve populates the cache clone.
+        let lock1 = profile::resolve(&profile, &wd, None).unwrap().lock;
+        assert_eq!(lock1.sources[0].rev.as_deref(), Some(sha1.as_str()));
+
+        write(
+            &repo.join("caps/y/capability.yaml"),
+            &cap_yaml("y", "1.0.0", "rule", json!({ "rule": { "body": "new" } })),
+        );
+        git(&["add", "-A"], &repo);
+        git(&["commit", "-qm", "more"], &repo);
+        let sha2 = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        // Re-resolve with NO lock: the branch must now be at the new commit.
+        let r2 = profile::resolve(&profile, &wd, None).unwrap();
+        assert_eq!(
+            r2.lock.sources[0].rev.as_deref(),
+            Some(sha2.as_str()),
+            "an unlocked branch source follows the branch"
+        );
+        let ids: Vec<&str> = r2
+            .capabilities
+            .iter()
+            .map(|c| c.manifest.id.as_str())
+            .collect();
+        assert!(ids.contains(&"y"), "the new capability is visible: {ids:?}");
+
+        let _ = std::fs::remove_dir_all(&wd);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// A git source lends its capabilities a `<owner>/<repo>` namespace, so two
+    /// authors' identically-named capabilities are distinct identities.
+    #[test]
+    fn a_git_source_namespaces_its_capabilities() {
+        let (repo, _) = init_repo_with(
+            "caps/mem-search/capability.yaml",
+            &cap_yaml(
+                "mem-search",
+                "1.0.0",
+                "skill",
+                json!({ "skill": { "body": "theirs" } }),
+            ),
+        );
+        let wd = tmp("ns");
+        let profile = profile_from(json!({
+            "name": "n", "harnesses": ["claude-code"],
+            "sources": [{ "git": {
+                "url": repo.to_string_lossy(), "rev": "HEAD", "subdir": "caps" } }],
+        }));
+        let r = profile::resolve(&profile, &wd, None).unwrap();
+
+        let cap = &r.capabilities[0];
+        assert_eq!(cap.manifest.id, "mem-search", "the bare id is the alias");
+        let qualified = cap.qualified_name();
+        assert!(
+            qualified.ends_with("/mem-search") && qualified != "mem-search",
+            "a git source namespaces the capability: {qualified}"
+        );
+        assert_eq!(r.lock.sources[0].capabilities[0].name, qualified);
+
+        let _ = std::fs::remove_dir_all(&wd);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+}
+
+// ---- lock digest + namespacing (0.2) --------------------------------------
+
+/// Regression: the lock's per-capability digest must track *content*.
+///
+/// It used to be a hash of the capability's `capability.json` bytes, falling
+/// back to the bare id when that file was absent — which is the normal case for
+/// single-file capabilities, and precisely the shape you get when importing
+/// someone else's repo. A skill's whole body could change and the lock would
+/// not move, so the lockfile pinned nothing that mattered.
+#[test]
+fn the_lock_digest_tracks_single_file_capability_content() {
+    let wd = tmp("digest");
+    let skill = wd.join("caps/demo/SKILL.md");
+    write(&skill, "---\ndescription: first\n---\n\nbody v1\n");
+
+    let profile = profile_from(json!({
+        "name": "d", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "caps" } }],
+    }));
+    let first = profile::resolve(&profile, &wd, None).unwrap().lock.sources[0].capabilities[0]
+        .digest
+        .clone();
+    assert!(first.starts_with("sha256:"), "a real tree digest: {first}");
+
+    write(
+        &skill,
+        "---\ndescription: second\n---\n\nbody v2 totally changed\n",
+    );
+    let second = profile::resolve(&profile, &wd, None).unwrap().lock.sources[0].capabilities[0]
+        .digest
+        .clone();
+
+    assert_ne!(first, second, "changing the body must change the digest");
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+/// A local source is your own tree, so it lends no namespace and bare ids stay
+/// bare — single-project authoring is unchanged by qualified names.
+#[test]
+fn a_local_source_leaves_ids_unqualified() {
+    let wd = tmp("bare");
+    write(
+        &wd.join("caps/greet/capability.yaml"),
+        &cap_yaml(
+            "greet",
+            "1.0.0",
+            "skill",
+            json!({ "skill": { "body": "hi" } }),
+        ),
+    );
+    let profile = profile_from(json!({
+        "name": "b", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "caps" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    assert_eq!(r.capabilities[0].qualified_name(), "greet");
+    assert_eq!(r.lock.sources[0].capabilities[0].name, "greet");
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+/// An author's explicit `namespace:` outranks whatever the source implies.
+#[test]
+fn an_explicit_namespace_wins_over_the_source() {
+    let wd = tmp("explicit-ns");
+    write(
+        &wd.join("caps/greet/capability.yaml"),
+        &cap_yaml(
+            "greet",
+            "1.0.0",
+            "skill",
+            json!({ "namespace": "acme", "skill": { "body": "hi" } }),
+        ),
+    );
+    let profile = profile_from(json!({
+        "name": "e", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "caps" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    assert_eq!(r.capabilities[0].qualified_name(), "acme/greet");
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+/// Two namespaces may both provide `mem-search` — they are distinct identities
+/// and both compose — but the emitted filenames use the bare id, so the clash
+/// is surfaced at resolve time rather than discovered on disk.
+#[test]
+fn colliding_bare_ids_compose_but_are_reported() {
+    let wd = tmp("collide");
+    write(
+        &wd.join("a/mem-search/capability.yaml"),
+        &cap_yaml(
+            "mem-search",
+            "1.0.0",
+            "skill",
+            json!({ "namespace": "alice", "skill": { "body": "a" } }),
+        ),
+    );
+    write(
+        &wd.join("b/mem-search/capability.yaml"),
+        &cap_yaml(
+            "mem-search",
+            "2.0.0",
+            "skill",
+            json!({ "namespace": "bob", "skill": { "body": "b" } }),
+        ),
+    );
+    let profile = profile_from(json!({
+        "name": "c", "harnesses": ["claude-code"],
+        "sources": [{ "local": { "path": "a" } }, { "local": { "path": "b" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+
+    let names: Vec<String> = r.capabilities.iter().map(|c| c.qualified_name()).collect();
+    assert!(
+        names.contains(&"alice/mem-search".to_string())
+            && names.contains(&"bob/mem-search".to_string()),
+        "different namespaces are different capabilities: {names:?}"
+    );
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("bare id 'mem-search'")),
+        "the on-disk path clash is reported: {:?}",
+        r.warnings
+    );
+    let _ = std::fs::remove_dir_all(&wd);
 }

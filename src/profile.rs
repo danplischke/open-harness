@@ -155,13 +155,18 @@ impl Profile {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LockedCap {
+    /// Fully-qualified name — `<namespace>/<id>`, or the bare id for an
+    /// unnamespaced (local) source. This is the identity dependencies resolve
+    /// against; `id` is only the local alias.
+    pub name: String,
     pub id: String,
     pub version: String,
     pub kind: String,
-    /// Content fingerprint of the capability's `capability.json`.
-    pub fingerprint: String,
-    /// Direct capability dependencies (ids). Recorded so the resolved dependency
-    /// graph is pinned and auditable in the lock.
+    /// `sha256` over the capability's whole file tree — the same digest
+    /// signatures are made over, so a changed body changes the lock.
+    pub digest: String,
+    /// Direct capability dependencies (qualified names). Recorded so the
+    /// resolved dependency graph is pinned and auditable in the lock.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<String>,
 }
@@ -237,36 +242,43 @@ pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result
     let mut warnings: Vec<String> = Vec::new();
 
     for source in &profile.sources {
-        let Some((origin, kind, rev, subdir, caps)) =
+        let Some((origin, kind, rev, subdir, mut caps)) =
             resolve_source(source, workdir, lock, &mut warnings)?
         else {
             continue; // a source that resolved to nothing was already warned about
         };
+        let namespace = source_namespace(source);
+        for cap in &mut caps {
+            cap.adopt_namespace(namespace.as_deref());
+        }
 
         let mut locked_caps = Vec::new();
         for cap in caps {
+            let name = cap.qualified_name();
             locked_caps.push(LockedCap {
+                name: name.clone(),
                 id: cap.manifest.id.clone(),
                 version: cap.manifest.version.clone(),
                 kind: cap.manifest.kind.as_str().to_string(),
-                fingerprint: crate::sync::fingerprint(&manifest_json(&cap)),
+                digest: content_digest(&cap),
                 dependencies: cap.manifest.dependencies.clone(),
             });
-            // Earlier sources win; a later duplicate id is a loud skip, noting a
-            // version conflict when the shadowed copy differs.
-            if let Some(kept) = kept_version.get(&cap.manifest.id) {
+            // Shadowing is now judged on the *qualified* name: two authors'
+            // `mem-search` are different capabilities and both compose. Earlier
+            // sources still win for a genuine duplicate, noting a version
+            // conflict when the shadowed copy differs.
+            if let Some(kept) = kept_version.get(&name) {
                 let conflict = if *kept != cap.manifest.version {
                     format!(" (kept {kept}, ignored {})", cap.manifest.version)
                 } else {
                     String::new()
                 };
                 warnings.push(format!(
-                    "capability '{}' from {origin} shadowed by an earlier source{conflict}",
-                    cap.manifest.id
+                    "capability '{name}' from {origin} shadowed by an earlier source{conflict}"
                 ));
             } else {
-                kept_version.insert(cap.manifest.id.clone(), cap.manifest.version.clone());
-                seen_ids.push(cap.manifest.id.clone());
+                kept_version.insert(name.clone(), cap.manifest.version.clone());
+                seen_ids.push(name);
                 composed.push(cap);
             }
         }
@@ -278,6 +290,8 @@ pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result
             capabilities: locked_caps,
         });
     }
+
+    warn_on_bare_id_collisions(&composed, &mut warnings);
 
     // Resolve the dependency graph: report unmet dependencies (transitively) and
     // cycles — loudly, but non-fatally, so nothing is silently dropped — and
@@ -298,7 +312,8 @@ pub fn resolve(profile: &Profile, workdir: &Path, lock: Option<&Lock>) -> Result
     })
 }
 
-/// A resolved source: `(origin, kind, pinned rev, subdir, capabilities)`.
+/// A resolved source: `(origin, kind, pinned rev, subdir, capabilities)`. The
+/// capabilities already carry the source's namespace (see [`source_namespace`]).
 type ResolvedSource = (
     String,
     &'static str,
@@ -306,6 +321,76 @@ type ResolvedSource = (
     Option<String>,
     Vec<LoadedCapability>,
 );
+
+/// Warn when two distinct capabilities share a bare `id`.
+///
+/// Namespacing lets `acme/mem-search` and `thedotmack/mem-search` both compose,
+/// which is right — but the *emitted* filenames use the bare id, so they will
+/// land on the same `.claude/skills/mem-search/SKILL.md`. `sync` already handles
+/// that collision honestly (first producer wins, loudly flagged), and this warns
+/// at resolve time so the clash is visible before anything is written, with the
+/// fix named: override the path per harness, or rename the id.
+fn warn_on_bare_id_collisions(caps: &[LoadedCapability], warnings: &mut Vec<String>) {
+    let mut by_id: HashMap<&str, Vec<String>> = HashMap::new();
+    for cap in caps {
+        by_id
+            .entry(cap.manifest.id.as_str())
+            .or_default()
+            .push(cap.qualified_name());
+    }
+    let mut collisions: Vec<(&str, Vec<String>)> = by_id
+        .into_iter()
+        .filter(|(_, names)| names.len() > 1)
+        .collect();
+    collisions.sort_by(|a, b| a.0.cmp(b.0));
+    for (id, names) in collisions {
+        warnings.push(format!(
+            "bare id '{id}' is claimed by {} capabilities ({}) — they compose, but \
+             emit to the same paths; set a per-harness `overrides.path` or rename one",
+            names.len(),
+            names.join(", ")
+        ));
+    }
+}
+
+/// The namespace a source lends the capabilities it provides.
+///
+/// A **local** path is your own tree, so it lends nothing — bare ids stay bare,
+/// and nothing about single-project authoring changes. A **git** source lends
+/// `<owner>/<repo>`, which is how people already name these things. A
+/// **registry** entry lends its own name, since that is the identity the index
+/// publishes.
+fn source_namespace(source: &Source) -> Option<String> {
+    match source {
+        Source::Local(_) => None,
+        Source::Git(g) => namespace_from_git_url(&g.url),
+        Source::Registry(r) => Some(r.name.clone()),
+    }
+}
+
+/// `<owner>/<repo>` from a git URL, tolerating the spellings people actually
+/// write: `https://host/owner/repo(.git)`, `git@host:owner/repo.git`, and a
+/// bare local path (which yields just the directory name).
+fn namespace_from_git_url(url: &str) -> Option<String> {
+    let trimmed = url.trim_end_matches('/').trim_end_matches(".git");
+    // `scp`-style remotes put the path after a colon, not a slash.
+    let path = match trimmed.split_once("://") {
+        Some((_, rest)) => rest.split_once('/').map(|(_, p)| p).unwrap_or(rest),
+        None => match trimmed.split_once(':') {
+            Some((_, p)) => p,
+            None => trimmed,
+        },
+    };
+    let parts: Vec<&str> = path
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .collect();
+    match parts.as_slice() {
+        [] => None,
+        [repo] => Some((*repo).to_string()),
+        [.., owner, repo] => Some(format!("{owner}/{repo}")),
+    }
+}
 
 /// Resolve one source to its capabilities + lock metadata. `Ok(None)` means the
 /// source resolved to nothing (already warned) and is skipped.
@@ -472,12 +557,16 @@ fn resolve_dependencies(
     order.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
-/// Re-serialize a capability's manifest to a stable string for fingerprinting.
-fn manifest_json(cap: &LoadedCapability) -> String {
-    // Read the on-disk capability.json when available (stable bytes); fall back
-    // to the id if unreadable.
-    std::fs::read_to_string(cap.dir.join("capability.json"))
-        .unwrap_or_else(|_| cap.manifest.id.clone())
+/// The content digest pinned in the lock: a `sha256` over the capability's whole
+/// file tree ([`crate::trust::capability_digest`]) — the same digest signatures
+/// are made over, so the lock and the trust layer agree on what "this
+/// capability" means.
+///
+/// An unreadable directory degrades to a marker rather than a plausible-looking
+/// hash, because a digest that silently means "we couldn't look" is worse than
+/// one that says so.
+fn content_digest(cap: &LoadedCapability) -> String {
+    crate::trust::capability_digest(&cap.dir).unwrap_or_else(|_| "sha256:unavailable".to_string())
 }
 
 // ---- git personal-repo sync (shells out to `git`) -------------------------
@@ -509,10 +598,31 @@ fn git_sync(url: &str, rev: &str, workdir: &Path) -> Result<(PathBuf, String), S
     }
 
     let dir = dest.to_string_lossy().into_owned();
-    git(&["-C", &dir, "checkout", "--quiet", rev])
-        .map_err(|e| format!("checkout '{rev}' in {url}: {e}"))?;
-    let sha = git(&["-C", &dir, "rev-parse", "HEAD"])?;
+    let sha = resolve_rev(&dir, rev).map_err(|e| format!("resolve '{rev}' in {url}: {e}"))?;
+    // Detach: the cached clone is a checkout target, never a branch to advance.
+    git(&["-C", &dir, "checkout", "--quiet", "--detach", &sha])
+        .map_err(|e| format!("checkout '{rev}' ({sha}) in {url}: {e}"))?;
     Ok((dest, sha))
+}
+
+/// Resolve `rev` to a commit SHA inside the cached clone, **preferring the
+/// remote-tracking ref**.
+///
+/// This ordering is load-bearing. `fetch` updates `origin/<branch>` but never
+/// fast-forwards the cache's local branch of the same name, so resolving a
+/// branch locally would pin whatever commit was HEAD at first clone — forever,
+/// however often the source is re-resolved. A tag or an explicit SHA has no
+/// remote-tracking ref and falls through to the second candidate.
+fn resolve_rev(dir: &str, rev: &str) -> Result<String, String> {
+    for candidate in [format!("origin/{rev}"), rev.to_string()] {
+        let spec = format!("{candidate}^{{commit}}");
+        if let Ok(sha) = git(&["-C", dir, "rev-parse", "--verify", "--quiet", &spec]) {
+            if !sha.is_empty() {
+                return Ok(sha);
+            }
+        }
+    }
+    Err(format!("unknown revision '{rev}'"))
 }
 
 /// A filesystem-safe cache directory name for a git url.

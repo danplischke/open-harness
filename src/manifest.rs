@@ -166,6 +166,12 @@ impl Default for PermissionPolicy {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
     pub id: String,
+    /// Explicit namespace, e.g. `acme`. Usually left unset — the resolver
+    /// derives one from the source (a git repo's `<owner>/<repo>`, a registry
+    /// entry's name), and an author only sets this to pin their own. See
+    /// [`LoadedCapability::qualified_name`].
+    #[serde(default)]
+    pub namespace: Option<String>,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -237,6 +243,30 @@ pub struct LoadedCapability {
 }
 
 impl LoadedCapability {
+    /// The capability's **fully-qualified name**: `<namespace>/<id>`, or the
+    /// bare `id` when it has no namespace.
+    ///
+    /// A bare `id` is only unique within one tree. The moment sources are other
+    /// people's repositories, two authors both shipping `mem-search` are
+    /// different capabilities, and "first source wins" would silently pick one.
+    /// The qualified name is what dependencies resolve against and what the lock
+    /// pins; `id` stays the local alias, and is still what the emitted native
+    /// filenames use.
+    pub fn qualified_name(&self) -> String {
+        match &self.manifest.namespace {
+            Some(ns) if !ns.is_empty() => format!("{ns}/{}", self.manifest.id),
+            _ => self.manifest.id.clone(),
+        }
+    }
+
+    /// Adopt `namespace` unless the manifest already declares one — an author's
+    /// explicit namespace outranks whatever the source implies.
+    pub fn adopt_namespace(&mut self, namespace: Option<&str>) {
+        if self.manifest.namespace.is_none() {
+            self.manifest.namespace = namespace.map(|s| s.to_string());
+        }
+    }
+
     pub fn load(manifest_path: &Path) -> Result<Self, String> {
         let manifest: Manifest = crate::config::load(manifest_path)?;
         let dir = manifest_path
@@ -290,6 +320,7 @@ impl LoadedCapability {
         // and an agent's `permissions:` (tool→verdict) must reach its config, not
         // be captured as the sandbox and silently loosen `ask` to `allow`.
         for key in [
+            "namespace",
             "name",
             "description",
             "version",
