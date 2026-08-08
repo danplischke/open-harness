@@ -29,8 +29,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Default lockfile name, written next to the profile.
+/// Default lockfile name, written next to the profile. Extension-less by
+/// convention (like `Cargo.lock`); the contents are YAML.
 pub const LOCK_NAME: &str = "open-harness.lock";
+
+/// The profile filename without its extension. [`crate::config::find`] probes
+/// `open-harness.yaml`, `open-harness.yml`, then a legacy `open-harness.json`.
+pub const PROFILE_STEM: &str = "open-harness";
+
+/// The canonical profile filename, for messages and `oh init`.
+pub const PROFILE_NAME: &str = "open-harness.yaml";
 
 // ---- profile + source model ----------------------------------------------
 
@@ -114,9 +122,7 @@ struct RegistryEntry {
 
 impl RegistryIndex {
     fn load(path: &Path) -> Result<RegistryIndex, String> {
-        let text =
-            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        serde_json::from_str(&text).map_err(|e| format!("invalid registry index: {e}"))
+        crate::config::load(path).map_err(|e| format!("invalid registry index: {e}"))
     }
 
     fn find(&self, name: &str, version: Option<&str>) -> Option<&RegistryEntry> {
@@ -127,14 +133,14 @@ impl RegistryIndex {
 }
 
 impl Profile {
-    pub fn from_json(text: &str) -> Result<Profile, String> {
-        serde_json::from_str(text).map_err(|e| format!("invalid profile: {e}"))
+    /// Parse a profile from YAML (or legacy JSON) text.
+    pub fn from_text(text: &str) -> Result<Profile, String> {
+        crate::config::from_str(text, crate::config::Format::Either)
+            .map_err(|e| format!("invalid profile: {e}"))
     }
 
     pub fn load(path: &Path) -> Result<Profile, String> {
-        let text =
-            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        Profile::from_json(&text)
+        crate::config::load(path).map_err(|e| format!("invalid profile: {e}"))
     }
 
     fn harness_set(&self) -> Result<Vec<Harness>, String> {
@@ -182,17 +188,19 @@ pub struct Lock {
 }
 
 impl Lock {
-    pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".into())
+    /// Render the lock as a YAML document.
+    pub fn to_yaml(&self) -> String {
+        crate::config::to_yaml(self).unwrap_or_else(|_| "{}\n".into())
     }
 
-    pub fn from_json(text: &str) -> Result<Lock, String> {
-        serde_json::from_str(text).map_err(|e| format!("invalid lockfile: {e}"))
+    /// Parse a lockfile from YAML (or a legacy JSON lockfile).
+    pub fn from_text(text: &str) -> Result<Lock, String> {
+        crate::config::from_str(text, crate::config::Format::Either)
+            .map_err(|e| format!("invalid lockfile: {e}"))
     }
 
     pub fn write(&self, path: &Path) -> Result<(), String> {
-        std::fs::write(path, format!("{}\n", self.to_json()))
-            .map_err(|e| format!("write {}: {e}", path.display()))
+        crate::config::write(path, self)
     }
 
     /// The resolved rev pinned for a git source at `url`, if any.

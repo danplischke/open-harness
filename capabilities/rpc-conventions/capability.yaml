@@ -1,0 +1,10 @@
+id: rpc-conventions
+name: RPC conventions
+description: Conventions for RPC service code.
+kind: rule
+rule:
+  activation: glob
+  globs:
+    - src/rpc/**/*.rs
+    - src/rpc/**/*.ts
+  body_file: RULE.md

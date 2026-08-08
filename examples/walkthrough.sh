@@ -49,28 +49,28 @@ act "2 · SIGN & TRUST — integrity + authorship for a distributable capability
 oh keygen --out "$WORK/author.key" --label demo-author
 oh sign --capability "$CAPS/secret-guard" --key "$WORK/author.key"
 note "Verify against an empty trust store → valid signature, but UNKNOWN signer:"
-oh verify --capability "$CAPS/secret-guard" --trust "$WORK/trust.json" || true
+oh verify --capability "$CAPS/secret-guard" --trust "$WORK/trust.yaml" || true
 note "Trust the signer (trust-on-first-use), then verify again → trusted:"
-oh trust --capability "$CAPS/secret-guard" --trust "$WORK/trust.json" --label demo-author
-oh verify --capability "$CAPS/secret-guard" --trust "$WORK/trust.json"
+oh trust --capability "$CAPS/secret-guard" --trust "$WORK/trust.yaml" --label demo-author
+oh verify --capability "$CAPS/secret-guard" --trust "$WORK/trust.yaml"
 
 act "3 · COMPOSE — a profile of sources → a pinned lockfile"
-cat > "$WORK/open-harness.json" <<'JSON'
-{
-  "name": "walkthrough",
-  "harnesses": ["claude-code", "cursor", "opencode"],
-  "sources": [ { "local": { "path": "capabilities" } } ]
-}
-JSON
-note "profile: 3 harnesses, 1 local source ($WORK/open-harness.json)"
-oh resolve --profile "$WORK/open-harness.json"
+cat > "$WORK/open-harness.yaml" <<'YAML'
+name: walkthrough
+harnesses: [claude-code, cursor, opencode]
+sources:
+  - local:
+      path: capabilities
+YAML
+note "profile: 3 harnesses, 1 local source ($WORK/open-harness.yaml)"
+oh resolve --profile "$WORK/open-harness.yaml"
 
 act "4 · SYNC — install the composed set into a project (native fan-out)"
-oh sync --profile "$WORK/open-harness.json" --into "$WORK/project"
+oh sync --profile "$WORK/open-harness.yaml" --into "$WORK/project"
 note "the native files open-harness wrote — one composed set → three harnesses:"
 ( cd "$WORK/project" && find . -type f | sort | sed 's/^/      /' )
 note "re-check drift against the SAME profile → in sync (sync is idempotent):"
-oh check --profile "$WORK/open-harness.json" --into "$WORK/project" --ci
+oh check --profile "$WORK/open-harness.yaml" --into "$WORK/project" --ci
 
 act "5 · DISPATCH — one decision, each harness's native deny convention"
 note "Claude — SAFE input → exit 0 (allowed), audit note added to model context:"

@@ -50,7 +50,11 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path};
 
 /// Relative location of the sync lockfile inside a synced project.
-pub const LOCK_REL: &str = ".open-harness/sync.lock.json";
+pub const LOCK_REL: &str = ".open-harness/sync.lock.yaml";
+
+/// The pre-YAML sync lockfile, still read so an already-synced project converges
+/// (and prunes correctly) instead of orphaning every file it used to manage.
+pub const LEGACY_LOCK_REL: &str = ".open-harness/sync.lock.json";
 
 // ---- planning (pure, no filesystem) ---------------------------------------
 
@@ -367,11 +371,17 @@ impl Default for Lockfile {
 
 impl Lockfile {
     fn load(root: &Path) -> Lockfile {
-        let p = root.join(LOCK_REL);
-        std::fs::read_to_string(p)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        // The YAML lockfile wins; a pre-YAML project falls back to the legacy
+        // JSON one so its managed paths are still known (and still prunable).
+        for rel in [LOCK_REL, LEGACY_LOCK_REL] {
+            let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
+                continue;
+            };
+            if let Ok(lock) = crate::config::from_str(&text, crate::config::Format::Either) {
+                return lock;
+            }
+        }
+        Lockfile::default()
     }
 
     fn managed_paths(&self) -> Vec<String> {
@@ -528,11 +538,10 @@ pub fn uninstall(root: &Path, dry_run: bool) -> std::io::Result<ApplyReport> {
         });
     }
     if !dry_run {
-        // Clear the lockfile itself (and remove it from disk).
-        let p = root.join(LOCK_REL);
-        if p.exists() {
-            std::fs::remove_file(&p)?;
-            prune_empty_dirs(root, &p);
+        // Clear the lockfile itself (and remove it from disk), including a
+        // legacy JSON one left by a pre-YAML sync.
+        for rel in [LOCK_REL, LEGACY_LOCK_REL] {
+            remove_managed(root, rel)?;
         }
     }
     changes.sort_by(|a, b| a.path.cmp(&b.path));
@@ -563,8 +572,11 @@ fn write_file(root: &Path, rel: &str, contents: &str) -> std::io::Result<()> {
 }
 
 fn write_lockfile(root: &Path, lock: &Lockfile) -> std::io::Result<()> {
-    let text = serde_json::to_string_pretty(lock).unwrap_or_else(|_| "{}".to_string());
-    write_file(root, LOCK_REL, &format!("{text}\n"))
+    let text = crate::config::to_yaml(lock).unwrap_or_else(|_| "{}\n".to_string());
+    write_file(root, LOCK_REL, &text)?;
+    // Writing the YAML lockfile supersedes the legacy JSON one; leaving it
+    // behind would let a later run load stale managed paths.
+    remove_managed(root, LEGACY_LOCK_REL)
 }
 
 fn remove_managed(root: &Path, rel: &str) -> std::io::Result<()> {

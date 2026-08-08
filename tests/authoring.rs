@@ -32,11 +32,11 @@ fn installable(plan: &open_harness::kind::KindPlan) -> bool {
 fn scaffold_hook_produces_a_runnable_capability() {
     let root = tmp("hook");
     let files = scaffold::scaffold(KindId::Hook, Lang::Python, "guard", &root).unwrap();
-    assert!(files.iter().any(|f| f.ends_with("capability.json")));
+    assert!(files.iter().any(|f| f.ends_with("capability.yaml")));
     assert!(files.iter().any(|f| f.ends_with("hook.py")));
 
     // The manifest loads and plans on Claude.
-    let cap = LoadedCapability::load(&root.join("guard/capability.json")).unwrap();
+    let cap = LoadedCapability::load(&root.join("guard/capability.yaml")).unwrap();
     assert_eq!(cap.manifest.kind, KindId::Hook);
     assert!(installable(
         &kind_impl(cap.manifest.kind).plan(&cap, Harness::Claude)
@@ -75,7 +75,7 @@ fn scaffold_supports_each_language_and_generative_kinds() {
             files.iter().any(|f| f.ends_with(script)),
             "{id} writes {script}"
         );
-        let cap = LoadedCapability::load(&root.join(&id).join("capability.json")).unwrap();
+        let cap = LoadedCapability::load(&root.join(&id).join("capability.yaml")).unwrap();
         assert_eq!(cap.manifest.kind, KindId::Hook);
         let run = cap.manifest.run.as_ref().expect("has a run entrypoint");
         assert_eq!(run.command, command, "{id} runs via {command}");
@@ -91,7 +91,7 @@ fn scaffold_supports_each_language_and_generative_kinds() {
 
     // A generative kind scaffolds to a valid, installable manifest.
     scaffold::scaffold(KindId::Permission, Lang::Python, "policy", &root).unwrap();
-    let cap = LoadedCapability::load(&root.join("policy/capability.json")).unwrap();
+    let cap = LoadedCapability::load(&root.join("policy/capability.yaml")).unwrap();
     assert_eq!(cap.manifest.kind, KindId::Permission);
     assert!(installable(
         &kind_impl(cap.manifest.kind).plan(&cap, Harness::Claude)
@@ -111,7 +111,7 @@ fn scaffold_project_produces_a_typescript_npm_package() {
     for expected in [
         "package.json",
         "tsconfig.json",
-        "capability.json",
+        "capability.yaml",
         "src/hook.ts",
         "test.mjs",
         "README.md",
@@ -124,7 +124,7 @@ fn scaffold_project_produces_a_typescript_npm_package() {
     }
 
     // The manifest is a real, loadable Hook that plans cleanly on a harness.
-    let cap = LoadedCapability::load(&root.join("guard/capability.json")).unwrap();
+    let cap = LoadedCapability::load(&root.join("guard/capability.yaml")).unwrap();
     assert_eq!(cap.manifest.kind, KindId::Hook);
     let run = cap.manifest.run.as_ref().expect("has a run entrypoint");
     assert_eq!(run.command, "node");
@@ -168,7 +168,7 @@ fn scaffold_refuses_to_overwrite_and_rejects_bad_ids() {
     scaffold::scaffold(KindId::Hook, Lang::Bash, "g", &root).unwrap();
     assert!(
         scaffold::scaffold(KindId::Hook, Lang::Bash, "g", &root).is_err(),
-        "must not clobber an existing capability.json"
+        "must not clobber an existing capability.yaml"
     );
     assert!(scaffold::scaffold(KindId::Hook, Lang::Bash, "bad id!", &root).is_err());
     let _ = std::fs::remove_dir_all(&root);

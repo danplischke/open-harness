@@ -1,9 +1,0 @@
-{
-  "id": "audit-note",
-  "name": "Audit Note",
-  "description": "Appends an audit line to model context before each tool call. Never blocks. Demonstrates composition with a blocking capability and a second implementation language.",
-  "run": { "command": "node", "args": ["note.mjs"] },
-  "events": [
-    { "phase": "pre", "subject": "tool", "tool_class": "any" }
-  ]
-}

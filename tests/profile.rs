@@ -28,10 +28,13 @@ fn write(path: &Path, contents: &str) {
 }
 
 fn profile_from(v: serde_json::Value) -> Profile {
-    Profile::from_json(&v.to_string()).expect("valid profile")
+    Profile::from_text(&v.to_string()).expect("valid profile")
 }
 
-fn cap_json(id: &str, version: &str, kind: &str, extra: serde_json::Value) -> String {
+/// A capability manifest as the YAML that authors actually write — not JSON in
+/// a `.yaml` file, which YAML would accept and which would leave the block
+/// syntax untested.
+fn cap_yaml(id: &str, version: &str, kind: &str, extra: serde_json::Value) -> String {
     let mut m = json!({
         "id": id, "name": id, "description": "x", "version": version, "kind": kind,
     });
@@ -40,7 +43,7 @@ fn cap_json(id: &str, version: &str, kind: &str, extra: serde_json::Value) -> St
             mo.insert(k.clone(), val.clone());
         }
     }
-    m.to_string()
+    open_harness::config::to_yaml(&m).expect("render manifest")
 }
 
 // ---- cross-platform: resolver, lockfile, warnings -------------------------
@@ -49,8 +52,8 @@ fn cap_json(id: &str, version: &str, kind: &str, extra: serde_json::Value) -> St
 fn local_only_profile_resolves_and_locks() {
     let wd = tmp("local");
     write(
-        &wd.join("caps/greet/capability.json"),
-        &cap_json(
+        &wd.join("caps/greet/capability.yaml"),
+        &cap_yaml(
             "greet",
             "1.2.0",
             "skill",
@@ -78,8 +81,8 @@ fn local_only_profile_resolves_and_locks() {
 fn resolve_is_deterministic_for_local() {
     let wd = tmp("determ");
     write(
-        &wd.join("caps/a/capability.json"),
-        &cap_json("a", "0.1.0", "rule", json!({ "rule": { "body": "x" } })),
+        &wd.join("caps/a/capability.yaml"),
+        &cap_yaml("a", "0.1.0", "rule", json!({ "rule": { "body": "x" } })),
     );
     let profile = profile_from(json!({
         "name": "p", "harnesses": ["cursor"],
@@ -95,15 +98,15 @@ fn resolve_is_deterministic_for_local() {
 fn lock_round_trips_through_json() {
     let wd = tmp("lockrt");
     write(
-        &wd.join("caps/a/capability.json"),
-        &cap_json("a", "2.0.0", "skill", json!({ "skill": { "body": "y" } })),
+        &wd.join("caps/a/capability.yaml"),
+        &cap_yaml("a", "2.0.0", "skill", json!({ "skill": { "body": "y" } })),
     );
     let profile = profile_from(json!({
         "name": "rt", "harnesses": ["claude-code"],
         "sources": [{ "local": { "path": "caps" } }],
     }));
     let lock = profile::resolve(&profile, &wd, None).unwrap().lock;
-    let round = Lock::from_json(&lock.to_json()).unwrap();
+    let round = Lock::from_text(&lock.to_yaml()).unwrap();
     assert_eq!(lock, round);
     let _ = std::fs::remove_dir_all(&wd);
 }
@@ -130,8 +133,8 @@ fn registry_source_resolves_through_a_local_index() {
     let wd = tmp("registry-resolve");
     // A capability living under packs/, reached only via the registry index.
     write(
-        &wd.join("packs/greeter/capability.json"),
-        &cap_json(
+        &wd.join("packs/greeter/capability.yaml"),
+        &cap_yaml(
             "greeter",
             "2.1.0",
             "skill",
@@ -199,8 +202,8 @@ fn registry_missing_entry_is_warned_not_dropped() {
 fn missing_dependency_is_warned() {
     let wd = tmp("deps");
     write(
-        &wd.join("caps/a/capability.json"),
-        &cap_json(
+        &wd.join("caps/a/capability.yaml"),
+        &cap_yaml(
             "a",
             "0.1.0",
             "skill",
@@ -226,8 +229,8 @@ fn dependencies_order_topologically() {
     // Source order is a, b, c (discover sorts by id); the graph a→b→c must
     // reorder them so each dependency precedes its dependent.
     write(
-        &wd.join("caps/a/capability.json"),
-        &cap_json(
+        &wd.join("caps/a/capability.yaml"),
+        &cap_yaml(
             "a",
             "1.0.0",
             "skill",
@@ -235,8 +238,8 @@ fn dependencies_order_topologically() {
         ),
     );
     write(
-        &wd.join("caps/b/capability.json"),
-        &cap_json(
+        &wd.join("caps/b/capability.yaml"),
+        &cap_yaml(
             "b",
             "1.0.0",
             "skill",
@@ -244,8 +247,8 @@ fn dependencies_order_topologically() {
         ),
     );
     write(
-        &wd.join("caps/c/capability.json"),
-        &cap_json("c", "1.0.0", "skill", json!({ "skill": { "body": "c" } })),
+        &wd.join("caps/c/capability.yaml"),
+        &cap_yaml("c", "1.0.0", "skill", json!({ "skill": { "body": "c" } })),
     );
     let profile = profile_from(json!({
         "name": "p", "harnesses": ["claude-code"],
@@ -274,8 +277,8 @@ fn dependencies_order_topologically() {
 fn dependency_cycle_is_warned_not_hung() {
     let wd = tmp("cycle");
     write(
-        &wd.join("caps/a/capability.json"),
-        &cap_json(
+        &wd.join("caps/a/capability.yaml"),
+        &cap_yaml(
             "a",
             "1.0.0",
             "skill",
@@ -283,8 +286,8 @@ fn dependency_cycle_is_warned_not_hung() {
         ),
     );
     write(
-        &wd.join("caps/b/capability.json"),
-        &cap_json(
+        &wd.join("caps/b/capability.yaml"),
+        &cap_yaml(
             "b",
             "1.0.0",
             "skill",
@@ -309,8 +312,8 @@ fn dependency_cycle_is_warned_not_hung() {
 fn resolved_dependencies_are_recorded_in_the_lock() {
     let wd = tmp("lockdeps");
     write(
-        &wd.join("caps/a/capability.json"),
-        &cap_json(
+        &wd.join("caps/a/capability.yaml"),
+        &cap_yaml(
             "a",
             "1.0.0",
             "skill",
@@ -318,8 +321,8 @@ fn resolved_dependencies_are_recorded_in_the_lock() {
         ),
     );
     write(
-        &wd.join("caps/b/capability.json"),
-        &cap_json("b", "1.0.0", "skill", json!({ "skill": { "body": "b" } })),
+        &wd.join("caps/b/capability.yaml"),
+        &cap_yaml("b", "1.0.0", "skill", json!({ "skill": { "body": "b" } })),
     );
     let profile = profile_from(json!({
         "name": "p", "harnesses": ["claude-code"],
@@ -338,7 +341,7 @@ fn resolved_dependencies_are_recorded_in_the_lock() {
     );
     assert_eq!(
         lock,
-        Lock::from_json(&lock.to_json()).unwrap(),
+        Lock::from_text(&lock.to_yaml()).unwrap(),
         "the graph survives a lock round-trip"
     );
     let _ = std::fs::remove_dir_all(&wd);
@@ -399,8 +402,8 @@ mod git_backed {
     #[test]
     fn profile_composes_git_and_local_with_pinned_lock() {
         let (repo, sha) = init_repo_with(
-            "caps/conv/capability.json",
-            &cap_json(
+            "caps/conv/capability.yaml",
+            &cap_yaml(
                 "conv",
                 "0.4.1",
                 "rule",
@@ -409,8 +412,8 @@ mod git_backed {
         );
         let wd = tmp("compose");
         write(
-            &wd.join("local/greet/capability.json"),
-            &cap_json(
+            &wd.join("local/greet/capability.yaml"),
+            &cap_yaml(
                 "greet",
                 "1.0.0",
                 "skill",
@@ -454,8 +457,8 @@ mod git_backed {
     #[test]
     fn lock_pins_reproducibly_across_new_commits() {
         let (repo, sha1) = init_repo_with(
-            "caps/x/capability.json",
-            &cap_json("x", "1.0.0", "skill", json!({ "skill": { "body": "v1" } })),
+            "caps/x/capability.yaml",
+            &cap_yaml("x", "1.0.0", "skill", json!({ "skill": { "body": "v1" } })),
         );
         let wd = tmp("repro");
         let profile = profile_from(json!({
@@ -468,8 +471,8 @@ mod git_backed {
 
         // Advance the upstream repo.
         write(
-            &repo.join("caps/y/capability.json"),
-            &cap_json("y", "1.0.0", "rule", json!({ "rule": { "body": "new" } })),
+            &repo.join("caps/y/capability.yaml"),
+            &cap_yaml("y", "1.0.0", "rule", json!({ "rule": { "body": "new" } })),
         );
         git(&["add", "-A"], &repo);
         git(&["commit", "-qm", "more"], &repo);

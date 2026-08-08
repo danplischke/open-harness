@@ -1,0 +1,7 @@
+id: review-pr
+name: Review PR
+description: Review the current pull request for correctness and tests.
+kind: command
+command:
+  argument_hint: "[pr-number]"
+  body_file: COMMAND.md

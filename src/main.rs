@@ -1,8 +1,9 @@
 //! `oh` — the unified CLI.
 //!
 //! Authoring:  `init` (write a profile) · `scaffold` (a runnable capability
-//!   starter) · `add`/`remove` (edit a profile's sources) · `doctor` (check the
-//!   environment + capability health).
+//!   starter) · `add`/`remove` (edit a profile's sources) · `migrate` (rewrite
+//!   legacy JSON configs as YAML) · `doctor` (check the environment +
+//!   capability health).
 //! Runtime:    `run` (a harness's single native hook entrypoint) · `mcp`
 //!   (list/call an MCP server's tools through the shell — the MCP→CLI bridge).
 //! Delivery:   `emit` (native registration config) · `resolve` (sources → lock)
@@ -46,12 +47,13 @@ fn main() {
         "scaffold" => cmd_scaffold(&rest),
         "capture" => cmd_capture(&rest),
         "init" => cmd_init(&rest),
+        "migrate" => cmd_migrate(&rest),
         "doctor" => cmd_doctor(&rest),
         "add" => cmd_add(&rest),
         "remove" => cmd_remove(&rest),
         _ => {
             eprintln!(
-                "oh <init|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix|version> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
+                "oh <init|migrate|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix|version> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh migrate (JSON configs → YAML) · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
             );
             exit(2);
         }
@@ -535,7 +537,7 @@ fn cmd_verify(rest: &[String]) {
     let store = load_trust(&o);
     let v = trust::verify(&dir, &store);
     println!("{}: {}", dir.display(), v.status());
-    if let Ok(cap) = LoadedCapability::load(&dir.join("capability.json")) {
+    if let Ok(cap) = load_manifest_in(&dir) {
         if !cap.manifest.permissions.is_empty() {
             println!("  permissions: {}", cap.manifest.permissions.summary());
         }
@@ -550,7 +552,7 @@ fn cmd_trust(rest: &[String]) {
     let trust_path = o
         .trust
         .clone()
-        .unwrap_or_else(|| PathBuf::from("trust.json"));
+        .unwrap_or_else(|| default_store_path("trust"));
     let mut store = TrustStore::load(&trust_path).unwrap_or_else(|e| {
         eprintln!("{e}");
         exit(1);
@@ -679,7 +681,7 @@ fn cmd_keyring(rest: &[String]) {
     let out = o
         .out
         .clone()
-        .unwrap_or_else(|| PathBuf::from("keyring.json"));
+        .unwrap_or_else(|| default_store_path("keyring"));
     keyring.write(&out).unwrap_or_else(|e| {
         eprintln!("{e}");
         exit(1);
@@ -705,7 +707,7 @@ fn cmd_revoke(rest: &[String]) {
     let trust_path = o
         .trust
         .clone()
-        .unwrap_or_else(|| PathBuf::from("trust.json"));
+        .unwrap_or_else(|| default_store_path("trust"));
     let mut store = TrustStore::load(&trust_path).unwrap_or_else(|e| {
         eprintln!("{e}");
         exit(1);
@@ -722,6 +724,15 @@ fn cmd_revoke(rest: &[String]) {
     } else {
         println!("already revoked: {fp}");
     }
+}
+
+/// The default path for a trust store / keyring the user didn't name: the YAML
+/// spelling, unless a legacy `<stem>.json` is already sitting there — writing a
+/// fresh `trust.yaml` next to a `trust.json` full of pinned keys would silently
+/// drop every one of them.
+fn default_store_path(stem: &str) -> PathBuf {
+    open_harness::config::find(std::path::Path::new(stem))
+        .unwrap_or_else(|| PathBuf::from(format!("{stem}.yaml")))
 }
 
 fn load_trust(o: &Opts) -> TrustStore {
@@ -796,7 +807,7 @@ fn resolve_profile(path: &std::path::Path) -> Resolved {
     let lock_path = workdir.join(profile::LOCK_NAME);
     let existing = std::fs::read_to_string(&lock_path)
         .ok()
-        .and_then(|t| Lock::from_json(&t).ok());
+        .and_then(|t| Lock::from_text(&t).ok());
 
     let resolved = profile::resolve(&profile, workdir, existing.as_ref()).unwrap_or_else(|e| {
         eprintln!("resolve failed: {e}");
@@ -1195,9 +1206,11 @@ fn cmd_version() {
 fn cmd_init(rest: &[String]) {
     let o = parse_opts(rest);
     let dir = o.into.clone().unwrap_or_else(|| PathBuf::from("."));
-    let path = dir.join("open-harness.json");
-    if path.exists() {
-        eprintln!("{} already exists", path.display());
+    let path = dir.join(profile::PROFILE_NAME);
+    // Refuse if a profile already exists in *any* accepted spelling, so `init`
+    // never quietly shadows a `open-harness.json` that is still being read.
+    if let Some(existing) = open_harness::config::find(&dir.join(profile::PROFILE_STEM)) {
+        eprintln!("{} already exists", existing.display());
         exit(1);
     }
     let harnesses: Vec<String> = match o.harness.as_deref() {
@@ -1209,14 +1222,98 @@ fn cmd_init(rest: &[String]) {
         "harnesses": harnesses,
         "sources": [ { "local": { "path": "capabilities" } } ],
     });
-    let text = serde_json::to_string_pretty(&profile).unwrap_or_default();
-    if let Err(e) = std::fs::write(&path, format!("{text}\n")) {
-        eprintln!("write {}: {e}", path.display());
+    if let Err(e) = open_harness::config::write(&path, &profile) {
+        eprintln!("{e}");
         exit(1);
     }
     println!("wrote {}", path.display());
     println!("next: oh scaffold --kind hook --lang python --id my-guard");
     println!("      oh sync --profile {} --into .", path.display());
+}
+
+/// Config filenames `oh migrate` rewrites from JSON to YAML. Everything else is
+/// left alone — a harness's own `.json` config is that harness's format, not
+/// ours, and rewriting it would produce a file the harness cannot read.
+const MIGRATABLE: &[&str] = &[
+    "capability.json",
+    "open-harness.json",
+    "open-harness.lock",
+    "sync.lock.json",
+    "trust.json",
+    "keyring.json",
+    "capability.sig",
+];
+
+fn cmd_migrate(rest: &[String]) {
+    let o = parse_opts(rest);
+    let root = o.into.clone().unwrap_or_else(|| PathBuf::from("."));
+    let mut found = Vec::new();
+    collect_migratable(&root, &mut found);
+    found.sort();
+
+    if found.is_empty() {
+        println!("no JSON config files to migrate under {}", root.display());
+        return;
+    }
+    let mut migrated = 0usize;
+    for path in &found {
+        if o.dry_run {
+            println!(
+                "  would migrate  {} → {}",
+                path.display(),
+                open_harness::config::migrated_path(path).display()
+            );
+            migrated += 1;
+            continue;
+        }
+        match open_harness::config::migrate_file(path) {
+            // `None` means it parsed as something other than JSON — already
+            // migrated, so a re-run is a no-op rather than a churned file.
+            Ok(None) => {}
+            Ok(Some(target)) => {
+                println!("  migrated  {} → {}", path.display(), target.display());
+                migrated += 1;
+            }
+            Err(e) => {
+                eprintln!("  failed    {}: {e}", path.display());
+                exit(1);
+            }
+        }
+    }
+    println!(
+        "\n{migrated} file(s) {}",
+        if o.dry_run {
+            "would migrate"
+        } else {
+            "migrated"
+        }
+    );
+    if migrated > 0 && !o.dry_run {
+        println!(
+            "note: a capability's content digest changes with its manifest filename, \
+             so any existing `capability.sig` must be re-signed (`oh sign`)."
+        );
+    }
+}
+
+/// Walk `dir` collecting migratable config files. Hidden directories are skipped
+/// except `.open-harness`, which holds the sync lockfile; `.git` and friends are
+/// none of our business.
+fn collect_migratable(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if ft.is_dir() {
+            if !name.starts_with('.') || name == ".open-harness" {
+                collect_migratable(&entry.path(), out);
+            }
+        } else if ft.is_file() && MIGRATABLE.contains(&name.as_str()) {
+            out.push(entry.path());
+        }
+    }
 }
 
 fn cmd_doctor(rest: &[String]) {
@@ -1365,20 +1462,27 @@ fn cmd_remove(rest: &[String]) {
     }
 }
 
+/// Load the capability manifest in `dir`, whichever spelling it uses.
+fn load_manifest_in(dir: &std::path::Path) -> Result<LoadedCapability, String> {
+    let path = open_harness::config::find(&dir.join(open_harness::manifest::MANIFEST_STEM))
+        .ok_or_else(|| format!("no capability manifest in {}", dir.display()))?;
+    LoadedCapability::load(&path)
+}
+
 fn read_profile_value(path: &std::path::Path) -> serde_json::Value {
     match std::fs::read_to_string(path) {
-        Ok(t) => serde_json::from_str(&t).unwrap_or_else(|e| {
-            eprintln!("invalid profile {}: {e}", path.display());
-            exit(1);
-        }),
+        Ok(t) => open_harness::config::parse(&t, open_harness::config::Format::of(path))
+            .unwrap_or_else(|e| {
+                eprintln!("invalid profile {}: {e}", path.display());
+                exit(1);
+            }),
         Err(_) => serde_json::json!({ "name": "default", "harnesses": [], "sources": [] }),
     }
 }
 
 fn write_profile_value(path: &std::path::Path, v: &serde_json::Value) {
-    let text = serde_json::to_string_pretty(v).unwrap_or_default();
-    if let Err(e) = std::fs::write(path, format!("{text}\n")) {
-        eprintln!("write {}: {e}", path.display());
+    if let Err(e) = open_harness::config::write(path, v) {
+        eprintln!("{e}");
         exit(1);
     }
 }

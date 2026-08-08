@@ -51,7 +51,8 @@ target at all (Aider/Copilot for tool gating), that's reported, not faked.
 
 ```sh
 # Author
-oh init                                                   # write an open-harness.json profile
+oh init                                                   # write an open-harness.yaml profile
+oh migrate                                                # rewrite legacy JSON configs as YAML
 oh scaffold --kind hook --lang python --id my-guard       # a runnable capability starter (py|node|typescript|bash)
 oh scaffold --kind agent --id db-engineer                 # or: skill | rule | command | tool | permission | instructions
 oh scaffold --project  --id my-cap                        # a typed TypeScript capability as an npm package
@@ -66,19 +67,19 @@ oh check                                                  # per-capability insta
 oh emit   --harness cursor                                # native registration config (note the fan-out)
 
 # Compose & install
-oh resolve --profile open-harness.json                    # sources → a pinned open-harness.lock
-oh sync    --profile open-harness.json --into ./project   # install + converge (idempotent)
-oh check   --profile open-harness.json --into ./project --ci   # drift detection (fails CI on drift)
+oh resolve --profile open-harness.yaml                    # sources → a pinned open-harness.lock
+oh sync    --profile open-harness.yaml --into ./project   # install + converge (idempotent)
+oh check   --profile open-harness.yaml --into ./project --ci   # drift detection (fails CI on drift)
 oh sync    --into ./project --uninstall                   # clean removal (managed files only)
 
 # Trust
 oh keygen --out author.key --label me                     # an ed25519 keypair
 oh sign   --capability caps/web --key author.key
-oh verify --capability caps/web --trust trust.json        # Trusted / Untrusted / Revoked / Invalid / Unsigned
-oh trust  --capability caps/web --trust trust.json        # trust-on-first-use
-oh trust  --root --key acme-root.key --trust trust.json   # trust a root (delegated trust via a keyring)
-oh keyring --key acme-root.key --capability caps/web --out keyring.json   # a root vouches for an author
-oh revoke --capability caps/web --trust trust.json --reason "compromised"
+oh verify --capability caps/web --trust trust.yaml        # Trusted / Untrusted / Revoked / Invalid / Unsigned
+oh trust  --capability caps/web --trust trust.yaml        # trust-on-first-use
+oh trust  --root --key acme-root.key --trust trust.yaml   # trust a root (delegated trust via a keyring)
+oh keyring --key acme-root.key --capability caps/web --out keyring.yaml   # a root vouches for an author
+oh revoke --capability caps/web --trust trust.yaml --reason "compromised"
 
 # MCP→CLI bridge (for orgs whose harness MCP client is disabled)
 oh mcp list --id echo-bridge                              # speak MCP to a server through the shell
@@ -88,7 +89,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 152 tests, green on Linux/macOS/Windows
+cargo test                            # 169 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -103,8 +104,8 @@ are implemented.**
 The **document kinds** (skill, agent, command, rule, instructions) are authored
 as a **single file** whose YAML frontmatter *is* the manifest — a skill is just a
 `SKILL.md`, an agent an `AGENT.md` — so you write the artifact itself, no sidecar
-`capability.json`. `id` defaults to the directory name, `kind` to the filename.
-Hooks and tools keep a `capability.json` (no body, structured `run`/`server`
+`capability.yaml`. `id` defaults to the directory name, `kind` to the filename.
+Hooks and tools keep a `capability.yaml` (no body, structured `run`/`server`
 config); it also still works for any kind, and wins when both are present.
 
 - **hook** (runtime) — the stdio contract above, across every harness with hooks;
@@ -150,6 +151,26 @@ target without forking.
 `oh matrix` prints the full (event × harness) grid, generated from the adapters
 (never hand-maintained) with a CI drift gate.
 
+## Configuration format
+
+Everything open-harness itself defines is **YAML**: the capability manifest
+(`capability.yaml`), the profile (`open-harness.yaml`), both lockfiles, the
+registry index, the trust store, keyrings, key files, and detached signatures.
+JSON is still *read* — a `capability.json` from before the switch loads
+unchanged, and `oh migrate` rewrites a tree in place (`--dry-run` to preview).
+
+The line is deliberate, and it's the same one this project draws everywhere else:
+a **harness's** config is written in *that harness's* format, never ours.
+`.claude/settings.json`, `opencode.json`, `.mcp.json`, `.vscode/settings.json`
+and the Codex/Gemini TOML stay exactly as they are, along with the frozen
+`hook@1` wire protocol (JSON on stdin/stdout), the JSON Schemas in `spec/`, and
+`oh capture` fixtures — those are recordings of *native* payloads. `src/config.rs`
+is that boundary; `sync`'s JSON deep-merge composition is untouched.
+
+One caveat worth stating plainly: a capability is content-addressed over its file
+tree, so renaming `capability.json` to `capability.yaml` **changes its digest and
+invalidates any existing signature**. `oh migrate` says so; re-run `oh sign`.
+
 ## Sync & composition
 
 `emit` prints one capability's config; `sync` **installs a whole set** into a
@@ -158,7 +179,7 @@ harnesses, groups the artifacts by their real on-disk path, and writes them
 idempotently — a second `sync` is a no-op, removing a capability **prunes** the
 file it owned, and `--uninstall` cleanly removes everything (managed files only;
 a hand-written file is never touched). Every write is tracked in a lockfile
-(`.open-harness/sync.lock.json`), so `check --into DIR --ci` fails CI when the
+(`.open-harness/sync.lock.yaml`), so `check --into DIR --ci` fails CI when the
 installed config drifts (missing / modified / stale) from the source.
 
 When several capabilities target the **same file** — two permission policies on
@@ -183,14 +204,21 @@ Sources are a **local path**, a **git repo** (personal-repo sync — cloned, the
 pinned to a commit), or a **registry** — a JSON index that maps names to their
 real local/git source, one point of indirection over many repos.
 
-```jsonc
-// open-harness.json
-{ "name": "my-setup", "harnesses": ["claude-code", "cursor"],
-  "sources": [
-    { "local": { "path": "capabilities" } },
-    { "git": { "url": "https://github.com/me/my-caps", "rev": "main", "subdir": "capabilities" } },
-    { "registry": { "index": "registry.json", "name": "acme-guards", "version": "1.2.0" } }
-  ] }
+```yaml
+# open-harness.yaml
+name: my-setup
+harnesses: [claude-code, cursor]
+sources:
+  - local:
+      path: capabilities
+  - git:
+      url: https://github.com/me/my-caps
+      rev: main
+      subdir: capabilities
+  - registry:
+      index: registry.yaml
+      name: acme-guards
+      version: 1.2.0
 ```
 
 Capabilities may declare **`dependencies`** on other ids; the resolver reports
@@ -263,7 +291,8 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `src/event.rs` | Normalized event model: `(phase, subject, tool_class?)` |
 | `src/adapters.rs` | 11 harness adapters: event mapping, deny signal, registration format |
 | `src/kind.rs` + `src/kinds/` | The `Kind` trait + the eight capability kinds |
-| `src/tools.rs` + `src/yaml.rs` | Canonical tool vocabulary (shared by permission/skill/agent) + YAML frontmatter (hand-rolled emit; read via `yaml-rust2`) |
+| `src/tools.rs` + `src/yaml.rs` | Canonical tool vocabulary (shared by permission/skill/agent) + YAML (hand-rolled block emit; read via `yaml-rust2`) |
+| `src/config.rs` | open-harness's own config files: YAML out, YAML-or-JSON in — the boundary against a harness's native formats |
 | `src/dispatch.rs` | Single-entrypoint dispatcher: concurrent fan-out, merge, policy-driven fail-closed |
 | `src/runtime.rs` | Hardened execution: per-capability timeout, output cap, error taxonomy, cross-platform interpreters |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
@@ -277,19 +306,21 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
 | `docs/` | mdBook site (concepts, authoring guide, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 152 tests: conformance (70) + new kinds (22) + single-file (18) + trust (15) + sourcing (13) + MCP bridge (7) + authoring (5) + capture (2) |
+| `tests/` | 169 tests: conformance (70) + new kinds (24) + single-file (19) + trust (15) + config/YAML (14) + sourcing (13) + MCP bridge (7) + authoring (5) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies
 
-The default build is deliberately lean: `serde` / `serde_json`, `ed25519-dalek`
-/ `sha2` / `getrandom` for trust (integrity verification is always available, so
-it is not feature-gated), and `yaml-rust2` to read single-file capability
-frontmatter. Everything else that would pull weight is **opt-in**: `ffi` (uniffi,
+The default build is deliberately lean: `serde` / `serde_json` (with
+`preserve_order`, so a config file's key order survives a round-trip),
+`ed25519-dalek` / `sha2` / `getrandom` for trust (integrity verification is
+always available, so it is not feature-gated), and `yaml-rust2` to read YAML.
+Everything else that would pull weight is **opt-in**: `ffi` (uniffi,
 for the Python binding), `mcp-http-tls` (rustls, for https on the bridge). The
 line we draw: the *simple, fully-specified* wire formats — the stdio JSON-RPC
-client, the http client, hex/base64 — are hand-rolled to stay lean, but YAML
-frontmatter is *read* with a real parser (`yaml-rust2`), because YAML is a
+client, the http client, hex/base64, and YAML *emission* (a closed value set: no
+anchors, no tags, no multi-document streams) — are hand-rolled to stay lean, but
+YAML is *read* with a real parser (`yaml-rust2`), because YAML is a
 genuinely complex spec and getting quotes / nesting / anchors right is what a
 library is for, not something to hand-roll. We still emit our own frontmatter.
 

@@ -25,7 +25,11 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` keeps `Map` insertion-ordered (IndexMap) instead of sorting.
+# Config files are read into a `Value` before deserializing, and the YAML writer
+# emits from one, so without it every emitted mapping would be alphabetized and
+# an author's key order would not survive a round-trip.
+serde_json = { version = "1", features = ["preserve_order"] }
 uniffi = { version = "0.28", features = ["cli"], optional = true }
 # Trust & signing (#17): real ed25519 signatures over a sha256 content digest.
 # Core (not feature-gated): integrity verification must always be available.

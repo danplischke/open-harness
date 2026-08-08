@@ -1,10 +1,20 @@
 //! Capability manifest: what an OSS author ships so their capability can be
 //! installed into any harness. Language-agnostic: `run` is just a command line.
+//!
+//! The manifest is a YAML document (`capability.yaml`) loaded through
+//! [`crate::config`], which also still reads a legacy `capability.json`.
 
 use crate::event::{Boundary, NormEvent, Phase, SubjectKind, TaskKind, ToolClass};
 use crate::kind::KindId;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+/// The manifest filename without its extension. [`crate::config::find`] probes
+/// `capability.yaml`, `capability.yml`, then `capability.json`.
+pub const MANIFEST_STEM: &str = "capability";
+
+/// The canonical manifest filename, for messages and scaffolding.
+pub const MANIFEST_NAME: &str = "capability.yaml";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RunSpec {
@@ -228,10 +238,7 @@ pub struct LoadedCapability {
 
 impl LoadedCapability {
     pub fn load(manifest_path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(manifest_path)
-            .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
-        let manifest: Manifest = serde_json::from_str(&text)
-            .map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
+        let manifest: Manifest = crate::config::load(manifest_path)?;
         let dir = manifest_path
             .parent()
             .map(|p| p.to_path_buf())
@@ -384,9 +391,9 @@ const DOC_FILES: &[(&str, KindId)] = &[
 
 /// Scan `dir` for capabilities, **recursing** through category subdirectories.
 ///
-/// `dir` is a container. Each descendant directory that holds a `capability.json`
+/// `dir` is a container. Each descendant directory that holds a `capability.yaml`
 /// or a single-file document (`SKILL.md`, `AGENT.md`, …) is one capability,
-/// authored either way (when both are present, `capability.json` wins). A
+/// authored either way (when both are present, `capability.yaml` wins). A
 /// directory that *is* a capability is **not** descended into — its
 /// subdirectories are its own assets — so a category tree like
 /// `skills/gcp/cloud-run-basics/SKILL.md` is found while a capability's internals
@@ -435,12 +442,12 @@ fn scan_capability_or_category(dir: &Path, out: &mut Vec<LoadedCapability>) -> R
     scan_container(dir, out)
 }
 
-/// Load the capability rooted directly at `dir`, if any: a `capability.json`
-/// wins, otherwise the first recognized single-file document.
+/// Load the capability rooted directly at `dir`, if any: a `capability.yaml`
+/// (or `.yml` / legacy `.json`) wins, otherwise the first recognized single-file
+/// document.
 fn load_capability_dir(dir: &Path) -> Result<Option<LoadedCapability>, String> {
-    let json = dir.join("capability.json");
-    if json.is_file() {
-        return Ok(Some(LoadedCapability::load(&json)?));
+    if let Some(manifest) = crate::config::find(&dir.join(MANIFEST_STEM)) {
+        return Ok(Some(LoadedCapability::load(&manifest)?));
     }
     for (name, kind) in DOC_FILES {
         let doc = dir.join(name);

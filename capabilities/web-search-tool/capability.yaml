@@ -1,0 +1,17 @@
+id: web-search
+name: Web Search
+description: Web search via an MCP server.
+kind: tool
+tool:
+  provider: mcp
+  delivery: auto
+  server:
+    transport: stdio
+    command: npx
+    args:
+      - "-y"
+      - "@example/web-search-mcp"
+    env:
+      SEARCH_API_KEY: ${SEARCH_API_KEY}
+  tools:
+    - search

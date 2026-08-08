@@ -1,0 +1,16 @@
+id: strict-ci
+name: Strict CI policy
+description: "An org overlay: require confirmation for any git command and hard-deny force-push and publish. Composes with a base shell policy."
+kind: permission
+permission:
+  default: ask
+  rules:
+    - tool: bash
+      pattern: git *
+      verdict: ask
+    - tool: bash
+      pattern: git push --force *
+      verdict: deny
+    - tool: bash
+      pattern: cargo publish *
+      verdict: deny

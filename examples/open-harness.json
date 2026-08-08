@@ -1,7 +1,0 @@
-{
-  "name": "example",
-  "harnesses": ["claude-code", "cursor"],
-  "sources": [
-    { "local": { "path": "../capabilities" } }
-  ]
-}
