@@ -68,6 +68,7 @@ oh emit   --harness cursor                                # native registration 
 
 # Compose & install
 oh resolve --profile open-harness.yaml                    # sources → a pinned open-harness.lock
+oh resolve --profile open-harness.yaml --locked           # verify the lock instead of rewriting it (CI)
 oh sync    --profile open-harness.yaml --into ./project   # install + converge (idempotent)
 oh check   --profile open-harness.yaml --into ./project --ci   # drift detection (fails CI on drift)
 oh sync    --into ./project --uninstall                   # clean removal (managed files only)
@@ -89,7 +90,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 169 tests, green on Linux/macOS/Windows
+cargo test                            # 223 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -199,10 +200,10 @@ When several capabilities target the **same file** — two permission policies o
 
 A **profile** names a set of **sources** and target harnesses; resolving it
 composes capabilities and writes a reproducible `open-harness.lock` pinning every
-capability (id + version + content fingerprint) and every git source's exact SHA.
-Sources are a **local path**, a **git repo** (personal-repo sync — cloned, then
-pinned to a commit), or a **registry** — a JSON index that maps names to their
-real local/git source, one point of indirection over many repos.
+capability (qualified name + version + a sha256 over its file tree) and every git
+source's exact SHA. Sources are a **local path**, a **git repo** (personal-repo
+sync — cloned, then pinned to a commit), or a **registry** — an index that maps
+names to their real local/git source, one point of indirection over many repos.
 
 ```yaml
 # open-harness.yaml
@@ -221,11 +222,41 @@ sources:
       version: 1.2.0
 ```
 
-Capabilities may declare **`dependencies`** on other ids; the resolver reports
-unmet dependencies and cycles (loudly, non-fatally), orders the composed set so a
-dependency precedes its dependents (a stable topological sort), and pins the
-resolved graph in the lock. `sync --profile` resolves, then converges — sourcing
-feeding the sync layer.
+Because sources are other people's repositories, a capability's identity is a
+**qualified name** — `<namespace>/<id>`, the namespace coming from the source
+(`<owner>/<repo>` for git, the entry name for a registry, nothing for a local
+path). Two authors' `mem-search` are different capabilities and both compose; the
+bare `id` remains the local alias and the emitted filename, so the path clash
+that implies is reported before anything is written.
+
+Capabilities declare **`dependencies`** with version requirements and a relation
+— `requires` / `suggests` / `conflicts` / `replaces` — over a documented semver
+subset (`^ ~ >= > < <= =`, `*`, combining with `,`):
+
+```yaml
+dependencies:
+  acme/shared-patterns: "^1.2"
+  acme/legacy: { version: ">=2, <4", relation: suggests }
+```
+
+Sources stay a **preference order**: the earliest providing a name wins, and a
+requirement can *veto* that choice but never reorders sources for its own sake.
+When nothing satisfies every dependent, the report names who asked for what.
+There is no backtracking, and the docs say so rather than implying a search that
+did not happen. Cycles, unmet edges, live `conflicts`, and dependencies that are
+**Unsupported on some target harness** (present ≠ usable there) are all reported
+loudly and non-fatally; the set is ordered so a dependency precedes its
+dependents.
+
+Following a dependency's *own* source — cloning a repo you never named, whose
+code then runs with your agent's privileges — is **opt-in** (`resolution:
+transitive`) and gated on a signature by default (`transitive_trust: trusted |
+tofu | any`). Every refusal and every acquisition is reported.
+
+`oh resolve --locked` / `oh sync --locked` turn the lockfile into a contract:
+it must exist, the resolution must match, nothing is written, and a mismatch
+prints exactly what drifted. See [`docs/src/dependencies.md`](./docs/src/dependencies.md)
+for the full model.
 
 ## Trust & signing
 
@@ -297,16 +328,17 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `src/runtime.rs` | Hardened execution: per-capability timeout, output cap, error taxonomy, cross-platform interpreters |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
-| `src/profile.rs` | Profiles + sources (local / git / registry) + transitive deps → `open-harness.lock` |
+| `src/profile.rs` | Profiles + sources (local / git / registry), qualified names, selection, opt-in transitive acquisition → `open-harness.lock` |
+| `src/deps.rs` | The dependency vocabulary: a documented semver subset, requirements, relations |
 | `src/trust.rs` | ed25519 signing/verification, trust store, root-of-trust keyrings, revocation, permissions |
 | `src/mcp.rs` | Minimal MCP client (stdio + streamable-HTTP, optional TLS) — the bridge runtime |
 | `src/scaffold.rs` + `src/capture.rs` + `src/matrix.rs` | `oh scaffold` / `oh capture` / the generated support matrix |
 | `src/api.rs` + `src/main.rs` | Stable embeddable API; the `oh` CLI |
 | `bindings/` | Python (uniffi) + Node/TS (napi) bindings |
 | `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
-| `docs/` | mdBook site (concepts, authoring guide, generated matrix) |
+| `docs/` | mdBook site (concepts, authoring guide, dependencies, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 169 tests: conformance (70) + new kinds (24) + single-file (19) + trust (15) + config/YAML (14) + sourcing (13) + MCP bridge (7) + authoring (5) + capture (2) |
+| `tests/` | 223 tests: conformance (70) + sourcing & dependencies (36) + new kinds (24) + deps vocabulary (21) + config/YAML (19) + single-file (19) + trust (15) + MCP bridge (7) + authoring (5) + `--locked` (5) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies

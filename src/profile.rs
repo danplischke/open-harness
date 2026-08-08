@@ -4,16 +4,28 @@
 //! A **profile** is a named set of **sources** targeting a set of harnesses. A
 //! source resolves to capabilities from a **local path**, a **git repo**
 //! (personal-repo sync — cloned/fetched and pinned to a commit), or a
-//! **registry** (#21) — a JSON index mapping names to their real local/git
-//! source, one point of indirection over many repos. Resolving a profile
-//! composes the sources in order and writes an `open-harness.lock` pinning every
-//! resolved capability (id + version + content fingerprint) and every git
-//! source's exact commit — so a re-resolve is reproducible.
+//! **registry** (#21) — an index mapping names to their real local/git source,
+//! one point of indirection over many repos. Resolving a profile composes the
+//! sources in order and writes an `open-harness.lock` pinning every resolved
+//! capability (qualified name + version + a sha256 over its file tree) and every
+//! git source's exact commit — so a re-resolve is reproducible.
 //!
-//! Composition also resolves the **dependency graph** (#23): capabilities may
-//! declare `dependencies` on other ids; the resolver reports unmet dependencies
-//! and cycles (loudly, non-fatally), orders the set so a dependency precedes its
-//! dependents, and pins each capability's resolved dependencies in the lock.
+//! Because those sources are other people's repositories, identity is a
+//! **qualified name** (`<namespace>/<id>`, the namespace derived from the
+//! source), not a bare id that two authors could both claim.
+//!
+//! Composition then resolves the **dependency graph** (#23) — see
+//! [`crate::deps`] for the requirement vocabulary. Capabilities declare
+//! versioned `requires` / `suggests` / `conflicts` / `replaces` edges; sources
+//! stay a preference order that a requirement may veto but never reorder; unmet
+//! edges, version conflicts (naming who asked for what), cycles, live conflicts,
+//! and dependencies Unsupported on a target harness are all reported loudly and
+//! non-fatally; and the resolved graph is pinned in the lock.
+//!
+//! Following a dependency's *own* declared source is **opt-in**
+//! ([`Resolution::Transitive`]) and gated on a signature by default
+//! ([`TransitiveTrust`]) — acquiring a capability the user never named means
+//! running code they never chose, with the agent's privileges.
 //!
 //! This is the sourcing layer beneath `oh sync` (#16): `sync --profile` resolves
 //! here, then hands the composed capabilities + target harnesses to `sync::apply`.
@@ -112,7 +124,7 @@ pub enum Source {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LocalSource {
-    /// Directory of `*/capability.json`, relative to the profile's workdir.
+    /// Directory of capabilities, relative to the profile's workdir.
     pub path: String,
 }
 
@@ -138,16 +150,25 @@ pub struct RegistrySource {
     /// Optional exact version to select (else the first matching entry).
     #[serde(default)]
     pub version: Option<String>,
-    /// Path to the registry index (JSON), relative to the profile workdir. The
+    /// Path to the registry index (YAML, or legacy JSON), relative to the
+    /// profile workdir. The
     /// index maps names → real sources (local/git), giving one point of
     /// indirection over many repos. Without it the source is a loud no-op.
     #[serde(default)]
     pub index: Option<String>,
 }
 
-/// A registry index: a JSON file mapping capability names to their real source.
-/// `{ "capabilities": [ { "name": "pack", "version": "1.0.0",
-///    "source": { "git": { "url": "…", "subdir": "…" } } } ] }`.
+/// A registry index mapping capability names to their real source:
+///
+/// ```yaml
+/// capabilities:
+///   - name: pack
+///     version: 1.0.0
+///     source:
+///       git:
+///         url: https://github.com/acme/capabilities
+///         subdir: caps
+/// ```
 #[derive(Debug, Clone, Deserialize)]
 struct RegistryIndex {
     #[serde(default)]

@@ -119,7 +119,8 @@ pub fn kinds() -> Vec<String> {
     .collect()
 }
 
-/// Plan a capability (given as its `capability.json` text) for one harness.
+/// Plan a capability (given as its manifest text — JSON, the FFI boundary's
+/// wire format) for one harness.
 /// `dir` is the directory used to resolve relative `body_file` paths.
 pub fn plan(manifest_json: &str, dir: &str, harness: &str) -> Result<Plan, ApiError> {
     let cap = load(manifest_json, dir)?;

@@ -14,7 +14,7 @@
 //! verbatim on **every** harness — this carries the Agent Skills spec fields
 //! (`license`, `metadata`, `compatibility`), the forward-compat spec keys
 //! (`triggers`, `prerequisite-skills`, `related-skills`), and anything else
-//! portable. (In a `capability.json` these extra keys sit directly in the `skill`
+//! portable. (In a `capability.yaml` these extra keys sit directly in the `skill`
 //! block; in a single-file `SKILL.md` they are just frontmatter.) Harness-*specific*
 //! frontmatter (e.g. Claude-only `argument-hint` / `user-invocable`) belongs in
 //! the per-harness `overrides` block, so it lands on Claude and is stripped
@@ -55,7 +55,7 @@ struct SkillConfig {
     allowed_tools: crate::tools::ToolList,
     /// Portable frontmatter passthrough: every key that isn't a known skill field
     /// is emitted verbatim on every harness (spec + forward-compat fields). This
-    /// flattening means single-file frontmatter and a `capability.json` `skill`
+    /// flattening means single-file frontmatter and a `capability.yaml` `skill`
     /// block share one shape.
     #[serde(flatten)]
     frontmatter: Map<String, Value>,

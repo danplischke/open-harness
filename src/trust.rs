@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-/// The detached signature file written next to `capability.json`.
+/// The detached signature file written next to the capability manifest.
 pub const SIG_NAME: &str = "capability.sig";
 
 // ---- content digest -------------------------------------------------------
