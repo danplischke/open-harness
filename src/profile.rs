@@ -1291,3 +1291,49 @@ fn git(args: &[&str]) -> Result<String, String> {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Namespace derivation is what every git-sourced capability's identity
+    /// rests on, and the integration tests only ever reach it through local
+    /// paths — so the URL spellings people actually write are pinned here.
+    #[test]
+    fn namespace_from_the_url_spellings_people_write() {
+        let ns = |u: &str| namespace_from_git_url(u).unwrap();
+
+        assert_eq!(
+            ns("https://github.com/thedotmack/claude-mem"),
+            "thedotmack/claude-mem"
+        );
+        assert_eq!(
+            ns("https://github.com/thedotmack/claude-mem.git"),
+            "thedotmack/claude-mem"
+        );
+        assert_eq!(
+            ns("https://github.com/thedotmack/claude-mem/"),
+            "thedotmack/claude-mem"
+        );
+        // scp-style remotes put the path after a colon, not a slash.
+        assert_eq!(
+            ns("git@github.com:thedotmack/claude-mem.git"),
+            "thedotmack/claude-mem"
+        );
+        assert_eq!(ns("ssh://git@github.com/acme/caps"), "acme/caps");
+        // A nested group keeps the last two segments — the repo and its parent.
+        assert_eq!(ns("https://gitlab.com/group/sub/repo"), "sub/repo");
+        // A bare local path still yields something usable.
+        assert_eq!(ns("/srv/repos/caps"), "repos/caps");
+        assert_eq!(ns("caps"), "caps");
+    }
+
+    /// Two authors' repos must not collapse to the same namespace.
+    #[test]
+    fn different_owners_get_different_namespaces() {
+        assert_ne!(
+            namespace_from_git_url("https://github.com/alice/caps"),
+            namespace_from_git_url("https://github.com/bob/caps"),
+        );
+    }
+}

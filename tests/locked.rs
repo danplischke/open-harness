@@ -160,3 +160,111 @@ fn locked_reports_a_capability_that_vanished() {
     );
     let _ = std::fs::remove_dir_all(&wd);
 }
+
+// ---- the flag applies to sync and check too --------------------------------
+
+/// Run `oh <command> --profile <wd>/open-harness.yaml --into <wd>/project`.
+/// Both paths are absolute: `--into` is resolved against the *process* cwd, not
+/// the profile's directory, so a relative one would land wherever the test
+/// runner happens to be.
+fn run(wd: &Path, command: &str, extra: &[&str]) -> std::process::Output {
+    oh().arg(command)
+        .arg("--profile")
+        .arg(wd.join("open-harness.yaml"))
+        .arg("--into")
+        .arg(wd.join("project"))
+        .args(extra)
+        .output()
+        .expect("run oh")
+}
+
+#[test]
+fn sync_locked_refuses_a_stale_lock_and_installs_nothing() {
+    // `resolve` is not the only entry point; a stale lock must stop the command
+    // that actually writes into the project.
+    let wd = project("sync-stale", "hello");
+    assert!(resolve(&wd, false).status.success(), "seed the lockfile");
+    write(
+        &wd.join("caps/greet/SKILL.md"),
+        "---\ndescription: greeting\n---\n\nCHANGED\n",
+    );
+
+    let out = run(&wd, "sync", &["--locked"]);
+    assert!(
+        !out.status.success(),
+        "sync --locked must fail on a stale lock"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("lockfile is stale"));
+    assert!(
+        !wd.join("project").exists(),
+        "and must not install anything"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn check_locked_refuses_a_stale_lock() {
+    let wd = project("check-stale", "hello");
+    assert!(resolve(&wd, false).status.success(), "seed the lockfile");
+    write(
+        &wd.join("caps/greet/SKILL.md"),
+        "---\ndescription: greeting\n---\n\nCHANGED\n",
+    );
+
+    let out = run(&wd, "check", &["--locked"]);
+    assert!(
+        !out.status.success(),
+        "check --locked must fail on a stale lock"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("lockfile is stale"));
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn sync_locked_succeeds_and_installs_when_the_lock_matches() {
+    let wd = project("sync-ok", "hello");
+    assert!(resolve(&wd, false).status.success(), "seed the lockfile");
+    let before = std::fs::read_to_string(wd.join("open-harness.lock")).unwrap();
+
+    let out = run(&wd, "sync", &["--locked"]);
+    assert!(
+        out.status.success(),
+        "an up-to-date lock installs normally: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(wd.join("project/.claude/skills/greet/SKILL.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(wd.join("open-harness.lock")).unwrap(),
+        before,
+        "and the lockfile is still not rewritten"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn locked_reports_a_version_that_moved() {
+    // The `~ name old → new` branch of the drift report.
+    let wd = tmp("version-moved");
+    write(
+        &wd.join("caps/greet/capability.yaml"),
+        "id: greet\nversion: 1.0.0\nkind: skill\nskill:\n  body: hi\n",
+    );
+    write(
+        &wd.join("open-harness.yaml"),
+        "name: p\nharnesses: [claude-code]\nsources:\n  - local:\n      path: caps\n",
+    );
+    assert!(resolve(&wd, false).status.success(), "seed the lockfile");
+
+    write(
+        &wd.join("caps/greet/capability.yaml"),
+        "id: greet\nversion: 2.0.0\nkind: skill\nskill:\n  body: hi\n",
+    );
+    let out = resolve(&wd, true);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("~ greet 1.0.0 → 2.0.0"),
+        "names both versions: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}

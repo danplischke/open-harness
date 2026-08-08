@@ -106,18 +106,6 @@ pub fn load<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
     from_str(&text, Format::of(path)).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Like [`load`], but probing `<stem>.{yaml,yml,json}`. Returns the loaded value
-/// and the path it came from, or `None` when no candidate exists.
-pub fn load_stem<T: DeserializeOwned>(stem: &Path) -> Result<Option<(T, PathBuf)>, String> {
-    match find(stem) {
-        Some(path) => {
-            let value = load(&path)?;
-            Ok(Some((value, path)))
-        }
-        None => Ok(None),
-    }
-}
-
 /// Render a value as a YAML config document (newline-terminated).
 pub fn to_yaml<T: Serialize>(value: &T) -> Result<String, String> {
     let v = serde_json::to_value(value).map_err(|e| e.to_string())?;

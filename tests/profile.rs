@@ -1334,6 +1334,152 @@ mod transitive {
         let _ = std::fs::remove_dir_all(&lib);
     }
 
+    /// A dependency of a dependency is acquired too — the loop runs to a
+    /// fixpoint, not one level deep.
+    #[test]
+    fn acquisition_follows_a_chain_of_dependencies() {
+        // c is named only by b, which is named only by a.
+        let c_dir = tmp("chain-c");
+        write(
+            &c_dir.join("c/capability.yaml"),
+            &cap_yaml("c", "1.0.0", "skill", json!({ "skill": { "body": "c" } })),
+        );
+        let b_dir = tmp("chain-b");
+        write(
+            &b_dir.join("b/capability.yaml"),
+            &cap_yaml(
+                "b",
+                "1.0.0",
+                "skill",
+                json!({
+                    "dependencies": { "c": { "version": "*", "source": {
+                        "local": { "path": c_dir.to_string_lossy() } } } },
+                    "skill": { "body": "b" },
+                }),
+            ),
+        );
+        let wd = tmp("chain");
+        write(
+            &wd.join("caps/a/capability.yaml"),
+            &cap_yaml(
+                "a",
+                "1.0.0",
+                "skill",
+                json!({
+                    "dependencies": { "b": { "version": "*", "source": {
+                        "local": { "path": b_dir.to_string_lossy() } } } },
+                    "skill": { "body": "a" },
+                }),
+            ),
+        );
+        let profile = profile_from(json!({
+            "name": "chain", "harnesses": ["claude-code"],
+            "sources": [{ "local": { "path": "caps" } }],
+            "resolution": "transitive", "transitive_trust": "any",
+        }));
+
+        let r = profile::resolve(&profile, &wd, None).unwrap();
+        let mut ids: Vec<&str> = r
+            .capabilities
+            .iter()
+            .map(|c| c.manifest.id.as_str())
+            .collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["a", "b", "c"],
+            "the chain is followed to its end: {:?}",
+            r.warnings
+        );
+        for d in [&wd, &b_dir, &c_dir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// Acquisition works over git, not just local paths — which is the case
+    /// that actually clones someone else's repository.
+    #[cfg(unix)]
+    #[test]
+    fn a_dependency_can_be_acquired_from_a_git_source() {
+        let (repo, _) = git_backed::init_repo_with(
+            "caps/lib/capability.yaml",
+            &cap_yaml("lib", "1.0.0", "skill", json!({ "skill": { "body": "l" } })),
+        );
+        let wd = tmp("git-acquire");
+        write(
+            &wd.join("caps/app/capability.yaml"),
+            &cap_yaml(
+                "app",
+                "1.0.0",
+                "skill",
+                json!({
+                    "dependencies": { "lib": { "version": "*", "source": {
+                        "git": { "url": repo.to_string_lossy(), "rev": "HEAD",
+                                 "subdir": "caps" } } } },
+                    "skill": { "body": "a" },
+                }),
+            ),
+        );
+        let profile = profile_from(json!({
+            "name": "g", "harnesses": ["claude-code"],
+            "sources": [{ "local": { "path": "caps" } }],
+            "resolution": "transitive", "transitive_trust": "any",
+        }));
+
+        let r = profile::resolve(&profile, &wd, None).unwrap();
+        assert!(
+            r.capabilities.iter().any(|c| c.manifest.id == "lib"),
+            "the git dependency is cloned and composed: {:?}",
+            r.warnings
+        );
+        let git_src = r
+            .lock
+            .sources
+            .iter()
+            .find(|s| s.kind == "git")
+            .expect("the acquired source is recorded in the lock");
+        assert!(
+            git_src.rev.is_some(),
+            "pinned to a commit like any other git source"
+        );
+        let _ = std::fs::remove_dir_all(&wd);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// A revoked key never verifies again — not even under `tofu`, which is
+    /// otherwise the permissive-signer policy.
+    #[test]
+    fn a_revoked_signer_is_refused_under_every_policy() {
+        let key = trust::generate_keyfile("compromised").unwrap();
+        let lib = lib_source("revoked-lib", Some(&key));
+        let wd = tmp("revoked");
+
+        let mut store = trust::TrustStore::default();
+        store.add(&key.public_key, "compromised");
+        store.revoke(&key.public_key, "leaked");
+        store.write(&wd.join("trust.yaml")).unwrap();
+
+        for policy in ["trusted", "tofu"] {
+            let profile = profile_with(
+                &wd,
+                &lib,
+                json!({
+                    "resolution": "transitive",
+                    "transitive_trust": policy,
+                    "trust": "trust.yaml",
+                }),
+            );
+            let r = profile::resolve(&profile, &wd, None).unwrap();
+            assert!(
+                !r.capabilities.iter().any(|c| c.manifest.id == "lib"),
+                "a revoked signer must be refused under {policy}: {:?}",
+                r.warnings
+            );
+        }
+        let _ = std::fs::remove_dir_all(&wd);
+        let _ = std::fs::remove_dir_all(&lib);
+    }
+
     /// An acquired source never outranks one the profile named.
     #[test]
     fn declared_sources_keep_preference_over_acquired_ones() {
