@@ -122,10 +122,54 @@ pub enum Source {
     Registry(RegistrySource),
 }
 
+/// Which of a source's capabilities to take.
+///
+/// A source is usually somebody else's repository, and you rarely want all of
+/// it — a plugin may ship nineteen skills when you want two. Without this the
+/// only lever is `subdir`, which is an accident of how they laid the repo out
+/// rather than a choice about what you need.
+///
+/// Filtering happens **before** the capabilities are locked, so the lockfile
+/// records only what you selected: adding one later is a visible lock change
+/// that `--locked` catches, not a silent widening.
+///
+/// `deny_unknown_fields` so `includes:` is a loud error rather than a filter
+/// that silently selects everything.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Select {
+    /// Patterns to keep. Empty means everything — the default, so an existing
+    /// profile behaves exactly as before. Matched against the capability's
+    /// qualified name *and* its bare id, with `*` and `?` wildcards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    /// Patterns to drop. Applied after `include`, so exclude always wins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+    /// Capability kinds to keep (`skill`, `hook`, …). Empty means all kinds.
+    /// Useful for taking a plugin's skills without its harness-specific hooks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<String>,
+    /// Pull back in any capability from this source that a selected one
+    /// `requires`, even when the patterns excluded it. Off by default:
+    /// silently widening a selection you deliberately narrowed is the wrong
+    /// default, so an unmet dependency is reported instead.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub with_dependencies: bool,
+}
+
+impl Select {
+    pub fn is_empty(&self) -> bool {
+        self.include.is_empty() && self.exclude.is_empty() && self.kinds.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LocalSource {
     /// Directory of capabilities, relative to the profile's workdir.
     pub path: String,
+    #[serde(default, skip_serializing_if = "Select::is_empty")]
+    pub select: Select,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -137,6 +181,8 @@ pub struct GitSource {
     /// Subdirectory within the repo to scan. Defaults to the repo root.
     #[serde(default)]
     pub subdir: Option<String>,
+    #[serde(default, skip_serializing_if = "Select::is_empty")]
+    pub select: Select,
 }
 
 fn default_rev() -> String {
@@ -156,6 +202,8 @@ pub struct RegistrySource {
     /// loud no-op.
     #[serde(default)]
     pub index: Option<String>,
+    #[serde(default, skip_serializing_if = "Select::is_empty")]
+    pub select: Select,
 }
 
 /// A registry index mapping capability names to their real source:
@@ -561,6 +609,9 @@ fn ingest_source(
     for cap in &mut caps {
         cap.adopt_namespace(namespace.as_deref());
     }
+    // Namespace first, then select — so `include` patterns can name either the
+    // qualified name or the bare id, and so the lock records only what survived.
+    let caps = apply_select(source_select(source), caps, &origin, warnings)?;
 
     let mut locked_caps = Vec::new();
     let mut accepted = 0usize;
@@ -835,6 +886,185 @@ fn warn_on_bare_id_collisions(caps: &[LoadedCapability], warnings: &mut Vec<Stri
             names.len(),
             names.join(", ")
         ));
+    }
+}
+
+// ---- selection ------------------------------------------------------------
+
+/// The `select` block a source carries.
+fn source_select(source: &Source) -> &Select {
+    match source {
+        Source::Local(l) => &l.select,
+        Source::Git(g) => &g.select,
+        Source::Registry(r) => &r.select,
+    }
+}
+
+/// Match `text` against a wildcard `pattern`: `*` stands for any run of
+/// characters (including none), `?` for exactly one. Everything else is
+/// literal.
+///
+/// Hand-rolled on purpose — this is the "simple, fully-specified" category the
+/// crate hand-rolls elsewhere, and a full glob crate would bring path
+/// semantics (`**`, separator handling, character classes) that would need
+/// explaining rather than helping. `*` deliberately spans `/`, so `acme/*`
+/// selects a whole namespace and `*` selects everything.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    // The last `*` seen, and how much of `text` it had consumed — so a failed
+    // match can backtrack and let it swallow one more character.
+    let (mut star, mut consumed) = (None, 0usize);
+
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            consumed = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            consumed += 1;
+            ti = consumed;
+            pi = s + 1;
+        } else {
+            return false;
+        }
+    }
+    // Trailing `*`s can match the empty remainder.
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// Does any pattern match this capability, by qualified name or bare id?
+fn any_match(patterns: &[String], cap: &LoadedCapability) -> bool {
+    let qualified = cap.qualified_name();
+    patterns
+        .iter()
+        .any(|p| glob_match(p, &qualified) || glob_match(p, &cap.manifest.id))
+}
+
+/// Apply a source's `select` block to the capabilities it provided.
+///
+/// An `include` pattern that matches nothing **in the source at all** is a hard
+/// error listing what is available: a typo silently yielding zero capabilities
+/// is precisely the failure this feature would otherwise introduce. A pattern
+/// that matches something `kinds` or `exclude` then removes is not an error —
+/// that combination is deliberate.
+fn apply_select(
+    select: &Select,
+    caps: Vec<LoadedCapability>,
+    origin: &str,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<LoadedCapability>, String> {
+    if select.is_empty() {
+        return Ok(caps);
+    }
+
+    for pattern in &select.include {
+        if !caps
+            .iter()
+            .any(|c| any_match(std::slice::from_ref(pattern), c))
+        {
+            let mut available: Vec<String> = caps.iter().map(|c| c.qualified_name()).collect();
+            available.sort();
+            return Err(format!(
+                "select.include pattern '{pattern}' matches nothing in {origin}. Available: {}",
+                if available.is_empty() {
+                    "(the source provided no capabilities)".to_string()
+                } else {
+                    available.join(", ")
+                }
+            ));
+        }
+    }
+
+    let keep = |c: &LoadedCapability| -> bool {
+        if !select.kinds.is_empty() && !select.kinds.iter().any(|k| k == c.manifest.kind.as_str()) {
+            return false;
+        }
+        if !select.include.is_empty() && !any_match(&select.include, c) {
+            return false;
+        }
+        // Exclude is applied last, so it always wins.
+        !any_match(&select.exclude, c)
+    };
+
+    let (mut kept, dropped): (Vec<_>, Vec<_>) = caps.into_iter().partition(|c| keep(c));
+    let mut dropped = dropped;
+
+    if select.with_dependencies {
+        pull_in_dependencies(&mut kept, &mut dropped, warnings, origin);
+    }
+
+    if !dropped.is_empty() {
+        let mut names: Vec<String> = dropped.iter().map(|c| c.qualified_name()).collect();
+        names.sort();
+        warnings.push(format!(
+            "select dropped {} capability(ies) from {origin}: {}",
+            names.len(),
+            summarize(&names)
+        ));
+    }
+    Ok(kept)
+}
+
+/// Join names for a report, capping the list so selecting 2 of 19 does not
+/// produce a warning longer than the output it explains.
+fn summarize(names: &[String]) -> String {
+    const SHOWN: usize = 6;
+    if names.len() <= SHOWN {
+        return names.join(", ");
+    }
+    format!(
+        "{}, … and {} more",
+        names[..SHOWN].join(", "),
+        names.len() - SHOWN
+    )
+}
+
+/// Re-admit dropped capabilities that a kept one `requires`, to a fixpoint —
+/// a pulled-in dependency may itself require another.
+fn pull_in_dependencies(
+    kept: &mut Vec<LoadedCapability>,
+    dropped: &mut Vec<LoadedCapability>,
+    warnings: &mut Vec<String>,
+    origin: &str,
+) {
+    loop {
+        // A dependency name matches a dropped capability by qualified name or
+        // bare id — the same two spellings `select` matches on.
+        let wanted: Vec<usize> = dropped
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| {
+                let (qualified, id) = (d.qualified_name(), d.manifest.id.as_str());
+                kept.iter().any(|k| {
+                    k.manifest
+                        .dependencies
+                        .with_relation(Relation::Requires)
+                        .any(|dep| dep.name == qualified || dep.name == id)
+                })
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        // Remove high-to-low so the earlier indices stay valid.
+        for i in wanted.into_iter().rev() {
+            let cap = dropped.remove(i);
+            warnings.push(format!(
+                "select re-admitted '{}' from {origin} — required by a selected capability \
+                 (with_dependencies)",
+                cap.qualified_name()
+            ));
+            kept.push(cap);
+        }
     }
 }
 

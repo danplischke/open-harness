@@ -146,6 +146,85 @@ the conflict report says what was asked and by whom rather than implying a
 search that never happened. If it ever stops being worth it, a real solver drops
 in behind the same interface.
 
+## Selecting part of a source
+
+A source is usually somebody else's repository, and you rarely want all of it.
+Without a filter the only lever is `subdir`, which is an accident of how they
+laid the repo out rather than a choice about what you need — a plugin shipping
+nineteen skills is all nineteen or none.
+
+Every source kind takes a `select` block:
+
+```yaml
+sources:
+  - git:
+      url: https://github.com/thedotmack/claude-mem
+      subdir: plugin/skills
+      select:
+        include: [mem-search, timeline-report]
+```
+
+```
+warning: select dropped 17 capability(ies) from …/claude-mem:
+  …/babysit, …/cloud-sync, …/design-is, …/do, …/how-it-works,
+  …/knowledge-agent, … and 11 more
+profile 'just-two-skills' → 2 capabilities across 2 harness(es)
+```
+
+| field | meaning |
+|---|---|
+| `include` | patterns to keep; **empty means everything**, so an existing profile is unaffected |
+| `exclude` | patterns to drop, applied after `include` — exclude always wins |
+| `kinds` | capability kinds to keep (`skill`, `hook`, …); empty means all |
+| `with_dependencies` | re-admit capabilities a selected one `requires` (default `false`) |
+
+Patterns match the **qualified name** *and* the **bare id**, with `*` (any run,
+including none) and `?` (exactly one character). `*` spans `/`, so `acme/*`
+selects a whole namespace.
+
+`kinds` is the one worth knowing about: a plugin's skills are portable while its
+hooks are usually harness-specific shell, so `kinds: [skill]` takes the useful
+half without enumerating every skill by name.
+
+### A pattern that matches nothing is an error
+
+```
+select.include pattern 'mem-serach' matches nothing in …/claude-mem.
+Available: …/babysit, …/cloud-sync, …/design-is, …
+```
+
+A typo silently yielding zero capabilities is exactly the failure this feature
+would otherwise introduce, so it fails the resolve and lists what is actually
+there. A pattern that matches something `kinds` or `exclude` then removes is
+*not* an error — that combination is deliberate.
+
+### Selection and dependencies
+
+If you select a capability and exclude something it `requires`, the default is
+to **report it, not repair it**:
+
+```
+capability 'app' requires 'shared', which no source provides
+```
+
+Narrowing a source is your decision, and silently widening it back would undo
+the choice you just made. When you do want the closure, ask for it:
+
+```yaml
+select:
+  include: [app]
+  with_dependencies: true
+```
+
+which pulls required siblings back in — transitively, to a fixpoint — and says
+so for each one.
+
+### Selection and the lockfile
+
+Filtering happens **before** the capabilities are locked, so the lock records
+only what you selected. Widening the selection later is therefore a visible lock
+change that `--locked` catches, rather than a silent one.
+
 ## Transitive acquisition
 
 By default (`resolution: flat`) only the sources your profile names are used. A

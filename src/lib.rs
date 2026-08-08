@@ -41,7 +41,7 @@ pub use model::{
     merge, negotiate, parse_decision, validate_decision, Decision, NativeResponse, Verdict,
     PROTOCOL, PROTOCOL_VERSION,
 };
-pub use profile::{resolve, Lock, Profile, Resolved, Source};
+pub use profile::{resolve, Lock, Profile, Resolved, Select, Source};
 pub use runtime::{find_executable, install_hint, missing_requirements, RunError, RunLimits};
 pub use sync::{
     apply, check, plan_sync, ApplyReport, ChangeAction, DesiredFile, DriftKind, DriftReport,
