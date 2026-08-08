@@ -93,7 +93,12 @@ impl EventBinding {
 /// A capability's declared permission manifest (#17) — what it expects to read,
 /// execute, and reach over the network. Surfaced for consent on install and
 /// checked against a [`PermissionPolicy`] (advisory).
+///
+/// `deny_unknown_fields` so a wrong-shaped value (e.g. an agent's tool→verdict
+/// map `{bash: ask}` mistakenly placed at the manifest's top-level `permissions`)
+/// is a loud error, not silently absorbed into an all-empty manifest.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Permissions {
     /// Path globs the capability expects to read.
     #[serde(default)]
@@ -272,12 +277,16 @@ impl LoadedCapability {
             "kind".into(),
             serde_json::Value::String(kind_str.to_string()),
         );
+        // NB: `permissions` is deliberately NOT lifted. At the manifest level it
+        // is the sandbox manifest (read/exec/network), but single-file authoring
+        // is only for document kinds — none of which execute or need a sandbox —
+        // and an agent's `permissions:` (tool→verdict) must reach its config, not
+        // be captured as the sandbox and silently loosen `ask` to `allow`.
         for key in [
             "name",
             "description",
             "version",
             "dependencies",
-            "permissions",
             "overrides",
             "protocol",
             "timeout_ms",

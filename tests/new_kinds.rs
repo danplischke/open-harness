@@ -210,6 +210,34 @@ fn agent_copilot_path_and_list() {
 }
 
 #[test]
+fn agent_passes_unknown_frontmatter_through() {
+    // Like the skill kind, an agent carries forward-compat / portable frontmatter
+    // keys it doesn't model, so an AGENT.md doesn't lose keys a SKILL.md keeps.
+    let m = json!({
+        "id": "a", "name": "A", "description": "d", "kind": "agent",
+        "agent": { "prerequisite-skills": ["x"], "custom-key": "v", "body": "b" }
+    });
+    let plan = kind_impl(KindId::Agent).plan(&cap(m), Harness::Claude);
+    let Some(Artifact::File { contents, .. }) = plan.artifacts.first() else {
+        panic!("expected a file");
+    };
+    assert!(contents.contains("prerequisite-skills: [x]"), "{contents}");
+    assert!(contents.contains("custom-key: v"), "{contents}");
+}
+
+#[test]
+fn sandbox_permissions_reject_a_wrong_shaped_value() {
+    // A tool→verdict map at the manifest's top-level `permissions` (the sandbox
+    // key) is a loud error, not silently absorbed into an all-empty manifest.
+    let r: Result<open_harness::manifest::Manifest, _> =
+        serde_json::from_str(r#"{"id":"h","kind":"hook","permissions":{"bash":"ask"}}"#);
+    assert!(
+        r.is_err(),
+        "a tool→verdict map at the sandbox `permissions` must be rejected"
+    );
+}
+
+#[test]
 fn agent_unsupported_where_no_file_defined_subagents() {
     let plan = kind_impl(KindId::Agent).plan(&cap(agent_manifest()), Harness::Cursor);
     assert!(matches!(

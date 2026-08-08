@@ -241,6 +241,37 @@ fn space_separated_allowed_tools_round_trips() {
 }
 
 #[test]
+fn single_file_agent_permissions_are_not_shadowed_by_the_sandbox_key() {
+    // `permissions:` in an AGENT.md is the agent's tool→verdict map, NOT the
+    // manifest sandbox (read/exec/network). `ask` must survive, not silently
+    // loosen to `allow`, and `write` must fold into `edit`.
+    let dir = tmp("perm");
+    write(
+        &dir.join("db/AGENT.md"),
+        "---\ndescription: d\ntools: [read]\npermissions: {bash: ask, write: allow}\n---\nbody\n",
+    );
+    let cap = manifest::discover(&dir)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    // The sandbox manifest must stay empty — `permissions` didn't leak into it.
+    assert!(cap.manifest.permissions.is_empty());
+    let plan = kind_impl(KindId::Agent).plan(&cap, Harness::OpenCode);
+    let Some(Artifact::File { contents, .. }) = plan.artifacts.first() else {
+        panic!("expected a file");
+    };
+    assert!(
+        contents.contains("bash: ask"),
+        "ask must not loosen to allow:\n{contents}"
+    );
+    assert!(
+        contents.contains("edit: allow") && !contents.contains("write:"),
+        "write must fold into edit:\n{contents}"
+    );
+}
+
+#[test]
 fn single_file_nested_override_is_applied_not_dropped() {
     // gap 2c must compose with single-file authoring: a nested `overrides:` block
     // in frontmatter has to reach the kind, not be flattened away.

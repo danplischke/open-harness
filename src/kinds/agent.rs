@@ -30,6 +30,7 @@ use crate::kind::{Artifact, Installability, Kind, KindId, KindPlan};
 use crate::manifest::LoadedCapability;
 use crate::{tools, yaml};
 use serde::Deserialize;
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 pub struct AgentKind;
@@ -78,6 +79,12 @@ struct AgentConfig {
     body: String,
     #[serde(default)]
     body_file: Option<String>,
+    /// Portable passthrough: any frontmatter key not modeled above (forward-compat
+    /// spec fields like `prerequisite-skills` / `related-skills`, or other portable
+    /// metadata) is carried through and emitted on every harness — matching the
+    /// skill kind, so a `SKILL.md` and an `AGENT.md` don't lose keys differently.
+    #[serde(flatten)]
+    frontmatter: Map<String, Value>,
 }
 
 struct Rendered {
@@ -117,7 +124,7 @@ impl Kind for AgentKind {
             Harness::Claude => render_claude(id, name, &desc, &cfg, &body),
             Harness::OpenCode => render_opencode(id, &desc, &cfg, &body),
             Harness::Copilot => render_copilot(id, name, &desc, &cfg, &body),
-            Harness::Antigravity => render_antigravity(id, &desc, &body),
+            Harness::Antigravity => render_antigravity(id, &desc, &cfg, &body),
             _ => {
                 return KindPlan::unsupported(format!(
                     "{} has no file-defined subagents",
@@ -171,6 +178,14 @@ fn model_line(cfg: &AgentConfig) -> (Option<(String, String)>, Option<String>) {
 
 /// Claude `.claude/agents/<id>.md` — the reference target: name, description,
 /// model, a `tools` list, and preloaded `skills`.
+/// Emit portable passthrough frontmatter (keys not modeled by [`AgentConfig`],
+/// e.g. forward-compat spec fields) on every harness, after the known fields.
+fn passthrough(pairs: &mut Vec<(String, String)>, cfg: &AgentConfig) {
+    for (k, v) in &cfg.frontmatter {
+        pairs.push((k.clone(), yaml::render_value(v)));
+    }
+}
+
 fn render_claude(id: &str, name: &str, desc: &str, cfg: &AgentConfig, body: &str) -> Rendered {
     let mut pairs: Vec<(String, String)> = vec![
         ("name".to_string(), yaml::scalar(name)),
@@ -187,6 +202,7 @@ fn render_claude(id: &str, name: &str, desc: &str, cfg: &AgentConfig, body: &str
     if !cfg.skills.is_empty() {
         pairs.push(("skills".to_string(), yaml::flow_list(&cfg.skills)));
     }
+    passthrough(&mut pairs, cfg);
     Rendered {
         path: format!(".claude/agents/{id}.md"),
         contents: with_body(&yaml::frontmatter(&pairs), body),
@@ -223,6 +239,7 @@ fn render_opencode(id: &str, desc: &str, cfg: &AgentConfig, body: &str) -> Rende
             format!("{{{}}}", body_map.join(", ")),
         ));
     }
+    passthrough(&mut pairs, cfg);
     Rendered {
         path: format!(".opencode/agents/{id}.md"),
         contents: with_body(&yaml::frontmatter(&pairs), body),
@@ -301,6 +318,7 @@ fn render_copilot(id: &str, name: &str, desc: &str, cfg: &AgentConfig, body: &st
     if !cfg.mcp_servers.is_empty() {
         pairs.push(("mcp-servers".to_string(), yaml::flow_list(&cfg.mcp_servers)));
     }
+    passthrough(&mut pairs, cfg);
     Rendered {
         path: format!(".github/agents/{id}.agent.md"),
         contents: with_body(&yaml::frontmatter(&pairs), body),
@@ -312,8 +330,9 @@ fn render_copilot(id: &str, name: &str, desc: &str, cfg: &AgentConfig, body: &st
 /// Antigravity has no file-defined subagents; the documented workaround is a
 /// workflow shim at `.agents/workflows/subagent-<id>.md`. Emitted **Degraded** so
 /// the substitution is never silent.
-fn render_antigravity(id: &str, desc: &str, body: &str) -> Rendered {
-    let pairs = vec![("description".to_string(), yaml::scalar(desc))];
+fn render_antigravity(id: &str, desc: &str, cfg: &AgentConfig, body: &str) -> Rendered {
+    let mut pairs = vec![("description".to_string(), yaml::scalar(desc))];
+    passthrough(&mut pairs, cfg);
     Rendered {
         path: format!(".agents/workflows/subagent-{id}.md"),
         contents: with_body(&yaml::frontmatter(&pairs), body),
