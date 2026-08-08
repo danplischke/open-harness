@@ -165,9 +165,9 @@ sources:
 ```
 
 ```
-warning: select dropped 17 capability(ies) from …/claude-mem:
-  …/babysit, …/cloud-sync, …/design-is, …/do, …/how-it-works,
-  …/knowledge-agent, … and 11 more
+warning: select kept 2 of 19 from https://github.com/thedotmack/claude-mem
+  (dropped babysit, cloud-sync, design-is, do, how-it-works, knowledge-agent,
+   … and 11 more)
 profile 'just-two-skills' → 2 capabilities across 2 harness(es)
 ```
 
@@ -178,9 +178,12 @@ profile 'just-two-skills' → 2 capabilities across 2 harness(es)
 | `kinds` | capability kinds to keep (`skill`, `hook`, …); empty means all |
 | `with_dependencies` | re-admit capabilities a selected one `requires` (default `false`) |
 
-Patterns match the **qualified name** *and* the **bare id**, with `*` (any run,
-including none) and `?` (exactly one character). `*` spans `/`, so `acme/*`
-selects a whole namespace.
+Patterns are globs (via the `glob` crate, used on strings — nothing here touches
+the filesystem) matched against the **qualified name** *and* the **bare id**:
+`*`, `?`, and character classes like `[a-z]` or `[!abc]`. `*` spans `/`, so
+`acme/*` selects a whole namespace. A malformed pattern — an unclosed `[`, say —
+is an error naming the pattern, not a literal bracket that quietly matches
+nothing.
 
 `kinds` is the one worth knowing about: a plugin's skills are portable while its
 hooks are usually harness-specific shell, so `kinds: [skill]` takes the useful

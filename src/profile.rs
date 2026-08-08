@@ -140,7 +140,9 @@ pub enum Source {
 pub struct Select {
     /// Patterns to keep. Empty means everything — the default, so an existing
     /// profile behaves exactly as before. Matched against the capability's
-    /// qualified name *and* its bare id, with `*` and `?` wildcards.
+    /// qualified name *and* its bare id, as globs: `*` (spanning `/`), `?`, and
+    /// character classes such as `[a-z]` / `[!abc]`. A malformed pattern is an
+    /// error, not a literal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub include: Vec<String>,
     /// Patterns to drop. Applied after `include`, so exclude always wins.
@@ -900,52 +902,31 @@ fn source_select(source: &Source) -> &Select {
     }
 }
 
-/// Match `text` against a wildcard `pattern`: `*` stands for any run of
-/// characters (including none), `?` for exactly one. Everything else is
-/// literal.
+/// Compile a `select` pattern, naming the offender when it is malformed.
 ///
-/// Hand-rolled on purpose — this is the "simple, fully-specified" category the
-/// crate hand-rolls elsewhere, and a full glob crate would bring path
-/// semantics (`**`, separator handling, character classes) that would need
-/// explaining rather than helping. `*` deliberately spans `/`, so `acme/*`
-/// selects a whole namespace and `*` selects everything.
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    let (mut pi, mut ti) = (0usize, 0usize);
-    // The last `*` seen, and how much of `text` it had consumed — so a failed
-    // match can backtrack and let it swallow one more character.
-    let (mut star, mut consumed) = (None, 0usize);
+/// Matching is `glob::Pattern` used purely on strings — nothing here touches
+/// the filesystem. Its default options leave `require_literal_separator` off,
+/// so `*` spans `/`: `acme/*` selects a whole namespace and `*` selects
+/// everything. Character classes (`[abc]`, `[a-z]`, `[!abc]`) come along for
+/// free, and an unclosed one is now a reported error rather than being silently
+/// treated as a literal bracket.
+fn compile_pattern(pattern: &str) -> Result<glob::Pattern, String> {
+    glob::Pattern::new(pattern)
+        .map_err(|e| format!("select pattern '{pattern}' is not a valid glob: {e}"))
+}
 
-    while ti < t.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some(pi);
-            consumed = ti;
-            pi += 1;
-        } else if let Some(s) = star {
-            consumed += 1;
-            ti = consumed;
-            pi = s + 1;
-        } else {
-            return false;
-        }
-    }
-    // Trailing `*`s can match the empty remainder.
-    while pi < p.len() && p[pi] == '*' {
-        pi += 1;
-    }
-    pi == p.len()
+/// Compile a whole list, so one bad pattern fails the resolve rather than
+/// quietly matching nothing.
+fn compile_patterns(patterns: &[String]) -> Result<Vec<glob::Pattern>, String> {
+    patterns.iter().map(|p| compile_pattern(p)).collect()
 }
 
 /// Does any pattern match this capability, by qualified name or bare id?
-fn any_match(patterns: &[String], cap: &LoadedCapability) -> bool {
+fn any_match(patterns: &[glob::Pattern], cap: &LoadedCapability) -> bool {
     let qualified = cap.qualified_name();
     patterns
         .iter()
-        .any(|p| glob_match(p, &qualified) || glob_match(p, &cap.manifest.id))
+        .any(|p| p.matches(&qualified) || p.matches(&cap.manifest.id))
 }
 
 /// Apply a source's `select` block to the capabilities it provided.
@@ -964,20 +945,22 @@ fn apply_select(
     if select.is_empty() {
         return Ok(caps);
     }
+    let include = compile_patterns(&select.include)?;
+    let exclude = compile_patterns(&select.exclude)?;
 
-    for pattern in &select.include {
+    for (pattern, compiled) in select.include.iter().zip(&include) {
         if !caps
             .iter()
-            .any(|c| any_match(std::slice::from_ref(pattern), c))
+            .any(|c| any_match(std::slice::from_ref(compiled), c))
         {
-            let mut available: Vec<String> = caps.iter().map(|c| c.qualified_name()).collect();
+            let mut available: Vec<String> = caps.iter().map(|c| c.manifest.id.clone()).collect();
             available.sort();
             return Err(format!(
                 "select.include pattern '{pattern}' matches nothing in {origin}. Available: {}",
                 if available.is_empty() {
                     "(the source provided no capabilities)".to_string()
                 } else {
-                    available.join(", ")
+                    summarize(&available)
                 }
             ));
         }
@@ -987,11 +970,11 @@ fn apply_select(
         if !select.kinds.is_empty() && !select.kinds.iter().any(|k| k == c.manifest.kind.as_str()) {
             return false;
         }
-        if !select.include.is_empty() && !any_match(&select.include, c) {
+        if !include.is_empty() && !any_match(&include, c) {
             return false;
         }
         // Exclude is applied last, so it always wins.
-        !any_match(&select.exclude, c)
+        !any_match(&exclude, c)
     };
 
     let (mut kept, dropped): (Vec<_>, Vec<_>) = caps.into_iter().partition(|c| keep(c));
@@ -1002,11 +985,15 @@ fn apply_select(
     }
 
     if !dropped.is_empty() {
-        let mut names: Vec<String> = dropped.iter().map(|c| c.qualified_name()).collect();
+        // Bare ids, not qualified names: every capability here came from the
+        // same source, so repeating its namespace on each one is noise — and
+        // the source is already named by `from {origin}`.
+        let mut names: Vec<String> = dropped.iter().map(|c| c.manifest.id.clone()).collect();
         names.sort();
         warnings.push(format!(
-            "select dropped {} capability(ies) from {origin}: {}",
-            names.len(),
+            "select kept {} of {} from {origin} (dropped {})",
+            kept.len(),
+            kept.len() + names.len(),
             summarize(&names)
         ));
     }

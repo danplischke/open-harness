@@ -90,7 +90,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 275 tests, green on Linux/macOS/Windows
+cargo test                            # 279 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -223,7 +223,7 @@ sources:
 ```
 
 A source rarely gives you only what you want, so each one takes a `select`
-block — `include` / `exclude` patterns over the qualified name or bare id,
+block — `include` / `exclude` globs over the qualified name or bare id,
 `kinds` to take a plugin's skills without its harness-specific hooks, and
 `with_dependencies` when you want the closure rather than a report of what the
 narrowing cost. An `include` pattern that matches nothing is an error listing
@@ -376,7 +376,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
 | `docs/` | mdBook site (concepts, authoring guide, dependencies, runtimes, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 275 tests: conformance (70) + sourcing & dependencies (40) + new kinds (24) + deps vocabulary (21) + config/YAML (20) + single-file (19) + selection (17) + trust (15) + runtimes (12) + JSON→YAML migration (12) + `--locked` (9) + MCP bridge (7) + authoring (5) + capture (2) + unit (2) |
+| `tests/` | 279 tests: conformance (70) + sourcing & dependencies (40) + new kinds (24) + deps vocabulary (21) + config/YAML (20) + single-file (19) + selection (21) + trust (15) + runtimes (12) + JSON→YAML migration (12) + `--locked` (9) + MCP bridge (7) + authoring (5) + capture (2) + unit (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies
@@ -384,7 +384,9 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 The default build is deliberately lean: `serde` / `serde_json` (with
 `preserve_order`, so a config file's key order survives a round-trip),
 `ed25519-dalek` / `sha2` / `getrandom` for trust (integrity verification is
-always available, so it is not feature-gated), and `yaml-rust2` to read YAML.
+always available, so it is not feature-gated), `yaml-rust2` to read YAML, and
+`glob` for `select` patterns (string matching only — it never touches the
+filesystem — buying character classes and malformed-pattern errors).
 Everything else that would pull weight is **opt-in**: `ffi` (uniffi,
 for the Python binding), `mcp-http-tls` (rustls, for https on the bridge). The
 line we draw: the *simple, fully-specified* wire formats — the stdio JSON-RPC

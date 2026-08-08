@@ -192,7 +192,7 @@ fn what_was_dropped_is_reported() {
     assert!(
         r.warnings
             .iter()
-            .any(|w| w.contains("select dropped 5") && w.contains("wowerpoint")),
+            .any(|w| w.contains("select kept 1 of 6") && w.contains("wowerpoint")),
         "narrowing is visible, not silent: {:?}",
         r.warnings
     );
@@ -382,15 +382,83 @@ fn a_long_dropped_list_is_summarized_rather_than_dumped() {
     let warning = r
         .warnings
         .iter()
-        .find(|w| w.contains("select dropped"))
+        .find(|w| w.contains("select kept"))
         .expect("reports the drop");
     assert!(
         warning.contains("and 13 more"),
         "the list is capped: {warning}"
     );
     assert!(
-        warning.contains("select dropped 19"),
-        "but the true count is still stated: {warning}"
+        warning.contains("select kept 1 of 20"),
+        "but the true counts are still stated: {warning}"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+// ---- glob semantics --------------------------------------------------------
+
+#[test]
+fn patterns_support_character_classes() {
+    // What the glob crate buys over a bare `*`/`?` matcher.
+    let wd = plugin_source("classes");
+    let r = resolve_with(&wd, json!({ "include": ["[ms]*"] }));
+    assert_eq!(ids(&r), vec!["mem-search", "session-hook", "smart-explore"]);
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn a_negated_class_excludes() {
+    let wd = plugin_source("negated");
+    let r = resolve_with(&wd, json!({ "include": ["[!msth]*"] }));
+    assert_eq!(ids(&r), vec!["wowerpoint"]);
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn a_star_spans_the_namespace_separator() {
+    // `acme/*` should select a whole namespace, so `*` must not stop at `/`.
+    let wd = tmp("ns-span");
+    write(
+        &wd.join("caps/one/capability.yaml"),
+        &cap_yaml(
+            "one",
+            "skill",
+            json!({ "namespace": "acme", "skill": { "body": "1" } }),
+        ),
+    );
+    write(
+        &wd.join("caps/two/capability.yaml"),
+        &cap_yaml(
+            "two",
+            "skill",
+            json!({ "namespace": "other", "skill": { "body": "2" } }),
+        ),
+    );
+    let r = resolve_with(&wd, json!({ "include": ["acme/*"] }));
+    assert_eq!(ids(&r), vec!["one"]);
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn a_malformed_pattern_is_an_error_not_a_literal() {
+    // An unclosed class used to be matched literally, silently selecting
+    // nothing that looks like it.
+    let wd = plugin_source("bad-glob");
+    let p: Profile = Profile::from_text(
+        &json!({
+            "name": "p", "harnesses": ["claude-code"],
+            "sources": [{ "local": { "path": "caps", "select": { "include": ["mem-[search"] } } }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let err = match profile::resolve(&p, &wd, None) {
+        Err(e) => e,
+        Ok(_) => panic!("a malformed glob must not resolve"),
+    };
+    assert!(
+        err.contains("mem-[search") && err.contains("not a valid glob"),
+        "names the pattern and the problem: {err}"
     );
     let _ = std::fs::remove_dir_all(&wd);
 }
