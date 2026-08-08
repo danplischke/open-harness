@@ -85,6 +85,37 @@ fn quotes_scalars_that_would_otherwise_change_type() {
 }
 
 #[test]
+fn quotes_keys_that_need_it_too() {
+    // Keys go through the same quoting rules as values — a mapping key like
+    // `on` or `1.0` would otherwise come back a bool or a number, and one
+    // containing `: ` would reparse as a nested mapping.
+    let text = round_trip(json!({
+        "on": 1,
+        "1.0": 2,
+        "key: with colon": 3,
+        "": 4,
+        "plain-key": 5,
+    }));
+    assert!(
+        text.contains("\"on\": 1"),
+        "bool-lookalike key quoted:\n{text}"
+    );
+    assert!(
+        text.contains("\"1.0\": 2"),
+        "number-lookalike key quoted:\n{text}"
+    );
+    assert!(
+        text.contains("\"key: with colon\": 3"),
+        "a key containing `: ` is quoted:\n{text}"
+    );
+    assert!(text.contains("\"\": 4"), "the empty key is quoted:\n{text}");
+    assert!(
+        text.contains("plain-key: 5"),
+        "and an ordinary key is left bare:\n{text}"
+    );
+}
+
+#[test]
 fn quotes_scalars_with_yaml_indicators() {
     round_trip(json!({
         "colon": "key: value",
