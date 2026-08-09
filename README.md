@@ -50,8 +50,13 @@ target at all (Aider/Copilot for tool gating), that's reported, not faked.
 ## The `oh` CLI
 
 ```sh
+oh help                                                   # the command list, grouped
+oh <command> --help                                       # what it does, and only that command's flags
+oh completions bash|zsh|fish                              # shell completions, generated from the same table
+
 # Author
 oh init                                                   # write an open-harness.yaml profile
+oh import                                                 # lift a project's EXISTING harness config into capabilities
 oh migrate                                                # rewrite legacy JSON configs as YAML
 oh install --runtimes                                     # run capabilities' provisioning commands (shows first; --yes to run)
 oh scaffold --kind hook --lang python --id my-guard       # a runnable capability starter (py|node|typescript|bash)
@@ -63,7 +68,8 @@ oh doctor                                                 # check interpreters, 
 
 # Run & inspect
 oh run    --harness claude-code --event pre.tool.any      # a harness's single native hook entrypoint
-oh matrix                                                 # the (event × harness) support grid
+oh matrix                                                 # the (event × harness) support grid + adapter provenance
+oh matrix --provenance                                    # just: which adapters are verified vs merely documented
 oh check                                                  # per-capability installability across all harnesses
 oh emit   --harness cursor                                # native registration config (note the fan-out)
 
@@ -95,7 +101,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 389 tests, green on Linux/macOS/Windows
+cargo test                            # 443 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -484,13 +490,15 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `src/archive.rs` | Deterministic tar writer + a hardened reader (no path escapes, no links) |
 | `src/trust.rs` | ed25519 signing/verification, trust store, root-of-trust keyrings, revocation, permissions |
 | `src/mcp.rs` | Minimal MCP client (stdio + streamable-HTTP, optional TLS) — the bridge runtime |
-| `src/scaffold.rs` + `src/capture.rs` + `src/matrix.rs` | `oh scaffold` / `oh capture` / the generated support matrix |
+| `src/importer.rs` | `oh import`: a project's existing native config → portable capabilities (the inverse of `src/kinds/`) |
+| `src/help.rs` | The CLI's commands, flags and examples as data — help, per-command pages and shell completions all render from it |
+| `src/scaffold.rs` + `src/capture.rs` + `src/matrix.rs` | `oh scaffold` / `oh capture` (+ its provenance sidecar) / the generated support matrix |
 | `src/api.rs` + `src/main.rs` | Stable embeddable API; the `oh` CLI |
 | `bindings/` | Python (uniffi) + Node/TS (napi) bindings |
 | `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
 | `docs/` | mdBook site (concepts, authoring, dependencies, runtimes, plugins, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 389 tests: conformance (84) + sourcing & dependencies (67) + runtimes & provisioning (31) + new kinds (24) + config/YAML (24) + deps vocabulary (21) + selection (21) + plugin import (21) + trust (21) + single-file (19) + JSON→YAML migration (12) + `--locked` (9) + unit (7) + CLI arguments (6) + streamable-HTTP (6) + publishing (6) + authoring (5) + MCP bridge (3) + capture (2) |
+| `tests/` | 443 tests: conformance (84) + sourcing & dependencies (67) + runtimes & provisioning (31) + `oh import` (31) + new kinds (24) + config/YAML (24) + deps vocabulary (21) + selection (21) + plugin import (21) + trust (21) + single-file (19) + CLI help & completions (13) + JSON→YAML migration (12) + adapter provenance (9) + `--locked` (9) + unit (7) + CLI arguments (7) + streamable-HTTP (6) + publishing (6) + authoring (5) + MCP bridge (3) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies
@@ -513,12 +521,19 @@ library is for, not something to hand-roll. We still emit our own frontmatter.
 
 ## Scope & honesty
 
-- The eight proprietary harnesses aren't installed here, so their native
-  *runtime* isn't exercised end-to-end; their conventions are encoded from docs.
-  Codex and Cursor were validated against primary docs with recorded payloads
-  under [`tests/fixtures/`](./tests/fixtures/); `oh capture` records real native
-  payloads from a live harness to upgrade those fixtures (the recording is a
-  manual step — it needs the harness installed).
+- **Supported is not the same claim as verified, and the tool says which.**
+  Eight of the eleven adapters are encoded from primary documentation and have
+  never been run against the harness they describe. That is now first-class
+  output rather than a footnote: `Harness::provenance()` labels each adapter
+  `live-captured`, `doc-fixture` or `doc-only` with what it was established
+  against, and `oh matrix`, `oh check` and `oh emit` all carry it — `emit`
+  especially, since that output gets pasted into a real config. Today **2 of 11**
+  are backed by a recorded payload (Codex and Cursor, doc-derived, under
+  [`tests/fixtures/`](./tests/fixtures/)) and **none is live-captured**.
+  The claim is checked, not asserted: `oh capture` writes a provenance sidecar
+  alongside each fixture, and `tests/provenance.rs` fails if a declaration
+  overstates *or* understates what is committed. Upgrading a harness is four
+  steps, documented in [`tests/fixtures/README.md`](./tests/fixtures/README.md).
 - Execution is **cross-platform**: interpreters are resolved per-OS (no `#!`
   reliance — `python3`→`python` on Windows, `PATHEXT` honored), and the Python +
   Node capabilities run on Linux/macOS/Windows in CI.
@@ -535,5 +550,35 @@ library is for, not something to hand-roll. We still emit our own frontmatter.
   needs OS mechanisms), process-group kill for forking capabilities, full
   TUF-style registry roles, and live-recorded adapter fixtures. See
   `FEASIBILITY.md`.
+
+## Adopting a project that already has config
+
+Nothing above helps if trying open-harness means re-authoring the `.claude/`,
+`.cursor/` and `AGENTS.md` you already have. `oh import` reads them:
+
+```sh
+oh import --dry-run          # what your project's config would become
+oh import                    # write it to ./capabilities
+```
+
+It is the inverse of `src/kinds/`: skills, rules, commands, subagents,
+instruction briefs, MCP servers and Claude's permission block all come back as
+portable capabilities, with the translations made explicit — a Cursor `.mdc`
+`alwaysApply`/`globs` pair becomes a normalized activation, `$ARGUMENTS`/`$1`
+becomes `{{args}}`/`{{argN}}`, and a harness's native tool tokens fold back to
+the canonical vocabulary.
+
+The honest-by-design rule applies hardest here, because a silent loss in an
+importer only surfaces months later as a rule that quietly stopped applying.
+Everything found is reported as exactly one of **imported**, **not portable**
+(hooks: carried verbatim as a `native` capability pinned to their harness, since
+their commands speak that harness's payload shape, not `hook@1`) or **skipped
+with the reason** (a Gemini TOML command says so rather than not appearing).
+Frontmatter that cannot travel is named, not dropped in silence; a genuinely
+ambiguous source — Copilot writes no `applyTo` for both manual *and* always-on —
+takes the narrower reading and declares it. Nothing is ever overwritten, and a
+skip exits non-zero so a partial import cannot read as a complete one.
+
+See [Importing an existing project](./docs/src/importing.md).
 
 License: MIT.

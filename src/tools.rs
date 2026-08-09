@@ -124,6 +124,43 @@ fn mapped(key: &str, harness: Harness) -> Option<&'static str> {
     })
 }
 
+/// The inverse of [`native_tool`]: the canonical name(s) a harness's native
+/// token stands for. Used by `oh import`, which reads a harness's own tool list
+/// and has to get back to the portable vocabulary.
+///
+/// Returns a **list** because the forward map is not injective — Copilot's
+/// `search` is what both `grep` and `glob` lower to, so reading it back means
+/// both. That is faithful rather than widening: the single native token really
+/// does grant both capabilities. A token outside the table passes through
+/// verbatim, mirroring the forward direction.
+///
+/// A parenthesized spec is preserved on the way back: Claude's
+/// `Bash(git diff:*)` returns `bash(git diff:*)`, so a re-emit reproduces it.
+pub fn canonical_tools(native: &str, harness: Harness) -> Vec<String> {
+    let native = native.trim();
+    // Split a `Tool(spec)` token so the tool part can be mapped and the spec
+    // carried along untouched.
+    let (token, spec) = match native.split_once('(') {
+        Some((t, rest)) => (t.trim(), Some(rest.trim_end_matches(')'))),
+        None => (native, None),
+    };
+
+    let mut out: Vec<String> = CANONICAL
+        .iter()
+        .filter(|c| native_tool(c, harness).eq_ignore_ascii_case(token))
+        .map(|c| c.to_string())
+        .collect();
+    if out.is_empty() {
+        // Unknown to the table: pass through, folded to the canonical spelling
+        // so a later `native_tool` round-trips it consistently.
+        out.push(canonical_key(token));
+    }
+    match spec {
+        Some(s) => out.into_iter().map(|c| format!("{c}({s})")).collect(),
+        None => out,
+    }
+}
+
 fn title_case(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {

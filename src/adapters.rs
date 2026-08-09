@@ -60,6 +60,69 @@ pub enum DenyStyle {
     InProcess,
 }
 
+/// How an adapter's encoding of a harness was established.
+///
+/// "Supported" and "verified" are different claims, and the support matrix used
+/// to print only the first — every cell looked equally load-bearing whether it
+/// came from a recorded payload or from reading a vendor's docs. For a tool that
+/// asks you to route your agent's security hooks through it, that difference is
+/// the credibility, so it is now a first-class part of the report.
+///
+/// Each variant carries what it was established against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    /// A payload recorded from a **live install** by `oh capture`, committed as
+    /// a fixture the conformance suite decodes. The strongest claim available.
+    LiveCaptured(&'static str),
+    /// Encoded from the vendor's primary documentation, **with** a fixture built
+    /// from those docs that the conformance suite decodes. The shape is pinned
+    /// and regression-tested; what is unproven is that the vendor really sends
+    /// it.
+    DocFixture(&'static str),
+    /// Encoded from the vendor's documentation, with no recorded payload at all.
+    DocOnly(&'static str),
+}
+
+impl Provenance {
+    /// A short, sortable label for the matrix.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Provenance::LiveCaptured(_) => "live-captured",
+            Provenance::DocFixture(_) => "doc-fixture",
+            Provenance::DocOnly(_) => "doc-only",
+        }
+    }
+
+    /// What the adapter was established against.
+    pub fn source(&self) -> &'static str {
+        match self {
+            Provenance::LiveCaptured(s) | Provenance::DocFixture(s) | Provenance::DocOnly(s) => s,
+        }
+    }
+
+    /// Whether a recorded payload backs this adapter — the thing the fixture
+    /// corpus on disk can be checked against.
+    pub fn has_fixture(&self) -> bool {
+        matches!(
+            self,
+            Provenance::LiveCaptured(_) | Provenance::DocFixture(_)
+        )
+    }
+
+    /// One line explaining what the reader should take from it.
+    pub fn caveat(&self) -> &'static str {
+        match self {
+            Provenance::LiveCaptured(_) => "recorded from a live install",
+            Provenance::DocFixture(_) => {
+                "fixture built from primary docs, not recorded from a live install"
+            }
+            Provenance::DocOnly(_) => {
+                "documented only — no recorded payload; verify before relying on it"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Harness {
     Claude,
@@ -144,6 +207,43 @@ impl Harness {
                 "the `.agents/` layout is Antigravity 2.0 and may still shift; GEMINI.md may be transitional — re-verify before an Antigravity-facing release",
             ),
             _ => None,
+        }
+    }
+
+    /// How this harness's adapter was established, and against what.
+    ///
+    /// Declared here rather than inferred so the claim is reviewable in one
+    /// place — and cross-checked against the fixture corpus on disk by
+    /// `tests/provenance.rs`, so it cannot overstate what has actually been
+    /// recorded. Upgrading a harness means running `oh capture` against a real
+    /// install, committing the fixture, and changing the arm below; the test
+    /// fails if you do either half without the other.
+    pub fn provenance(&self) -> Provenance {
+        match self {
+            // Fixtures recorded from primary documentation (#5): the conformance
+            // suite decodes them, but no live install produced them.
+            Harness::Codex => Provenance::DocFixture(
+                "Codex hooks references (agenticcontrolplane.com, developers.openai.com, deepwiki); \
+                 the exact stdin field names are modeled on Claude's and are the one part not recorded",
+            ),
+            Harness::Cursor => Provenance::DocFixture(
+                "Cursor Hooks documentation and deep-dives (blog.gitbutler.com, johnlindquist/cursor-hooks)",
+            ),
+            // Conventions are well documented and stable, but nothing here has
+            // been round-tripped against the real thing.
+            Harness::Claude => Provenance::DocOnly("Claude Code hooks + settings.json documentation"),
+            Harness::Gemini => Provenance::DocOnly("Gemini CLI hooks documentation"),
+            Harness::Windsurf => Provenance::DocOnly("Windsurf rules + hooks documentation"),
+            Harness::Cline => Provenance::DocOnly("Cline hooks + .clinerules documentation"),
+            Harness::OpenCode => Provenance::DocOnly("OpenCode plugin API documentation"),
+            Harness::Pi => Provenance::DocOnly("Pi plugin API documentation"),
+            Harness::Aider => Provenance::DocOnly("Aider conventions documentation"),
+            Harness::Copilot => Provenance::DocOnly(
+                "GitHub Copilot custom instructions + .github/instructions documentation",
+            ),
+            Harness::Antigravity => Provenance::DocOnly(
+                "Antigravity 2.0 .agents/ layout, from primary docs; the layout may still shift",
+            ),
         }
     }
 

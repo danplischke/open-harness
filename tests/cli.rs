@@ -169,3 +169,59 @@ fn ordinary_invocations_still_parse() {
     );
     let _ = std::fs::remove_dir_all(&wd);
 }
+
+/// `oh check | head` used to end in a Rust backtrace and exit 101.
+///
+/// Rust sets `SIGPIPE` to `SIG_IGN` before `main`, so a closed downstream pipe
+/// comes back as an `EPIPE` write error — and `println!` panics on those. Every
+/// shell idiom this tool invites (`| head`, `| less` then `q`, `| grep -m1`)
+/// hit it. The fix restores `SIG_DFL`, so the process dies on the signal like
+/// anything else in a pipeline would.
+#[cfg(unix)]
+#[test]
+fn a_closed_pipe_is_not_a_panic() {
+    use std::process::{Command, Stdio};
+
+    // `head -1` exits after one line, closing the pipe under a command that
+    // writes many.
+    let mut producer = Command::new(env!("CARGO_BIN_EXE_oh"))
+        .args(["check"])
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn oh");
+
+    let head = Command::new("head")
+        .arg("-1")
+        .stdin(Stdio::from(producer.stdout.take().expect("stdout")))
+        .stdout(Stdio::piped())
+        .output();
+    let head = match head {
+        Ok(h) => h,
+        Err(_) => {
+            eprintln!("no `head` available; skipped");
+            let _ = producer.kill();
+            let _ = producer.wait();
+            return;
+        }
+    };
+    assert!(!head.stdout.is_empty(), "head should have read a line");
+
+    let mut err = String::new();
+    if let Some(mut e) = producer.stderr.take() {
+        use std::io::Read;
+        let _ = e.read_to_string(&mut err);
+    }
+    let status = producer.wait().expect("wait");
+    assert!(
+        !err.contains("panicked"),
+        "a closed pipe must not panic:\n{err}"
+    );
+    // 141 = 128 + SIGPIPE(13). Exit 0 is fine too if it finished first.
+    assert!(
+        matches!(status.code(), None | Some(0) | Some(141)),
+        "unexpected exit {:?} — 101 means it panicked",
+        status.code()
+    );
+}
