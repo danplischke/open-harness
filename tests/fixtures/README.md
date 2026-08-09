@@ -25,6 +25,37 @@ straight into the conformance suite. This is how a doc-derived fixture above get
 upgraded to a live one — the recording is a manual step (it needs the real
 harness), but the tooling and the round-trip test (`tests/capture.rs`) ship now.
 
+### The provenance sidecar
+
+A payload recorded off a live install and one transcribed out of a vendor's docs
+are *identical bytes*. The fixture alone therefore cannot support the claim that
+an adapter was verified against the real thing, so every `oh capture` also writes
+a sidecar next to the fixture:
+
+```jsonc
+// cursor/beforeShellExecution.provenance.json
+{ "kind": "live-captured", "harness": "cursor", "event": "pre.tool.shell",
+  "harness_version": "Cursor 1.7.44",          // from --label
+  "recorded_by": "oh 0.1.0", "recorded_at": "2026-08-09T09:12:44Z" }
+```
+
+That sidecar is the *only* thing that lets a harness declare
+`Provenance::LiveCaptured` in `src/adapters.rs`: `tests/provenance.rs` holds every
+adapter's declaration against what is actually committed here, and fails if a
+declaration claims more evidence than exists — or less (a fixture landing while
+the adapter still says `doc-only` is also a failure, so the matrix cannot
+understate itself either).
+
+To upgrade a harness end to end:
+
+1. `oh capture --harness H --event E --label "<harness version>" --out tests/fixtures/H/<native-event>.stdin.json`
+2. commit the fixture *and* its sidecar,
+3. change that harness's arm in `Harness::provenance()` to `LiveCaptured`,
+4. `bash docs/gen-matrix.sh` and commit the regenerated matrix.
+
+Steps 2 and 3 are enforced against each other; step 4 is enforced by the CI
+matrix drift gate. `oh matrix --provenance` prints the current state.
+
 ## Cursor
 
 Per-event payloads are **snake_case and event-specific** (not a uniform

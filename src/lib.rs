@@ -13,6 +13,7 @@ pub mod config;
 pub mod deps;
 pub mod dispatch;
 pub mod event;
+pub mod help;
 pub mod http;
 pub mod kind;
 pub mod kinds;

@@ -17,6 +17,7 @@
 //! Reporting:  `matrix` (the event × harness support grid; `--markdown`).
 
 use open_harness::adapters::{Harness, ALL};
+use open_harness::help;
 use open_harness::kind::{kind_impl, Artifact, Installability, KindId};
 use open_harness::manifest::{discover, LoadedCapability, PermissionPolicy};
 use open_harness::mcp::{self, HttpServerSpec, McpServer, ServerSpec};
@@ -33,6 +34,30 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     let rest: Vec<String> = args.iter().skip(1).cloned().collect();
+
+    // Asking for help is not an error: it prints to stdout and exits 0. `oh`
+    // with no arguments lands here too — a bare invocation should teach, not
+    // scold.
+    if matches!(cmd, "help" | "--help" | "-h") {
+        match rest.first() {
+            None => print!("{}", help::overview()),
+            Some(name) => match help::command(name) {
+                Some(c) => print!("{}", help::command_help(c)),
+                None => unknown_command(name),
+            },
+        }
+        return;
+    }
+    // The `oh <cmd> --help` form, handled once here instead of in all 27
+    // subcommands. It must win over the flag parser, which would otherwise
+    // reject `--help` as an unknown option.
+    if rest.iter().any(|a| a == "--help" || a == "-h") {
+        if let Some(c) = help::command(cmd) {
+            print!("{}", help::command_help(c));
+            return;
+        }
+    }
+
     match cmd {
         "run" => cmd_run(&rest),
         "emit" => cmd_emit(&rest),
@@ -57,10 +82,33 @@ fn main() {
         "doctor" => cmd_doctor(&rest),
         "add" => cmd_add(&rest),
         "remove" => cmd_remove(&rest),
-        _ => {
-            eprintln!(
-                "oh <init|migrate|install|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|pack|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix|version> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--base-url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--locked] [--runtimes] [--yes] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh migrate (JSON configs → YAML) · oh install --runtimes · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\npublish:   oh pack --capabilities capabilities --base-url https://cdn.example.com --out dist\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
-            );
+        "import" => cmd_import(&rest),
+        "completions" => cmd_completions(&rest),
+        other => unknown_command(other),
+    }
+}
+
+/// A mistyped command should point at the one meant. Exits 2 — an unknown
+/// command is a usage error, unlike an explicit `--help`.
+fn unknown_command(name: &str) -> ! {
+    eprintln!("unknown command `{name}`");
+    if let Some(s) = help::suggest(name) {
+        eprintln!("did you mean `oh {s}`?");
+    }
+    eprintln!("\nrun `oh help` for the command list");
+    exit(2)
+}
+
+fn cmd_completions(rest: &[String]) {
+    let o = parse_opts(rest);
+    let Some(shell) = o.positional.first() else {
+        eprintln!("completions wants a shell: bash, zsh or fish");
+        exit(2);
+    };
+    match help::Shell::parse(shell) {
+        Some(s) => print!("{}", help::completions(s)),
+        None => {
+            eprintln!("unknown shell `{shell}` — expected bash, zsh or fish");
             exit(2);
         }
     }
@@ -83,6 +131,9 @@ struct Opts {
     runtimes: bool,
     /// `matrix --markdown`: emit the support grid as a Markdown table.
     markdown: bool,
+    /// `matrix --provenance`: how each adapter was established, not just what
+    /// it supports.
+    provenance: bool,
     explain: bool,
     timeout_ms: u64,
     max_output_bytes: u64,
@@ -133,6 +184,7 @@ fn parse_opts(rest: &[String]) -> Opts {
         yes: false,
         runtimes: false,
         markdown: false,
+        provenance: false,
         explain: false,
         timeout_ms: 0,
         max_output_bytes: 0,
@@ -329,6 +381,10 @@ fn parse_opts(rest: &[String]) -> Opts {
                 o.markdown = true;
                 i += 1;
             }
+            "--provenance" => {
+                o.provenance = true;
+                i += 1;
+            }
             "--explain" => {
                 o.explain = true;
                 i += 1;
@@ -457,6 +513,27 @@ fn cmd_run(rest: &[String]) {
     exit(result.exit_code);
 }
 
+/// Name the target harnesses whose adapter has no recorded payload behind it.
+///
+/// Installability and support answer "does this map onto a native surface";
+/// they say nothing about whether that mapping was ever exercised against the
+/// real harness. Reporting the first without the second is the same silent
+/// overstatement the honest-degradation rule exists to prevent, so every
+/// command that hands you something to run says which targets are unproven.
+fn print_provenance_note(harnesses: &[Harness], prefix: &str) {
+    let unverified = open_harness::matrix::unverified(harnesses);
+    if unverified.is_empty() {
+        return;
+    }
+    println!(
+        "{prefix}NOTE: {} adapter(s) are encoded from documentation with no recorded payload: {}.",
+        unverified.len(),
+        unverified.join(", ")
+    );
+    println!("{prefix}They are unverified against a live install — see `oh matrix --provenance`.");
+    println!();
+}
+
 fn cmd_emit(rest: &[String]) {
     let o = parse_opts(rest);
     let caps = load_caps(&o);
@@ -465,6 +542,10 @@ fn cmd_emit(rest: &[String]) {
         exit(1);
     }
     let harnesses = select_harnesses(&o);
+    // This output gets pasted into a real harness's config, which is exactly
+    // where it matters whether the mapping was verified against that harness or
+    // read off its documentation. Emitted as comments so pasting stays safe.
+    print_provenance_note(&harnesses, "# ");
     for cap in &caps {
         for h in &harnesses {
             let plan = kind_impl(cap.manifest.kind).plan(cap, *h);
@@ -1212,6 +1293,10 @@ fn cmd_check(rest: &[String]) {
         }
         println!();
     }
+    // "installable — clean" is a claim about the *adapter*, so it inherits that
+    // adapter's provenance. Saying so here is the difference between "this will
+    // work" and "this is what we believe the harness reads".
+    print_provenance_note(&ALL, "");
 }
 
 // ---- sync / check reporting ----------------------------------------------
@@ -1446,6 +1531,18 @@ fn cmd_capture(rest: &[String]) {
                 _ => String::new(),
             };
             eprintln!("captured native payload{ctx} → {}", out.display());
+            // The sidecar is what distinguishes this from a payload transcribed
+            // out of the vendor's docs, so it is written with the fixture rather
+            // than being something to remember afterwards.
+            let p = open_harness::capture::Provenance {
+                harness: o.harness.as_deref(),
+                event: o.event.as_deref(),
+                label: o.label.as_deref(),
+            };
+            match open_harness::capture::record_provenance(&out, &p) {
+                Ok(path) => eprintln!("recorded provenance → {}", path.display()),
+                Err(e) => eprintln!("capture: {e}"),
+            }
         }
         // Even on a capture error, allow: a capture hook must not block the agent.
         Err(e) => eprintln!("capture: {e}"),
@@ -1972,6 +2069,21 @@ fn add_harness(v: &mut serde_json::Value, harness: &str) {
 
 fn cmd_matrix(rest: &[String]) {
     let o = parse_opts(rest);
+    // `--provenance` narrows the report to how the adapters were established.
+    // It is not what *enables* that section: printing support without it is the
+    // conflation this report exists to undo, so the full report always carries
+    // both.
+    if o.provenance {
+        print!(
+            "{}",
+            if o.markdown {
+                open_harness::matrix::provenance_markdown()
+            } else {
+                open_harness::matrix::provenance_text()
+            }
+        );
+        return;
+    }
     // The matrix is generated from the adapters (open_harness::matrix), the same
     // source the docs table is generated from — never hand-maintained.
     if o.markdown {
@@ -1998,6 +2110,8 @@ fn cmd_matrix(rest: &[String]) {
         println!();
     }
     println!("\nlegend: native = 1:1 · fanout×N = one normalized event registers on N native events · — = no target");
+    println!();
+    print!("{}", open_harness::matrix::provenance_text());
 }
 
 fn short(id: &str) -> String {
@@ -2005,4 +2119,8 @@ fn short(id: &str) -> String {
         "claude-code" => "claude".to_string(),
         other => other.chars().take(11).collect(),
     }
+}
+
+fn cmd_import(_rest: &[String]) {
+    todo!("import")
 }
