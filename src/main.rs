@@ -18,6 +18,7 @@
 
 use open_harness::adapters::{Harness, ALL};
 use open_harness::help;
+use open_harness::importer;
 use open_harness::kind::{kind_impl, Artifact, Installability, KindId};
 use open_harness::manifest::{discover, LoadedCapability, PermissionPolicy};
 use open_harness::mcp::{self, HttpServerSpec, McpServer, ServerSpec};
@@ -30,7 +31,37 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::exit;
 
+/// Restore the default `SIGPIPE` disposition.
+///
+/// Rust sets `SIGPIPE` to `SIG_IGN` before `main`, so a closed downstream pipe
+/// surfaces as an `EPIPE` write error — and `println!` panics on those. That
+/// turns the most ordinary shell idioms this tool invites (`oh check | head`,
+/// `oh matrix | less` and quitting, `oh emit | grep -m1`) into a Rust backtrace
+/// and exit 101. Restoring `SIG_DFL` makes the process die quietly on the
+/// signal, which is what every other CLI in the pipeline does.
+///
+/// Declared directly rather than pulling in `libc` for one call: `SIGPIPE` is
+/// 13 and `SIG_DFL` is 0 on every Unix this builds for, and both are fixed by
+/// POSIX. Windows has no signals and needs nothing.
+#[cfg(unix)]
+fn restore_sigpipe() {
+    extern "C" {
+        fn signal(sig: i32, handler: usize) -> usize;
+    }
+    const SIGPIPE: i32 = 13;
+    const SIG_DFL: usize = 0;
+    // Safety: `signal` with SIG_DFL is async-signal-safe and this runs before
+    // any thread is spawned.
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_sigpipe() {}
+
 fn main() {
+    restore_sigpipe();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("help");
     let rest: Vec<String> = args.iter().skip(1).cloned().collect();
@@ -2121,6 +2152,126 @@ fn short(id: &str) -> String {
     }
 }
 
-fn cmd_import(_rest: &[String]) {
-    todo!("import")
+/// `oh import` — a project's existing native config → portable capabilities.
+///
+/// The adoption ramp. Everything else here assumes a greenfield capability;
+/// this reads the `.claude/`, `.cursor/`, `AGENTS.md` a project already has.
+/// Read-only until it writes, and it never overwrites: an id that already
+/// exists under `--out` is reported as a collision and left alone.
+fn cmd_import(rest: &[String]) {
+    let o = parse_opts(rest);
+    let from = o.into.clone().unwrap_or_else(|| PathBuf::from("."));
+    let out = o
+        .out
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("capabilities"));
+    let only = o.harness.as_deref().and_then(|h| match h {
+        "all" => None,
+        id => Some(Harness::from_id(id).unwrap_or_else(|| {
+            eprintln!("unknown harness {id}");
+            exit(2)
+        })),
+    });
+
+    let imp = importer::scan(&from, only).unwrap_or_else(|e| {
+        eprintln!("import failed: {e}");
+        exit(1);
+    });
+
+    let tag = if o.dry_run { " (dry-run)" } else { "" };
+    println!("import{tag} ← {}", from.display());
+    for note in &imp.notes {
+        println!("  {note}");
+    }
+
+    let width = imp
+        .items
+        .iter()
+        .map(|i| i.id.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    for item in &imp.items {
+        let mark = match &item.status {
+            importer::Status::Portable => "＋",
+            importer::Status::Native(_) => "◆",
+            importer::Status::Skipped(_) => "－",
+        };
+        println!(
+            "  {mark} {:<12} {:<width$}  ← {}",
+            item.kind.as_str(),
+            item.id,
+            item.from
+        );
+        if item.harnesses.len() > 1 {
+            println!("      read by: {}", item.harnesses.join(", "));
+        }
+        match &item.status {
+            // "Not portable" is the whole point of saying it here: this one will
+            // be Unsupported on every harness but the one it came from.
+            importer::Status::Native(why) => println!("      NOT PORTABLE: {why}"),
+            importer::Status::Skipped(why) => println!("      SKIPPED: {why}"),
+            importer::Status::Portable => {}
+        }
+        for n in &item.notes {
+            println!("      · {n}");
+        }
+    }
+
+    let report = importer::write(&out, &imp, o.dry_run).unwrap_or_else(|e| {
+        eprintln!("import failed: {e}");
+        exit(1);
+    });
+
+    let skipped = imp
+        .items
+        .iter()
+        .filter(|i| matches!(i.status, importer::Status::Skipped(_)))
+        .count();
+    let native = imp
+        .items
+        .iter()
+        .filter(|i| matches!(i.status, importer::Status::Native(_)))
+        .count();
+    println!(
+        "\n{} capabilit{} {} {}{}{}",
+        report.created.len(),
+        if report.created.len() == 1 {
+            "y"
+        } else {
+            "ies"
+        },
+        if o.dry_run { "would go to" } else { "→" },
+        out.display(),
+        if native > 0 {
+            format!("  ({native} not portable)")
+        } else {
+            String::new()
+        },
+        if skipped > 0 {
+            format!("  ({skipped} skipped)")
+        } else {
+            String::new()
+        }
+    );
+    if !report.collisions.is_empty() {
+        println!(
+            "\nleft alone — a capability with that id already exists under {}:",
+            out.display()
+        );
+        for id in &report.collisions {
+            println!("  · {id}");
+        }
+    }
+    if !o.dry_run && !report.created.is_empty() {
+        println!(
+            "\nnext: `oh check --capabilities {}` to see how each one lands on every harness",
+            out.display()
+        );
+    }
+    // A skip is a thing the project has that open-harness now does not. Exiting
+    // 0 would report a partial import as a complete one.
+    if skipped > 0 {
+        exit(1);
+    }
 }

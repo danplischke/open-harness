@@ -15,6 +15,7 @@ pub mod dispatch;
 pub mod event;
 pub mod help;
 pub mod http;
+pub mod importer;
 pub mod kind;
 pub mod kinds;
 pub mod manifest;

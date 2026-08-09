@@ -7,7 +7,8 @@
 #   3. compose   — a profile of sources → a pinned lockfile
 #   4. sync      — install the composed set into a project (native fan-out)
 #   5. dispatch  — one decision → each harness's native deny convention
-#   6. bridge+report — MCP→CLI bridge + the generated support matrix
+#   6. import    — the project's native config read back into capabilities
+#   7. bridge+report — MCP→CLI bridge + the generated support matrix
 #
 # Everything is written under examples/.walkthrough (a throwaway workspace, git
 # ignored); nothing here mutates the repo's own capabilities or keys.
@@ -84,10 +85,20 @@ printf '%s' "$CURSOR_SECRET" | oh run --harness cursor --event pre.tool.shell --
 note "OpenCode — the same deny, as the canonical decision its in-process shim reads:"
 printf '%s' "$SECRET" | oh run --harness opencode --event pre.tool.any --capabilities "$CAPS" || true
 
-act "6 · BRIDGE & REPORT — MCP→CLI bridge + the generated support matrix"
+act "6 · IMPORT — read the project's native config back into capabilities"
+note "the inverse of step 4: what sync just wrote, read back as portable capabilities."
+note "this is the adoption path for a project that already has harness config."
+oh import --into "$WORK/project" --out "$WORK/reimported" --dry-run || true
+note "written for real, then loaded back:"
+oh import --into "$WORK/project" --out "$WORK/reimported" >/dev/null 2>&1 || true
+( cd "$WORK/reimported" && find . -type f | sort | sed 's/^/      /' )
+# `head` closes the pipe; with `pipefail` that surfaces as SIGPIPE (141).
+oh check --capabilities "$WORK/reimported" 2>/dev/null | head -n 14 || true
+
+act "7 · BRIDGE & REPORT — MCP→CLI bridge + the generated support matrix"
 note "Call an MCP server's tool through the shell (for MCP-disabled environments):"
 oh mcp call --id echo-bridge --capabilities "$CAPS" --tool echo --json '{"text":"hello from the bridge"}' || true
-note "The (event × harness) support grid, generated from the adapters:"
+note "The (event × harness) support grid + how each adapter was established:"
 oh matrix
 
 printf '\n\ndone — explore the generated project, lockfile, and signatures under %s/\n' "$WORK"
