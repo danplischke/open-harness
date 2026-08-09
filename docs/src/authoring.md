@@ -181,6 +181,39 @@ wins over a single-file document. `oh check` shows how each capability lands on
 every harness (clean / degraded / blocked); `oh emit --harness <h>` prints the
 native artifacts.
 
+### When a *document* kind wants a manifest
+
+For the five document kinds the two forms are equally expressive — the only
+manifest field the single-file reader will not lift is `permissions`, and a
+document kind has no use for a sandbox manifest. So the single-file form is the
+default, and a manifest should earn its place. Two reasons that do:
+
+* **`body_file`** — the body is long enough to want its own reviewable file, and
+  burying it in a YAML block scalar helps nobody.
+* **`overrides`** — harness-specific frontmatter has to be declared per harness
+  so it lands on the one that reads it and is stripped from the rest. Emitting a
+  Claude-only key onto all six skill targets leaves five files carrying
+  something nothing there understands.
+
+`capabilities/postgres-review/` is the worked example of both:
+
+```yaml
+kind: skill
+skill:
+  allowed-tools: [read, grep, bash]
+  body_file: PROCEDURE.md          # not SKILL.md — see below
+overrides:
+  claude-code:
+    frontmatter:
+      user-invocable: true         # Claude reads this; nobody else does
+```
+
+Name the body file something that is *not* a recognized document name. A
+`RULE.md` sitting next to a `capability.yaml` is readable as either form, and
+while `discover` resolves that in the manifest's favour, a directory that reads
+two ways at a glance is worth avoiding. `tests/authoring.rs` gates this, along
+with the rule that no kind may be demonstrated *only* as a manifest.
+
 ## Package, sign, share
 
 Add `version` and `permissions` to the manifest, then sign it so consumers can

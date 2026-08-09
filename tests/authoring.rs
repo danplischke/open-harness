@@ -189,3 +189,126 @@ fn support_matrix_markdown_is_generated_from_adapters() {
         assert!(a.contains(&ev.id()), "matrix has a row for {}", ev.id());
     }
 }
+
+// ---- the example corpus as documentation ----------------------------------
+
+/// `capabilities/` doubles as the by-example documentation for the authoring
+/// formats, so which form each example uses is a real decision, not an
+/// accident.
+///
+/// A document kind can be authored two ways — a single `SKILL.md`/`RULE.md`/…
+/// whose frontmatter *is* the manifest, or a `capability.yaml` pointing at a
+/// `body_file`. For those kinds the two are equally expressive (the only
+/// manifest field `from_doc` will not lift is `permissions`, which a document
+/// kind has no use for), so the single-file form is the ergonomic default and
+/// the corpus should read that way.
+///
+/// It briefly did not: `command` and `rule` existed *only* in the manifest
+/// form, which made the whole directory look like open-harness wanted YAML for
+/// everything. These two gates keep both forms represented without letting
+/// either become the only face of a kind.
+fn corpus() -> Vec<LoadedCapability> {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+    discover(&dir).expect("the example corpus must load")
+}
+
+fn is_single_file(cap: &LoadedCapability) -> bool {
+    !cap.dir
+        .join(open_harness::manifest::MANIFEST_NAME)
+        .is_file()
+}
+
+/// The kinds that have a single-file document form at all. Hooks, tools and
+/// permissions are structured config with no body, so they have no document
+/// form and are irrelevant to this gate.
+const DOCUMENT_KINDS: [KindId; 5] = [
+    KindId::Skill,
+    KindId::Agent,
+    KindId::Command,
+    KindId::Rule,
+    KindId::Instructions,
+];
+
+#[test]
+fn no_document_kind_is_demonstrated_only_as_a_manifest() {
+    let caps = corpus();
+    for kind in DOCUMENT_KINDS {
+        let of_kind: Vec<&LoadedCapability> =
+            caps.iter().filter(|c| c.manifest.kind == kind).collect();
+        if of_kind.is_empty() {
+            continue;
+        }
+        assert!(
+            of_kind.iter().any(|c| is_single_file(c)),
+            "`{}` is only shown in the capability.yaml form ({:?}) — a reader learns the \
+             heavier authoring path is the only one. Author at least one as a single {}.md",
+            kind.as_str(),
+            of_kind.iter().map(|c| &c.manifest.id).collect::<Vec<_>>(),
+            kind.as_str().to_uppercase()
+        );
+    }
+}
+
+/// ...and the manifest form must not disappear either: `body_file`, per-harness
+/// `overrides` and a generated manifest are all real, and an example set that
+/// never shows them teaches that they do not exist.
+#[test]
+fn the_manifest_form_is_still_demonstrated_for_a_document_kind() {
+    let caps = corpus();
+    let manifest_authored: Vec<&str> = caps
+        .iter()
+        .filter(|c| DOCUMENT_KINDS.contains(&c.manifest.kind) && !is_single_file(c))
+        .map(|c| c.manifest.id.as_str())
+        .collect();
+    assert!(
+        !manifest_authored.is_empty(),
+        "no document-kind capability is authored as a capability.yaml — the manifest form, \
+         `body_file` and per-harness `overrides` are now undocumented by example"
+    );
+    // And it must be a real body_file, not an inline body pretending.
+    let uses_body_file = caps.iter().any(|c| {
+        !is_single_file(c)
+            && DOCUMENT_KINDS.contains(&c.manifest.kind)
+            && c.manifest
+                .config
+                .get(c.manifest.kind.as_str())
+                .and_then(|v| v.get("body_file"))
+                .is_some()
+    });
+    assert!(
+        uses_body_file,
+        "the manifest-authored example(s) {manifest_authored:?} do not use `body_file`, so \
+         nothing in the corpus shows keeping a long body out of the manifest"
+    );
+}
+
+/// A `body_file` that is also a recognized document name (`RULE.md` next to a
+/// `capability.yaml`) is readable two ways, and `discover` has to pick — it
+/// picks the manifest. Avoiding the ambiguity outright is clearer than relying
+/// on that tie-break.
+#[test]
+fn a_body_file_is_not_named_like_a_single_file_capability() {
+    for cap in corpus() {
+        if is_single_file(&cap) {
+            continue;
+        }
+        let Some(bf) = cap
+            .manifest
+            .config
+            .get(cap.manifest.kind.as_str())
+            .and_then(|v| v.get("body_file"))
+            .and_then(|v| v.as_str())
+        else {
+            continue;
+        };
+        assert!(
+            !matches!(
+                bf,
+                "SKILL.md" | "AGENT.md" | "COMMAND.md" | "RULE.md" | "INSTRUCTIONS.md"
+            ),
+            "`{}` uses `{bf}` as a body_file, which is also a single-file capability name — \
+             the directory now reads as both forms at once. Name the body something else",
+            cap.manifest.id
+        );
+    }
+}

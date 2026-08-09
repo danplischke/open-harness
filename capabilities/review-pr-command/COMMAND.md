@@ -1,3 +1,11 @@
+---
+# The id defaults to the directory name; set it explicitly when they differ.
+id: review-pr
+name: Review PR
+description: Review the current pull request for correctness and tests.
+argument-hint: "[pr-number]"
+---
+
 Review pull request {{args}} for:
 
 - correctness and edge cases

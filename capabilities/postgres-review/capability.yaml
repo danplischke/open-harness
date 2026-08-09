@@ -1,0 +1,25 @@
+# The corpus's example of the **manifest** form for a document kind.
+#
+# `commit-style` next door is the same kind authored as a single `SKILL.md`,
+# and that is the ergonomic default — for a document kind the two forms are
+# equally expressive, so reach for a manifest only when it earns its place.
+# Here it does, twice over: the procedure body is long enough that it wants its
+# own reviewable file (`body_file`), and the Claude-only frontmatter below has
+# to sit in an `overrides` block so it lands on Claude and is stripped from the
+# other five harnesses' copies rather than leaking as an unknown key.
+#
+# Referenced by the `database-engineer` subagent's `skills:` list.
+id: postgres-review
+name: Postgres Review
+description: A review procedure for Postgres schema changes — migrations, indexes, and lock risk.
+version: "0.1.0"
+kind: skill
+skill:
+  allowed-tools: [read, grep, bash]
+  body_file: PROCEDURE.md
+overrides:
+  claude-code:
+    frontmatter:
+      # Claude-only: no other harness reads this, and emitting it everywhere
+      # would put a key in five files that nothing there understands.
+      user-invocable: true

@@ -101,7 +101,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 443 tests, green on Linux/macOS/Windows
+cargo test                            # 446 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -495,10 +495,10 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `src/scaffold.rs` + `src/capture.rs` + `src/matrix.rs` | `oh scaffold` / `oh capture` (+ its provenance sidecar) / the generated support matrix |
 | `src/api.rs` + `src/main.rs` | Stable embeddable API; the `oh` CLI |
 | `bindings/` | Python (uniffi) + Node/TS (napi) bindings |
-| `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
+| `capabilities/` | Real example capabilities — all eight portable kinds, in Python, Node and shell. Document kinds are authored as single files (`SKILL.md`, `RULE.md`, …); `postgres-review` is the one manifest + `body_file` example, and `tests/authoring.rs` gates that neither form becomes the only face of a kind |
 | `docs/` | mdBook site (concepts, authoring, dependencies, runtimes, plugins, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 443 tests: conformance (84) + sourcing & dependencies (67) + runtimes & provisioning (31) + `oh import` (31) + new kinds (24) + config/YAML (24) + deps vocabulary (21) + selection (21) + plugin import (21) + trust (21) + single-file (19) + CLI help & completions (13) + JSON→YAML migration (12) + adapter provenance (9) + `--locked` (9) + unit (7) + CLI arguments (7) + streamable-HTTP (6) + publishing (6) + authoring (5) + MCP bridge (3) + capture (2) |
+| `tests/` | 446 tests: conformance (84) + sourcing & dependencies (67) + runtimes & provisioning (31) + `oh import` (31) + new kinds (24) + config/YAML (24) + deps vocabulary (21) + selection (21) + plugin import (21) + trust (21) + single-file (19) + CLI help & completions (13) + JSON→YAML migration (12) + adapter provenance (9) + `--locked` (9) + unit (7) + CLI arguments (7) + streamable-HTTP (6) + publishing (6) + authoring (8) + MCP bridge (3) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies
