@@ -260,9 +260,9 @@ tool:
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Without the `mcp-http-tls` feature, `https` is refused honestly (no TLS),
+/// Without the `http-tls` feature, `https` is refused honestly (no TLS),
 /// pointing at native config — never a silent failure or a hang.
-#[cfg(not(feature = "mcp-http-tls"))]
+#[cfg(not(feature = "http-tls"))]
 #[test]
 fn http_bridge_refuses_https_with_a_clear_message() {
     let err = mcp::Client::connect_http(&HttpServerSpec {
@@ -279,7 +279,7 @@ fn http_bridge_refuses_https_with_a_clear_message() {
 
 /// With the feature on, `https` routes to the TLS transport — a closed port
 /// yields a connect/TLS error, NOT the "no TLS in this build" refusal.
-#[cfg(feature = "mcp-http-tls")]
+#[cfg(feature = "http-tls")]
 #[test]
 fn https_routes_to_the_tls_transport_when_enabled() {
     let err = mcp::Client::connect_http(&HttpServerSpec {

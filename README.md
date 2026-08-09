@@ -83,6 +83,9 @@ oh trust  --root --key acme-root.key --trust trust.yaml   # trust a root (delega
 oh keyring --key acme-root.key --capability caps/web --out keyring.yaml   # a root vouches for an author
 oh revoke --capability caps/web --trust trust.yaml --reason "compromised"
 
+# Publish a catalog (content-addressed archives + a registry index, ready for a CDN)
+oh pack --capabilities capabilities --base-url https://cdn.example.com --out dist
+
 # MCP→CLI bridge (for orgs whose harness MCP client is disabled)
 oh mcp list --id echo-bridge                              # speak MCP to a server through the shell
 oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
@@ -91,7 +94,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 317 tests, green on Linux/macOS/Windows
+cargo test                            # 343 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -202,10 +205,14 @@ When several capabilities target the **same file** — two permission policies o
 
 A **profile** names a set of **sources** and target harnesses; resolving it
 composes capabilities and writes a reproducible `open-harness.lock` pinning every
-capability (qualified name + version + a sha256 over its file tree) and every git
-source's exact SHA. Sources are a **local path**, a **git repo** (personal-repo
-sync — cloned, then pinned to a commit), or a **registry** — an index that maps
-names to their real local/git source, one point of indirection over many repos.
+capability (qualified name + version + a sha256 over its file tree), every git
+source's exact SHA, and every archive's sha256. Sources are a **local path**, a
+**git repo** (personal-repo sync — cloned, then pinned to a commit), an
+**archive** fetched by URL and pinned by content digest, or a **registry** — an
+index that maps names to their real source, one point of indirection over many
+repos. A registry index may itself be a local path, a `file://` URL, or fetched
+over `http(s)://`, so the catalog can live on a CDN
+([distribution](./docs/src/distribution.md)).
 
 ```yaml
 # open-harness.yaml
@@ -218,11 +225,20 @@ sources:
       url: https://github.com/me/my-caps
       rev: main
       subdir: capabilities
+  - http:
+      url: https://cdn.example.com/blobs/sha256/9f86…a08.tar
+      sha256: 9f86…a08
   - registry:
-      index: registry.yaml
+      index: https://cdn.example.com/registry.yaml
       name: acme-guards
       version: 1.2.0
 ```
+
+An `http` source is an **uncompressed tar**, always pinned: the digest is
+verified before anything is unpacked, the extractor refuses any entry that could
+write outside its destination, and the unpacked tree is cached by content
+address, so it is never re-fetched. `oh pack` produces exactly that tree —
+content-addressed archives plus a registry index — ready to upload.
 
 A source rarely gives you only what you want, so each one takes a `select`
 block — `include` / `exclude` globs over the qualified name or bare id,
@@ -368,7 +384,7 @@ existing MCP *server's* tools still be called through the allowlisted shell:
 agent never needs the harness's MCP client. It is a minimal, hand-rolled JSON-RPC
 2.0 client over **stdio** and **streamable-HTTP** (chunked / Content-Length JSON
 and SSE replies, `Mcp-Session-Id` threading); `http://` needs no dependency, and
-`https://` is available via the optional **`mcp-http-tls`** feature (rustls),
+`https://` is available via the optional **`http-tls`** feature (rustls),
 with `OPEN_HARNESS_CA_FILE` to trust a private/corporate CA. Every emitted bridge
 artifact carries a loud "the server still runs — this bridges the call path, not
 the server or its egress" caveat.
@@ -404,9 +420,11 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `src/runtime.rs` | Hardened execution: per-capability timeout, output cap, error taxonomy, cross-platform interpreters, `runtime.requires` pre-flight |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
-| `src/profile.rs` | Profiles + sources (local / git / registry / plugin), qualified names, selection, opt-in transitive acquisition → `open-harness.lock` |
+| `src/profile.rs` | Profiles + sources (local / git / http archive / registry / plugin), qualified names, selection, opt-in transitive acquisition → `open-harness.lock` |
 | `src/plugin.rs` | Importing a `.claude-plugin` bundle: portable kinds as themselves, hooks as `native` |
 | `src/deps.rs` | The dependency vocabulary: a documented semver subset, requirements, relations |
+| `src/publish.rs` | `oh pack`: capabilities → content-addressed archives + a registry index |
+| `src/archive.rs` | Deterministic tar writer + a hardened reader (no path escapes, no links) |
 | `src/trust.rs` | ed25519 signing/verification, trust store, root-of-trust keyrings, revocation, permissions |
 | `src/mcp.rs` | Minimal MCP client (stdio + streamable-HTTP, optional TLS) — the bridge runtime |
 | `src/scaffold.rs` + `src/capture.rs` + `src/matrix.rs` | `oh scaffold` / `oh capture` / the generated support matrix |
@@ -415,7 +433,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
 | `docs/` | mdBook site (concepts, authoring, dependencies, runtimes, plugins, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 317 tests: conformance (70) + sourcing & dependencies (40) + runtimes & provisioning (29) + new kinds (24) + deps vocabulary (21) + selection (21) + plugin import (21) + config/YAML (20) + single-file (19) + trust (15) + JSON→YAML migration (12) + `--locked` (9) + MCP bridge (7) + authoring (5) + capture (2) + unit (2) |
+| `tests/` | 343 tests: conformance (70) + sourcing & dependencies (55) + runtimes & provisioning (29) + new kinds (24) + deps vocabulary (21) + selection (21) + plugin import (21) + config/YAML (20) + single-file (19) + trust (15) + JSON→YAML migration (12) + `--locked` (9) + MCP bridge (7) + unit (7) + publishing (6) + authoring (5) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies
@@ -427,7 +445,8 @@ always available, so it is not feature-gated), `yaml-rust2` to read YAML, and
 `glob` for `select` patterns (string matching only — it never touches the
 filesystem — buying character classes and malformed-pattern errors).
 Everything else that would pull weight is **opt-in**: `ffi` (uniffi,
-for the Python binding), `mcp-http-tls` (rustls, for https on the bridge). The
+for the Python binding), `http-tls` (rustls, for https on the bridge and on
+remote registry indexes and archives). The
 line we draw: the *simple, fully-specified* wire formats — the stdio JSON-RPC
 client, the http client, hex/base64, and YAML *emission* (a closed value set: no
 anchors, no tags, no multi-document streams) — are hand-rolled to stay lean, but

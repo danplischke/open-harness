@@ -7,11 +7,13 @@
 
 pub mod adapters;
 pub mod api;
+pub mod archive;
 pub mod capture;
 pub mod config;
 pub mod deps;
 pub mod dispatch;
 pub mod event;
+pub mod http;
 pub mod kind;
 pub mod kinds;
 pub mod manifest;
@@ -20,6 +22,7 @@ pub mod mcp;
 pub mod model;
 pub mod plugin;
 pub mod profile;
+pub mod publish;
 pub mod runtime;
 pub mod scaffold;
 pub mod sync;
