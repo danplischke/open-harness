@@ -14,10 +14,10 @@ source](#what-exists-today). A CDN registry is that same concept with the index
 > **Status.** To stay honest about what ships versus what is proposed, every
 > concrete change is tagged **Implemented** or **Proposed** in
 > [Implementation](#implementation-implemented-vs-proposed). In prose: the
-> `Registry` source, the lockfile, the whole trust module, and — as of the first
-> slice — **fetching the index over HTTP(S)** exist today; an HTTP/tarball leaf
-> source (so the capability *bytes* come from the CDN too) and a publish command
-> do not.
+> `Registry` source, the lockfile, the whole trust module, **fetching the index
+> over HTTP(S)**, and **the archive leaf** (so the capability *bytes* come from
+> the CDN too) exist today; a publish command and signature verification of a
+> fetched archive do not.
 
 ## Two axes of distribution
 
@@ -60,13 +60,15 @@ resolver.
 | `Source::Registry { name, version, index }` | `profile.rs` | A **central JSON index** mapping capability names → their real source. |
 | `RegistryIndex` / `RegistryEntry` | `profile.rs` | The index schema (below). |
 | Index from a **URL** | `profile.rs` | `index` accepts an `http(s)://` URL, a `file://` URL, or a workdir-relative path. |
+| `Source::Http { url, sha256 }` | `profile.rs` | A digest-pinned **archive leaf**: the capability bytes themselves, fetched from the CDN. |
+| tar reader + hardened extractor | `archive.rs` | Unpacks an archive without letting it write outside its destination. |
 | Lockfile (`Lock`, `LockedSource`, `LockedCap`) | `profile.rs` | Pins id + version + fingerprint per capability, and each git source's commit SHA. |
 | Trust module | `trust.rs` | sha256 content digests, ed25519 signatures, a trust store, a root-of-trust keyring, and revocation. |
 | HTTP/1.1 + rustls client | `http.rs` (`http-tls` feature) | The shared transport, used by both the MCP bridge and registry fetches. |
 
-The conceptual model is done, and the index can already be CDN-hosted. What is
-missing is serving the capability *bytes* from the CDN (rather than a git clone)
-and a publish side to produce them.
+The conceptual model is done, and both the index and the capability bytes can
+already be CDN-hosted. What is missing is the **publish** side that produces them
+and signature verification on the way in.
 
 ### Hosting the index
 
@@ -105,7 +107,7 @@ each entry points at a `local` or `git` leaf source:
 ```
 
 For a CDN-native registry, an entry instead points at a content-addressed
-artifact (**Proposed** — see the `http` leaf below):
+artifact:
 
 ```json
 {
@@ -115,11 +117,11 @@ artifact (**Proposed** — see the `http` leaf below):
       "version": "1.2.0",
       "source": {
         "http": {
-          "url": "https://cdn.example.com/blobs/sha256/9f86d081…a08.tar.zst",
+          "url": "https://cdn.example.com/blobs/sha256/9f86d081…a08.tar",
           "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
         }
       },
-      "signer": "ed25519:3b6a27bc…"   // optional: author key fingerprint
+      "signer": "ed25519:3b6a27bc…"   // optional: author key fingerprint (not yet verified)
     }
   ]
 }
@@ -149,7 +151,7 @@ The standard fix is **immutable content + a tiny mutable pointer**:
 
 ```text
 s3://oh-registry/                       (origin behind CloudFront)
-  blobs/sha256/<digest>.tar.zst         # immutable, content-addressed
+  blobs/sha256/<digest>.tar             # immutable, content-addressed
                                         #   Cache-Control: public, max-age=31536000, immutable
   index/1.json  index/2.json  …         # immutable index snapshots
   registry.json                         # { "latest": "index/2.json" } — tiny, short TTL
@@ -213,9 +215,11 @@ applies unchanged:
   non-fatally, and the set is topologically ordered.
 - **Reproducibility.** The lock pins the resolved digest of every registry
   artifact, so `resolve` in CI reproduces exactly what a teammate resolved.
-- **Offline-testable.** A `file://` index over a fixture directory exercises the
-  entire path with no network, mirroring how git sourcing is already tested
-  against a throwaway local repo.
+- **Offline-testable.** A `file://` index and a `file://` archive exercise the
+  whole path with no network, and the HTTP path is covered by a loopback server —
+  mirroring how git sourcing is already tested against a throwaway local repo.
+- **Cached by content address.** An unpacked archive is keyed by its digest, so
+  it is never re-fetched and can never be a stale copy of different bytes.
 
 ## Implementation (Implemented vs Proposed)
 
@@ -235,23 +239,48 @@ applies unchanged:
   bridge and registry fetches, with TLS behind the `http-tls` feature
   (`mcp-http-tls` remains as a compatibility alias).
 
+- **`Source::Http { url, sha256, subdir }`** — the archive leaf: fetch → verify
+  the digest → unpack → scan, with lock kind `"http"` pinning `sha256:<digest>`
+  as the source's revision. `sha256` is **required**, so an unpinned remote
+  artifact cannot be expressed. The archive is an uncompressed tar, read by the
+  hand-rolled `archive.rs` (see [Archive format](#archive-format)).
+
 **Proposed (the delta to CDN-native):**
 
-1. **An `http` / tarball leaf source.** `Source::Http { url, sha256 }`:
-   download → verify the digest → unpack into the cache → scan. Lock kind
-   `"http"`, pinning the sha256. This is the fourth `Source` variant beside
-   `Local`/`Git`/`Registry`, and the reason a registry entry can resolve to CDN
-   bytes rather than a git clone.
-2. **A publish command.** `oh pack` / `oh registry publish`: package each
+1. **A publish command.** `oh pack` / `oh registry publish`: package each
    capability into a content-addressed tarball, compute its sha256 (reuse
    `capability_digest`), sign it, and emit/update the index snapshot + pointer.
    This is the capability-content analog of what `release.yml` does for the
-   binary.
-3. **Pin the cryptographic digest in the lock.** `LockedCap.fingerprint` today
-   is a non-cryptographic FNV-1a hash used for *drift* detection — distinct from
-   the sha256 `capability_digest` used for *integrity*. A remote artifact's pin
-   should record the sha256 (the content address), so the lock is the tamper
-   boundary, not just a drift check.
+   binary. Until it exists, a publisher uses `tar -cf` + `sha256sum` — which is
+   exactly what the archive leaf consumes.
+2. **Verify signatures on a fetched archive.** The digest pin makes an archive
+   *tamper-evident against the profile*; it does not yet check `capability.sig`
+   against the `TrustStore` on the way in, so `--require-signed` does not yet
+   gate an `http` source.
+3. **Pin the per-capability cryptographic digest in the lock.**
+   `LockedCap.fingerprint` is still a non-cryptographic FNV-1a hash used for
+   *drift* detection. The archive's sha256 is now pinned at the **source** level
+   (`LockedSource.rev`); doing the same per capability would make the lock a
+   tamper boundary for git and local sources too.
+
+### Archive format
+
+The archive is an **uncompressed tar**. `archive.rs` hand-rolls the reader,
+because tar is one of the *simple* wire formats this crate hand-rolls (fixed
+512-byte headers, octal fields) — while compression is not, and would mean a new
+dependency. A `.tar.gz` / `.tar.zst` / `.tar.xz` / `.tar.bz2` is recognised by
+its magic bytes and **refused by name**, never mis-read.
+
+This costs less than it looks: capability trees are small text files, and a CDN
+can still compress them **on the wire** (`Content-Encoding`) without changing the
+bytes the digest covers. Adding compressed archives later is a contained change
+(a decompressor in front of the same reader) and does not alter the index format.
+
+Extraction is the security-critical half, so the reader refuses anything that
+could write outside the destination — absolute paths, drive letters, any `..`
+component, symlinks and hardlinks, device nodes — and bounds entry count and
+unpacked size against a decompression-style bomb. The digest is verified
+**before** unpacking, so tampered bytes never reach the extractor at all.
 
 ## Non-goals & open decisions
 
@@ -263,6 +292,8 @@ applies unchanged:
 - **Unbounded single-file scale.** One index file is fine now. Sharding is a
   future step the `name → metadata` contract already permits; this design does
   not build it.
+- **Compressed archives.** Uncompressed tar only, deliberately — see
+  [Archive format](#archive-format). Refused by name, not mis-read.
 
 **Decisions to make deliberately:**
 

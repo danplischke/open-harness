@@ -88,7 +88,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 152 tests, green on Linux/macOS/Windows
+cargo test                            # 172 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -178,10 +178,13 @@ When several capabilities target the **same file** — two permission policies o
 
 A **profile** names a set of **sources** and target harnesses; resolving it
 composes capabilities and writes a reproducible `open-harness.lock` pinning every
-capability (id + version + content fingerprint) and every git source's exact SHA.
-Sources are a **local path**, a **git repo** (personal-repo sync — cloned, then
-pinned to a commit), or a **registry** — a JSON index that maps names to their
-real local/git source, one point of indirection over many repos.
+capability (id + version + content fingerprint), every git source's exact SHA,
+and every archive's sha256. Sources are a **local path**, a **git repo**
+(personal-repo sync — cloned, then pinned to a commit), an **archive** fetched by
+URL and pinned by content digest, or a **registry** — a JSON index that maps
+names to their real source, one point of indirection over many repos. A registry
+index may itself be a local path, a `file://` URL, or fetched over `http(s)://`,
+so the catalog can live on a CDN ([distribution](./docs/src/distribution.md)).
 
 ```jsonc
 // open-harness.json
@@ -189,9 +192,15 @@ real local/git source, one point of indirection over many repos.
   "sources": [
     { "local": { "path": "capabilities" } },
     { "git": { "url": "https://github.com/me/my-caps", "rev": "main", "subdir": "capabilities" } },
-    { "registry": { "index": "registry.json", "name": "acme-guards", "version": "1.2.0" } }
+    { "http": { "url": "https://cdn.example.com/blobs/sha256/9f86…a08.tar", "sha256": "9f86…a08" } },
+    { "registry": { "index": "https://cdn.example.com/registry.json", "name": "acme-guards" } }
   ] }
 ```
+
+An `http` source is an **uncompressed tar**, always pinned: the digest is
+verified before anything is unpacked, the extractor refuses any entry that could
+write outside its destination, and the unpacked tree is cached by content
+address, so it is never re-fetched.
 
 Capabilities may declare **`dependencies`** on other ids; the resolver reports
 unmet dependencies and cycles (loudly, non-fatally), orders the composed set so a
@@ -268,7 +277,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `src/runtime.rs` | Hardened execution: per-capability timeout, output cap, error taxonomy, cross-platform interpreters |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
-| `src/profile.rs` | Profiles + sources (local / git / registry) + transitive deps → `open-harness.lock` |
+| `src/profile.rs` | Profiles + sources (local / git / http archive / registry) + transitive deps → `open-harness.lock` |
 | `src/trust.rs` | ed25519 signing/verification, trust store, root-of-trust keyrings, revocation, permissions |
 | `src/mcp.rs` | Minimal MCP client (stdio + streamable-HTTP, optional TLS) — the bridge runtime |
 | `src/scaffold.rs` + `src/capture.rs` + `src/matrix.rs` | `oh scaffold` / `oh capture` / the generated support matrix |
@@ -277,7 +286,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
 | `docs/` | mdBook site (concepts, authoring guide, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 152 tests: conformance (70) + new kinds (22) + single-file (18) + trust (15) + sourcing (13) + MCP bridge (7) + authoring (5) + capture (2) |
+| `tests/` | 172 tests: conformance (70) + sourcing (27) + new kinds (24) + single-file (19) + trust (15) + MCP bridge (7) + authoring (5) + unit (3) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies

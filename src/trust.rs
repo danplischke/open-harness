@@ -86,7 +86,12 @@ fn collect(base: &Path, dir: &Path, out: &mut Vec<(String, String)>) -> Result<(
     Ok(())
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+/// `sha256` of a byte slice, hex-encoded (no `sha256:` prefix).
+///
+/// The digest of a *fetched artifact* — what a content-addressed URL names and
+/// what a profile pins — as opposed to [`capability_digest`], which hashes an
+/// unpacked directory tree.
+pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
     hex(&h.finalize())

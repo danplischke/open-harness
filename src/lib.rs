@@ -7,6 +7,7 @@
 
 pub mod adapters;
 pub mod api;
+pub mod archive;
 pub mod capture;
 pub mod dispatch;
 pub mod event;

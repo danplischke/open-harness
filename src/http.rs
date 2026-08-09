@@ -16,6 +16,7 @@
 //! Requests use `Connection: close`, so a response body is delimited by EOF;
 //! `Content-Length` and chunked transfer-encoding are both decoded.
 
+use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
@@ -51,9 +52,16 @@ fn msg(s: impl Into<String>) -> Error {
 }
 
 /// A parsed HTTP response (headers lower-cased for case-insensitive lookup).
+///
+/// The body is kept as **bytes**: a capability archive is binary, and decoding it
+/// as UTF-8 on the way in would corrupt it. Text callers ask for [`text`] /
+/// [`into_text`] explicitly.
+///
+/// [`text`]: Response::text
+/// [`into_text`]: Response::into_text
 pub struct Response {
     headers: Vec<(String, String)>,
-    body: String,
+    body: Vec<u8>,
 }
 
 impl Response {
@@ -71,14 +79,27 @@ impl Response {
         self.header("content-type").unwrap_or("")
     }
 
-    /// The decoded response body.
-    pub fn body(&self) -> &str {
+    /// The raw response body.
+    pub fn bytes(&self) -> &[u8] {
         &self.body
     }
 
-    /// Consume the response, yielding its body.
-    pub fn into_body(self) -> String {
+    /// Consume the response, yielding its raw body.
+    pub fn into_bytes(self) -> Vec<u8> {
         self.body
+    }
+
+    /// The body as UTF-8, replacing any invalid sequence.
+    pub fn text(&self) -> Cow<'_, str> {
+        String::from_utf8_lossy(&self.body)
+    }
+
+    /// Consume the response, yielding its body as UTF-8 (lossy).
+    pub fn into_text(self) -> String {
+        match String::from_utf8(self.body) {
+            Ok(s) => s,
+            Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+        }
     }
 }
 
@@ -336,10 +357,9 @@ fn parse_response(raw: &[u8]) -> Result<Response, Error> {
     } else {
         body_bytes.to_vec()
     };
-    let body = String::from_utf8_lossy(&body).into_owned();
 
     if status >= 400 {
-        let snippet: String = body.chars().take(200).collect();
+        let snippet: String = String::from_utf8_lossy(&body).chars().take(200).collect();
         return Err(msg(format!("HTTP {status}: {snippet}")));
     }
     Ok(Response { headers, body })

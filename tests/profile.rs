@@ -34,26 +34,77 @@ fn profile_from(v: serde_json::Value) -> Profile {
     Profile::from_json(&v.to_string()).expect("valid profile")
 }
 
-/// Serve `body` as `application/json` on an ephemeral loopback port, returning
-/// the index URL. Exercises the real HTTP transport with no network egress, so
-/// it runs on every platform (the same `TcpListener` trick as the MCP tests).
-fn serve_index(body: String) -> String {
+/// Serve `body` on an ephemeral loopback port, returning the URL of `name`.
+/// Exercises the real HTTP transport with no network egress, so it runs on every
+/// platform (the same `TcpListener` trick as the MCP tests).
+fn serve_bytes(body: Vec<u8>, content_type: &'static str, name: &str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
         for mut stream in listener.incoming().flatten() {
             let mut buf = [0u8; 2048];
             let _ = stream.read(&mut buf); // drain the request head
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
-            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&body);
             let _ = stream.flush();
         }
     });
-    format!("http://127.0.0.1:{port}/registry.json")
+    format!("http://127.0.0.1:{port}/{name}")
+}
+
+/// Serve a registry index as `application/json`.
+fn serve_index(body: String) -> String {
+    serve_bytes(body.into_bytes(), "application/json", "registry.json")
+}
+
+/// Build an uncompressed tar archive from `(name, typeflag, data)` entries —
+/// a minimal writer so the reader is tested against real archive bytes.
+/// Typeflags: `b'0'` regular, `b'5'` directory, `b'2'` symlink.
+fn tar(entries: &[(&str, u8, &[u8])]) -> Vec<u8> {
+    fn put(h: &mut [u8; 512], off: usize, s: &str) {
+        h[off..off + s.len()].copy_from_slice(s.as_bytes());
+    }
+    let mut out = Vec::new();
+    for (name, typeflag, data) in entries {
+        let mut h = [0u8; 512];
+        let nb = name.as_bytes();
+        h[..nb.len()].copy_from_slice(nb);
+        put(&mut h, 100, "0000644\0"); // mode
+        put(&mut h, 108, "0000000\0"); // uid
+        put(&mut h, 116, "0000000\0"); // gid
+        put(&mut h, 124, &format!("{:011o}\0", data.len()));
+        put(&mut h, 136, "00000000000\0"); // mtime
+        h[156] = *typeflag;
+        put(&mut h, 257, "ustar\0");
+        put(&mut h, 263, "00");
+        // The checksum is computed with its own field read as spaces.
+        for b in h.iter_mut().skip(148).take(8) {
+            *b = b' ';
+        }
+        let sum: u32 = h.iter().map(|&b| b as u32).sum();
+        put(&mut h, 148, &format!("{sum:06o}\0 "));
+        out.extend_from_slice(&h);
+        out.extend_from_slice(data);
+        out.resize(out.len() + (512 - data.len() % 512) % 512, 0);
+    }
+    out.resize(out.len() + 1024, 0); // two zero blocks terminate the archive
+    out
+}
+
+/// A one-capability archive plus its sha256 — the common fixture.
+fn cap_archive(id: &str, version: &str) -> (Vec<u8>, String) {
+    let manifest = cap_json(id, version, "skill", json!({ "skill": { "body": "hi" } }));
+    let bytes = tar(&[
+        (&format!("{id}/"), b'5', b""),
+        (&format!("{id}/capability.json"), b'0', manifest.as_bytes()),
+    ]);
+    let digest = open_harness::trust::sha256_hex(&bytes);
+    (bytes, digest)
 }
 
 /// A `file://` URL for `path` (absolute paths only, as the loader expects).
@@ -321,6 +372,256 @@ fn unreachable_remote_index_is_warned_not_silently_skipped() {
         r.warnings.iter().any(|w| w.contains("registry index")),
         "an unreachable index is loudly reported: {:?}",
         r.warnings
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+// ---- http archive sources (the CDN leaf) ----------------------------------
+
+#[test]
+fn http_source_unpacks_a_verified_archive() {
+    let wd = tmp("http-ok");
+    let (bytes, digest) = cap_archive("greeter", "2.1.0");
+    let url = serve_bytes(bytes, "application/x-tar", "greeter.tar");
+
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "http": { "url": url, "sha256": digest } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+
+    let ids: Vec<&str> = r
+        .capabilities
+        .iter()
+        .map(|c| c.manifest.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["greeter"], "the archive's capability resolved");
+    let src = &r.lock.sources[0];
+    assert_eq!(src.kind, "http");
+    assert_eq!(
+        src.rev.as_deref(),
+        Some(format!("sha256:{digest}").as_str()),
+        "the lock pins the archive's content digest"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn http_source_reads_a_file_url_and_caches_by_digest() {
+    let wd = tmp("http-file");
+    let (bytes, digest) = cap_archive("greeter", "1.0.0");
+    let archive = wd.join("greeter.tar");
+    std::fs::write(&archive, &bytes).unwrap();
+
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "http": { "url": file_url(&archive), "sha256": digest } }],
+    }));
+    let first = profile::resolve(&profile, &wd, None).unwrap();
+    assert_eq!(first.capabilities.len(), 1);
+
+    // Content-addressed: once unpacked, the artifact is never re-fetched. With
+    // the source gone, a re-resolve still succeeds from the cache.
+    std::fs::remove_file(&archive).unwrap();
+    let second = profile::resolve(&profile, &wd, None).unwrap();
+    assert_eq!(
+        second.capabilities.len(),
+        1,
+        "a cached archive resolves without the source: {:?}",
+        second.warnings
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn http_archive_digest_mismatch_stops_the_resolve() {
+    let wd = tmp("http-tamper");
+    let (bytes, _real) = cap_archive("greeter", "1.0.0");
+    let archive = wd.join("greeter.tar");
+    std::fs::write(&archive, &bytes).unwrap();
+    let wrong = "0".repeat(64);
+
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "http": { "url": file_url(&archive), "sha256": wrong } }],
+    }));
+    // Tamper evidence is fatal, not a warning someone can scroll past.
+    let Err(err) = profile::resolve(&profile, &wd, None) else {
+        panic!("a digest mismatch must fail");
+    };
+    assert!(
+        err.contains("digest mismatch"),
+        "the error names the mismatch: {err}"
+    );
+    assert!(
+        !wd.join(".open-harness/cache/http").join(&wrong).exists(),
+        "nothing is unpacked when the digest does not match"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn http_archive_with_a_traversal_entry_is_refused() {
+    let wd = tmp("http-slip");
+    let bytes = tar(&[("../escaped.json", b'0', b"{}")]);
+    let digest = open_harness::trust::sha256_hex(&bytes);
+    let archive = wd.join("evil.tar");
+    std::fs::write(&archive, &bytes).unwrap();
+
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "http": { "url": file_url(&archive), "sha256": digest } }],
+    }));
+    let Err(err) = profile::resolve(&profile, &wd, None) else {
+        panic!("a traversal entry must fail");
+    };
+    assert!(
+        err.contains("escapes the archive root"),
+        "the refusal names the escape: {err}"
+    );
+    assert!(
+        !wd.join(".open-harness/cache/escaped.json").exists()
+            && !wd.join(".open-harness/cache/http/escaped.json").exists(),
+        "the entry is never written outside the destination"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn http_archive_with_a_symlink_is_refused() {
+    let wd = tmp("http-link");
+    // A symlink is a write-through escape even when its own name looks tame.
+    let bytes = tar(&[("link", b'2', b"")]);
+    let digest = open_harness::trust::sha256_hex(&bytes);
+    let archive = wd.join("link.tar");
+    std::fs::write(&archive, &bytes).unwrap();
+
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "http": { "url": file_url(&archive), "sha256": digest } }],
+    }));
+    let Err(err) = profile::resolve(&profile, &wd, None) else {
+        panic!("a link entry must fail");
+    };
+    assert!(err.contains("link"), "the refusal names the link: {err}");
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn http_archive_that_is_compressed_is_refused_honestly() {
+    let wd = tmp("http-gz");
+    // gzip magic — a compressed stream must be named, not mis-read as tar.
+    let bytes = vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00];
+    let digest = open_harness::trust::sha256_hex(&bytes);
+    let archive = wd.join("c.tar.gz");
+    std::fs::write(&archive, &bytes).unwrap();
+
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "http": { "url": file_url(&archive), "sha256": digest } }],
+    }));
+    let Err(err) = profile::resolve(&profile, &wd, None) else {
+        panic!("a compressed archive must fail");
+    };
+    assert!(
+        err.contains("gzip") && err.contains("uncompressed"),
+        "the refusal names the format and the remedy: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn http_source_requires_a_pinned_digest() {
+    // An unpinned remote artifact would be trust-by-URL; the profile cannot
+    // even express it.
+    let err = Profile::from_json(
+        &json!({
+            "name": "p", "harnesses": ["claude-code"],
+            "sources": [{ "http": { "url": "https://cdn.example.com/x.tar" } }],
+        })
+        .to_string(),
+    )
+    .expect_err("an http source without `sha256` must be rejected");
+    assert!(
+        err.contains("sha256"),
+        "the error names the missing pin: {err}"
+    );
+}
+
+#[test]
+fn http_source_with_a_malformed_digest_is_rejected() {
+    let wd = tmp("http-baddigest");
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "http": { "url": "file:///nope.tar", "sha256": "abc" } }],
+    }));
+    let Err(err) = profile::resolve(&profile, &wd, None) else {
+        panic!("a short digest must fail");
+    };
+    assert!(
+        err.contains("64 hex characters"),
+        "the error explains the expected form: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn unreachable_archive_is_warned_not_silently_skipped() {
+    let wd = tmp("http-gone");
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "http": { "url": "file:///definitely/not/here.tar", "sha256": "a".repeat(64) } }],
+    }));
+    // A transport failure is recoverable — warn and compose the rest.
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    assert!(r.capabilities.is_empty());
+    assert!(
+        r.warnings.iter().any(|w| w.contains("http source")),
+        "an unreachable archive is loudly reported: {:?}",
+        r.warnings
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn remote_index_may_point_at_an_http_archive() {
+    let wd = tmp("registry-http");
+    let (bytes, digest) = cap_archive("greeter", "3.0.0");
+    let archive_url = serve_bytes(bytes, "application/x-tar", "greeter.tar");
+    // Unlike a `local` entry, a fetchable digest-pinned entry from a remote
+    // index is exactly what a CDN catalog is for.
+    let index_url = serve_index(
+        json!({
+            "capabilities": [
+                { "name": "greeter-pack", "version": "3.0.0",
+                  "source": { "http": { "url": archive_url, "sha256": digest } } }
+            ]
+        })
+        .to_string(),
+    );
+
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "registry": { "index": index_url, "name": "greeter-pack" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    let ids: Vec<&str> = r
+        .capabilities
+        .iter()
+        .map(|c| c.manifest.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["greeter"],
+        "a remote index resolved a CDN archive: {:?}",
+        r.warnings
+    );
+    let src = &r.lock.sources[0];
+    assert_eq!(src.kind, "registry", "registry provenance is kept");
+    assert_eq!(
+        src.rev.as_deref(),
+        Some(format!("sha256:{digest}").as_str()),
+        "the archive's digest is still pinned through the indirection"
     );
     let _ = std::fs::remove_dir_all(&wd);
 }

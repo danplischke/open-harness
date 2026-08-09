@@ -469,9 +469,9 @@ impl HttpState {
 /// document (object or batch array) for `application/json`.
 fn rpc_messages(resp: &http::Response) -> Vec<Value> {
     if resp.content_type().contains("text/event-stream") {
-        parse_sse(resp.body())
+        parse_sse(&resp.text())
     } else {
-        match serde_json::from_str::<Value>(resp.body()) {
+        match serde_json::from_str::<Value>(&resp.text()) {
             Ok(Value::Array(a)) => a,
             Ok(v) => vec![v],
             Err(_) => Vec::new(),

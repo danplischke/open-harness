@@ -3,14 +3,15 @@
 //!
 //! A **profile** is a named set of **sources** targeting a set of harnesses. A
 //! source resolves to capabilities from a **local path**, a **git repo**
-//! (personal-repo sync — cloned/fetched and pinned to a commit), or a
-//! **registry** (#21) — a JSON index mapping names to their real local/git
-//! source, one point of indirection over many repos. The index itself may be a
-//! local path, a `file://` URL, or fetched over `http(s)://` (a CDN-hosted
-//! catalog; see `docs/src/distribution.md`). Resolving a profile
+//! (personal-repo sync — cloned/fetched and pinned to a commit), an **archive**
+//! fetched by URL and pinned by content digest, or a **registry** (#21) — a JSON
+//! index mapping names to their real local/git/archive source, one point of
+//! indirection over many repos. The index itself may be a local path, a
+//! `file://` URL, or fetched over `http(s)://` (a CDN-hosted catalog; see
+//! `docs/src/distribution.md`). Resolving a profile
 //! composes the sources in order and writes an `open-harness.lock` pinning every
-//! resolved capability (id + version + content fingerprint) and every git
-//! source's exact commit — so a re-resolve is reproducible.
+//! resolved capability (id + version + content fingerprint), every git source's
+//! exact commit, and every archive's sha256 — so a re-resolve is reproducible.
 //!
 //! Composition also resolves the **dependency graph** (#23): capabilities may
 //! declare `dependencies` on other ids; the resolver reports unmet dependencies
@@ -52,13 +53,15 @@ fn default_profile_name() -> String {
 }
 
 /// Where a set of capabilities comes from. Externally tagged, e.g.
-/// `{"local": {"path": "capabilities"}}` or
-/// `{"git": {"url": "...", "rev": "main", "subdir": "capabilities"}}`.
+/// `{"local": {"path": "capabilities"}}`,
+/// `{"git": {"url": "...", "rev": "main", "subdir": "capabilities"}}`, or
+/// `{"http": {"url": "https://cdn/…​.tar", "sha256": "…"}}`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     Local(LocalSource),
     Git(GitSource),
+    Http(HttpSource),
     Registry(RegistrySource),
 }
 
@@ -81,6 +84,26 @@ pub struct GitSource {
 
 fn default_rev() -> String {
     "HEAD".to_string()
+}
+
+/// A capability archive fetched by URL and pinned by content digest — the
+/// CDN-hosted leaf (see `docs/src/distribution.md`). The archive is an
+/// uncompressed tar; `crate::archive` explains why compression is refused.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HttpSource {
+    /// Archive URL: `http(s)://` (fetched) or `file://` (read).
+    pub url: String,
+    /// Expected `sha256` of the archive bytes, hex — with or without a
+    /// `sha256:` prefix.
+    ///
+    /// **Required, deliberately.** Transport security authenticates the *hop*,
+    /// not the *artifact*; without a pin there is nothing to compare a download
+    /// against, so an unpinned remote source would be trust-by-URL. Making the
+    /// field mandatory means a profile cannot express that by accident.
+    pub sha256: String,
+    /// Subdirectory within the unpacked archive to scan. Defaults to its root.
+    #[serde(default)]
+    pub subdir: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -119,8 +142,12 @@ struct RegistryEntry {
 /// How long to wait on a remote registry index before giving up.
 const INDEX_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Is `spec` a URL the index is *fetched* from (rather than read from disk)?
-fn is_remote_index(spec: &str) -> bool {
+/// How long to wait on a capability archive before giving up. Longer than the
+/// index: an archive is a payload, not a small JSON catalog.
+const ARCHIVE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Is `spec` a URL that must be *fetched* (rather than read from disk)?
+fn is_remote_url(spec: &str) -> bool {
     spec.starts_with("http://") || spec.starts_with("https://")
 }
 
@@ -153,7 +180,7 @@ impl RegistryIndex {
     }
 
     fn read_text(spec: &str, workdir: &Path) -> Result<String, String> {
-        if is_remote_index(spec) {
+        if is_remote_url(spec) {
             let headers = [("Accept".to_string(), "application/json".to_string())];
             // The transport reports *that* TLS is missing; the remedy here is a
             // local index or a git source, not the MCP bridge's advice.
@@ -165,7 +192,7 @@ impl RegistryIndex {
                 ),
                 other => format!("fetch registry index '{spec}': {other}"),
             })?;
-            return Ok(resp.into_body());
+            return Ok(resp.into_text());
         }
         let path = match file_url_path(spec)? {
             Some(p) => p,
@@ -383,8 +410,115 @@ fn resolve_source(
                 caps,
             )))
         }
+        Source::Http(h) => resolve_http(h, workdir, warnings),
         Source::Registry(r) => resolve_registry(r, workdir, lock, warnings),
     }
+}
+
+/// Resolve an archive source: fetch, **verify the digest before unpacking**,
+/// unpack into a content-addressed cache, and scan the result.
+///
+/// The two failure modes are deliberately not alike. A transport failure is a
+/// loud skip — the artifact may be momentarily unreachable, and other sources
+/// should still compose. A **digest mismatch is tamper evidence**: the bytes are
+/// not what the profile pinned, so it stops the whole resolve rather than
+/// degrading into a warning someone can scroll past.
+fn resolve_http(
+    h: &HttpSource,
+    workdir: &Path,
+    warnings: &mut Vec<String>,
+) -> Result<Option<ResolvedSource>, String> {
+    let digest =
+        normalize_digest(&h.sha256).map_err(|e| format!("http source '{}': {e}", h.url))?;
+
+    // Content-addressed, so the digest *is* the cache key: an artifact that is
+    // already unpacked can never be a stale copy of a different one.
+    let root = workdir.join(".open-harness").join("cache").join("http");
+    let tree = root.join(&digest);
+    let marker = root.join(format!("{digest}.ok"));
+
+    if !marker.is_file() {
+        let bytes = match fetch_archive(&h.url) {
+            Ok(b) => b,
+            Err(e) => {
+                warnings.push(format!("http source '{}': {e}", h.url));
+                return Ok(None);
+            }
+        };
+        let actual = crate::trust::sha256_hex(&bytes);
+        if actual != digest {
+            return Err(format!(
+                "http source '{}': content digest mismatch — pinned sha256:{digest}, \
+                 downloaded sha256:{actual}. Refusing to unpack an artifact that is not \
+                 what the profile pinned.",
+                h.url
+            ));
+        }
+        // Unpack to a sibling and swap in, so an interrupted unpack cannot leave
+        // a half-written tree that a later run mistakes for complete. The marker
+        // is written last: it is the only completion signal.
+        let staging = root.join(format!("{digest}.unpacking"));
+        let _ = std::fs::remove_dir_all(&staging);
+        crate::archive::unpack_tar(&bytes, &staging)
+            .map_err(|e| format!("http source '{}': {e}", h.url))?;
+        let _ = std::fs::remove_dir_all(&tree);
+        std::fs::rename(&staging, &tree)
+            .map_err(|e| format!("http source '{}': install unpacked archive: {e}", h.url))?;
+        std::fs::write(&marker, format!("sha256:{digest}\n"))
+            .map_err(|e| format!("http source '{}': write cache marker: {e}", h.url))?;
+    }
+
+    let scan = match &h.subdir {
+        Some(s) => tree.join(s),
+        None => tree,
+    };
+    let caps = crate::manifest::discover(&scan)?;
+    Ok(Some((
+        h.url.clone(),
+        "http",
+        Some(format!("sha256:{digest}")),
+        h.subdir.clone(),
+        caps,
+    )))
+}
+
+/// Read an archive from an `http(s)://` URL (fetched) or a `file://` URL.
+///
+/// Unlike a registry index, a bare path is **not** accepted: an archive source
+/// exists to name a fetchable artifact, and a local directory of capabilities is
+/// already spelled `{"local": …}`.
+fn fetch_archive(url: &str) -> Result<Vec<u8>, String> {
+    if is_remote_url(url) {
+        let resp = crate::http::get(url, &[], ARCHIVE_TIMEOUT).map_err(|e| match e {
+            crate::http::Error::NoTls { host } => format!(
+                "this build has no TLS: cannot fetch the archive from https://{host}. \
+                 Rebuild with `--features http-tls`, or point `url` at a file:// URL, or use \
+                 a git or local source."
+            ),
+            other => format!("fetch archive: {other}"),
+        })?;
+        return Ok(resp.into_bytes());
+    }
+    let path = file_url_path(url)?.ok_or_else(|| {
+        format!("unsupported archive URL '{url}' (want http://, https://, or file://)")
+    })?;
+    std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))
+}
+
+/// Normalize a pinned digest to bare lowercase hex, rejecting anything that is
+/// not a full sha256.
+fn normalize_digest(s: &str) -> Result<String, String> {
+    let hex = s
+        .trim()
+        .strip_prefix("sha256:")
+        .unwrap_or(s.trim())
+        .to_ascii_lowercase();
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!(
+            "`sha256` must be 64 hex characters (optionally 'sha256:'-prefixed), got '{s}'"
+        ));
+    }
+    Ok(hex)
 }
 
 /// Resolve a registry source: load its index, find the named entry, and resolve
@@ -431,7 +565,7 @@ fn resolve_registry(
     // index is written elsewhere, so a `local` entry would resolve against the
     // consumer's workdir. Refuse loudly rather than read a path a remote file
     // chose.
-    if is_remote_index(index_spec) {
+    if is_remote_url(index_spec) {
         if let Source::Local(l) = &entry.source {
             warnings.push(format!(
                 "registry entry '{}' from remote index '{index_spec}' points at local path '{}' \
