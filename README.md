@@ -73,7 +73,7 @@ oh resolve                                                # sources → a pinned
 oh resolve --locked                                       # verify the lock instead of rewriting it (CI)
 oh sync    --into ./project                               # install + converge (idempotent)
 oh check   --into ./project --ci                          # drift detection (fails CI on drift)
-oh sync    --into ./project --uninstall                   # clean removal (managed files only)
+oh sync    --into ./project --uninstall                   # remove what open-harness wrote (your content is left alone)
 
 # Trust
 oh keygen --out author.key --label me                     # an ed25519 keypair
@@ -95,7 +95,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 349 tests, green on Linux/macOS/Windows
+cargo test                            # 389 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -185,10 +185,10 @@ invalidates any existing signature**. `oh migrate` says so; re-run `oh sign`.
 project and keeps it converged. It plans every capability across the target
 harnesses, groups the artifacts by their real on-disk path, and writes them
 idempotently — a second `sync` is a no-op, removing a capability **prunes** the
-file it owned, and `--uninstall` cleanly removes everything (managed files only;
-a hand-written file is never touched). Every write is tracked in a lockfile
-(`.open-harness/sync.lock.yaml`), so `check --into DIR --ci` fails CI when the
-installed config drifts (missing / modified / stale) from the source.
+file it owned, and `--uninstall` removes what open-harness put there. Every write
+is tracked in a lockfile (`.open-harness/sync.lock.yaml`), so
+`check --into DIR --ci` fails CI when the installed config drifts (missing /
+modified / stale) from the source.
 
 When several capabilities target the **same file** — two permission policies on
 `opencode.json`, or Windsurf + Copilot both on `.vscode/settings.json` — they are
@@ -202,6 +202,29 @@ When several capabilities target the **same file** — two permission policies o
   loudly flagged.
 - Nothing is silently dropped — hook **registrations** and **global (`~/…`)**
   paths are reported as manual steps, **Unsupported** targets as blocked.
+
+### Ownership: your files stay yours
+
+Those targets are **shared** — `.vscode/settings.json`, `opencode.json` and
+`CLAUDE.md` are yours, and open-harness is only one contributor to them. So it
+**never destroys content it did not write**. Every write and removal is gated on
+ownership, decided by the fingerprint the lockfile recorded for that file:
+
+- **absent** → created, owned outright.
+- **ours** (still matches the recorded fingerprint) → rewritten in place.
+- **foreign** (no lock entry, or you edited it since) → never overwritten. A
+  **JSON** target is *merged into* — your keys survive, ours are added, and the
+  file is marked **shared**. A **non-JSON** target can't be merged structurally,
+  so it is **blocked** and reported with the reason, and `oh sync` exits non-zero
+  rather than claiming a success it didn't achieve.
+
+A shared file is never deleted wholesale: the lockfile records the exact
+contribution, so a re-sync subtracts the old one before merging the new (a key we
+stop emitting stops appearing) and `--uninstall` subtracts it and leaves your
+file behind. A file you edited after we wrote it isn't removed at all — it's
+reported for you to resolve. Lockfile paths are re-validated on load rather than
+trusted, so a committed or hand-edited lockfile can't point a removal at
+`../../something-else`.
 
 ## Profiles, sources & dependencies
 
@@ -467,7 +490,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
 | `docs/` | mdBook site (concepts, authoring, dependencies, runtimes, plugins, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 349 tests: conformance (70) + sourcing & dependencies (61) + runtimes & provisioning (29) + new kinds (24) + deps vocabulary (21) + selection (21) + plugin import (21) + config/YAML (20) + single-file (19) + trust (15) + JSON→YAML migration (12) + `--locked` (9) + MCP bridge (7) + unit (7) + publishing (6) + authoring (5) + capture (2) |
+| `tests/` | 389 tests: conformance (84) + sourcing & dependencies (67) + runtimes & provisioning (31) + new kinds (24) + config/YAML (24) + deps vocabulary (21) + selection (21) + plugin import (21) + trust (21) + single-file (19) + JSON→YAML migration (12) + `--locked` (9) + unit (7) + CLI arguments (6) + streamable-HTTP (6) + publishing (6) + authoring (5) + MCP bridge (3) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies

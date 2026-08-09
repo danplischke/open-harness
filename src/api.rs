@@ -77,6 +77,10 @@ pub struct DispatchResult {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+    /// The event actually dispatched. Most harnesses fire one tool event for
+    /// every tool, so this is the registered event narrowed to the class of the
+    /// call that arrived — it is what decided which capabilities ran.
+    pub event: String,
     pub ran: Vec<String>,
     pub skipped: Vec<String>,
     pub errored: Vec<String>,
@@ -180,6 +184,7 @@ pub fn dispatch_with_limits(
     let out = crate::dispatch::dispatch_with_limits(h, &ev, &caps, &native, &limits);
     Ok(DispatchResult {
         exit_code: out.response.exit_code,
+        event: out.event.id(),
         stdout: out.response.stdout,
         stderr: out.response.stderr,
         ran: out.ran,

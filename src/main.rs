@@ -79,6 +79,10 @@ struct Opts {
     locked: bool,
     /// Confirm an action that executes code (`install --runtimes`).
     yes: bool,
+    /// `install --runtimes`: provision capabilities' declared dependencies.
+    runtimes: bool,
+    /// `matrix --markdown`: emit the support grid as a Markdown table.
+    markdown: bool,
     explain: bool,
     timeout_ms: u64,
     max_output_bytes: u64,
@@ -127,6 +131,8 @@ fn parse_opts(rest: &[String]) -> Opts {
         ci: false,
         locked: false,
         yes: false,
+        runtimes: false,
+        markdown: false,
         explain: false,
         timeout_ms: 0,
         max_output_bytes: 0,
@@ -160,45 +166,43 @@ fn parse_opts(rest: &[String]) -> Opts {
     while i < rest.len() {
         match rest[i].as_str() {
             "--harness" => {
-                o.harness = rest.get(i + 1).cloned();
+                o.harness = Some(value_for(rest, i));
                 i += 2;
             }
             "--event" => {
-                o.event = rest.get(i + 1).cloned();
+                o.event = Some(value_for(rest, i));
                 i += 2;
             }
             "--capabilities" => {
-                if let Some(p) = rest.get(i + 1) {
-                    o.capabilities = PathBuf::from(p);
-                }
+                o.capabilities = PathBuf::from(value_for(rest, i));
                 i += 2;
             }
             "--profile" => {
-                o.profile = rest.get(i + 1).map(PathBuf::from);
+                o.profile = Some(PathBuf::from(value_for(rest, i)));
                 i += 2;
             }
             "--capability" => {
-                o.capability_one = rest.get(i + 1).map(PathBuf::from);
+                o.capability_one = Some(PathBuf::from(value_for(rest, i)));
                 i += 2;
             }
             "--key" => {
-                o.key = rest.get(i + 1).map(PathBuf::from);
+                o.key = Some(PathBuf::from(value_for(rest, i)));
                 i += 2;
             }
             "--trust" => {
-                o.trust = rest.get(i + 1).map(PathBuf::from);
+                o.trust = Some(PathBuf::from(value_for(rest, i)));
                 i += 2;
             }
             "--label" => {
-                o.label = rest.get(i + 1).cloned();
+                o.label = Some(value_for(rest, i));
                 i += 2;
             }
             "--reason" => {
-                o.reason = rest.get(i + 1).cloned();
+                o.reason = Some(value_for(rest, i));
                 i += 2;
             }
             "--out" => {
-                o.out = rest.get(i + 1).map(PathBuf::from);
+                o.out = Some(PathBuf::from(value_for(rest, i)));
                 i += 2;
             }
             "--require-signed" => {
@@ -210,7 +214,7 @@ fn parse_opts(rest: &[String]) -> Opts {
                 i += 1;
             }
             "--keyring" => {
-                o.keyring = rest.get(i + 1).map(PathBuf::from);
+                o.keyring = Some(PathBuf::from(value_for(rest, i)));
                 i += 2;
             }
             "--deny-network" => {
@@ -222,51 +226,55 @@ fn parse_opts(rest: &[String]) -> Opts {
                 i += 1;
             }
             "--id" => {
-                o.id = rest.get(i + 1).cloned();
+                o.id = Some(value_for(rest, i));
                 i += 2;
             }
             "--command" => {
-                o.mcp_command = rest.get(i + 1).cloned();
+                o.mcp_command = Some(value_for(rest, i));
                 i += 2;
             }
             "--mcp-arg" => {
-                if let Some(a) = rest.get(i + 1) {
-                    o.mcp_args.push(a.clone());
-                }
+                o.mcp_args.push(value_for(rest, i));
                 i += 2;
             }
             "--url" => {
-                o.mcp_url = rest.get(i + 1).cloned();
+                o.mcp_url = Some(value_for(rest, i));
                 i += 2;
             }
             "--base-url" => {
-                o.base_url = rest.get(i + 1).cloned();
+                o.base_url = Some(value_for(rest, i));
                 i += 2;
             }
             "--header" => {
                 // `--header "Name: value"` (repeatable), for http MCP endpoints.
-                if let Some(h) = rest.get(i + 1) {
-                    if let Some((k, v)) = h.split_once(':') {
-                        o.mcp_headers
-                            .push((k.trim().to_string(), v.trim().to_string()));
+                let h = value_for(rest, i);
+                match h.split_once(':') {
+                    Some((k, v)) => o
+                        .mcp_headers
+                        .push((k.trim().to_string(), v.trim().to_string())),
+                    // Silently dropping it would send the request without the
+                    // header the user asked for — an auth header, usually.
+                    None => {
+                        eprintln!("`--header` wants \"Name: value\", got `{h}`");
+                        exit(2);
                     }
                 }
                 i += 2;
             }
             "--tool" => {
-                o.tool = rest.get(i + 1).cloned();
+                o.tool = Some(value_for(rest, i));
                 i += 2;
             }
             "--json" => {
-                o.json_args = rest.get(i + 1).cloned();
+                o.json_args = Some(value_for(rest, i));
                 i += 2;
             }
             "--kind" => {
-                o.scaffold_kind = rest.get(i + 1).cloned();
+                o.scaffold_kind = Some(value_for(rest, i));
                 i += 2;
             }
             "--lang" => {
-                o.scaffold_lang = rest.get(i + 1).cloned();
+                o.scaffold_lang = Some(value_for(rest, i));
                 i += 2;
             }
             "--project" => {
@@ -274,27 +282,23 @@ fn parse_opts(rest: &[String]) -> Opts {
                 i += 1;
             }
             "--local" => {
-                o.local = rest.get(i + 1).cloned();
+                o.local = Some(value_for(rest, i));
                 i += 2;
             }
             "--git" => {
-                o.git = rest.get(i + 1).cloned();
+                o.git = Some(value_for(rest, i));
                 i += 2;
             }
             "--timeout-ms" => {
-                o.timeout_ms = rest.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                o.timeout_ms = numeric_value(rest, i);
                 i += 2;
             }
             "--max-output-kb" => {
-                o.max_output_bytes = rest
-                    .get(i + 1)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(|kb| kb * 1024)
-                    .unwrap_or(0);
+                o.max_output_bytes = numeric_value(rest, i) * 1024;
                 i += 2;
             }
             "--into" => {
-                o.into = rest.get(i + 1).map(PathBuf::from);
+                o.into = Some(PathBuf::from(value_for(rest, i)));
                 i += 2;
             }
             "--dry-run" => {
@@ -317,19 +321,60 @@ fn parse_opts(rest: &[String]) -> Opts {
                 o.ci = true;
                 i += 1;
             }
+            "--runtimes" => {
+                o.runtimes = true;
+                i += 1;
+            }
+            "--markdown" => {
+                o.markdown = true;
+                i += 1;
+            }
             "--explain" => {
                 o.explain = true;
                 i += 1;
             }
+            // A flag we do not know is a typo, and absorbing it silently means
+            // running with the opposite of what was asked — `--require-signd`
+            // installs unsigned code, `--dry-run` misspelt writes the project.
+            other if other.starts_with('-') => {
+                eprintln!("unknown option `{other}`");
+                exit(2);
+            }
+            // Anything else is a positional argument (`oh mcp list`, `oh add
+            // <source>`), which subcommands read from `o.positional`.
             other => {
-                if !other.starts_with("--") {
-                    o.positional.push(other.to_string());
-                }
+                o.positional.push(other.to_string());
                 i += 1;
             }
         }
     }
     o
+}
+
+/// A numeric flag value, or exit. Parsing failure used to fall back to `0`,
+/// which means "use the default" — so `--timeout-ms 5o00` silently ran with the
+/// default timeout instead of the one asked for.
+fn numeric_value(rest: &[String], i: usize) -> u64 {
+    let raw = value_for(rest, i);
+    raw.parse::<u64>().unwrap_or_else(|_| {
+        eprintln!("option `{}` wants a number, got `{raw}`", rest[i]);
+        exit(2);
+    })
+}
+
+/// The value following a flag, or exit saying which flag is missing one.
+///
+/// Reading a missing value as `None` and moving on silently drops the flag —
+/// `oh run --harness` would dispatch against no harness at all — and swallows
+/// the next argument along with it.
+fn value_for(rest: &[String], i: usize) -> String {
+    match rest.get(i + 1) {
+        Some(v) if !v.starts_with("--") => v.clone(),
+        _ => {
+            eprintln!("option `{}` needs a value", rest[i]);
+            exit(2);
+        }
+    }
 }
 
 /// The target harness set for the generative commands (`emit`/`sync`/`check`):
@@ -347,12 +392,16 @@ fn select_harnesses(o: &Opts) -> Vec<Harness> {
 fn load_caps(o: &Opts) -> Vec<LoadedCapability> {
     match discover(&o.capabilities) {
         Ok(c) => c,
+        // `discover` promises that a malformed capability is a hard error and
+        // never a silent skip. Returning an empty set here undid that: the
+        // caller could not tell "nothing to load" from "could not read any of
+        // it", and reported the former.
         Err(e) => {
             eprintln!(
                 "could not load capabilities from {}: {e}",
                 o.capabilities.display()
             );
-            Vec::new()
+            exit(1);
         }
     }
 }
@@ -384,8 +433,19 @@ fn cmd_run(rest: &[String]) {
 
     if o.explain {
         eprintln!(
-            "[explain] harness={harness} event={event} ran={:?} skipped={:?} errored={:?} -> exit={}",
-            result.ran, result.skipped, result.errored, result.exit_code
+            // Show the dispatched event, and the registered one alongside it when
+            // the tool's class narrowed it — that is what decided who ran.
+            "[explain] harness={harness} event={}{} ran={:?} skipped={:?} errored={:?} -> exit={}",
+            result.event,
+            if result.event == event {
+                String::new()
+            } else {
+                format!(" (registered {event})")
+            },
+            result.ran,
+            result.skipped,
+            result.errored,
+            result.exit_code
         );
     }
     if !result.stdout.is_empty() {
@@ -702,10 +762,7 @@ fn cmd_trust(rest: &[String]) {
             });
             (key.public_key, o.label.clone().unwrap_or(key.label))
         } else if let Some(dir) = o.capability_one.clone() {
-            let sig = trust::Signature::load(&dir).unwrap_or_else(|| {
-                eprintln!("no {} in {}", trust::SIG_NAME, dir.display());
-                exit(1);
-            });
+            let sig = require_signature(&dir);
             (sig.public_key, o.label.clone().unwrap_or_default())
         } else {
             eprintln!("trust --root requires --key ROOT_KEYFILE or --capability DIR");
@@ -729,10 +786,7 @@ fn cmd_trust(rest: &[String]) {
         eprintln!("trust requires --capability DIR (whose signer to trust)");
         exit(2);
     };
-    let Some(sig) = trust::Signature::load(&dir) else {
-        eprintln!("no {} in {}", trust::SIG_NAME, dir.display());
-        exit(1);
-    };
+    let sig = require_signature(&dir);
     let label = o.label.clone().unwrap_or_default();
     let fp = trust::fingerprint(&sig.public_key);
     if store.add(&sig.public_key, &label) {
@@ -746,6 +800,27 @@ fn cmd_trust(rest: &[String]) {
         exit(1);
     } else {
         println!("already trusted: {fp}");
+    }
+}
+
+/// The signature beside a capability, or exit explaining why there isn't one.
+/// Keeps the two failures distinct: a capability that was never signed, and one
+/// whose signature file is there but broken.
+fn require_signature(dir: &std::path::Path) -> trust::Signature {
+    match trust::Signature::load(dir) {
+        Ok(Some(sig)) => sig,
+        Ok(None) => {
+            eprintln!(
+                "no {} in {} (sign it first)",
+                trust::SIG_NAME,
+                dir.display()
+            );
+            exit(1);
+        }
+        Err(e) => {
+            eprintln!("{}: {e}", dir.display());
+            exit(1);
+        }
     }
 }
 
@@ -765,14 +840,7 @@ fn cmd_keyring(rest: &[String]) {
         eprintln!("{e}");
         exit(1);
     });
-    let sig = trust::Signature::load(&dir).unwrap_or_else(|| {
-        eprintln!(
-            "no {} in {} (sign it first)",
-            trust::SIG_NAME,
-            dir.display()
-        );
-        exit(1);
-    });
+    let sig = require_signature(&dir);
     let author = trust::TrustedKey {
         public_key: sig.public_key,
         label: o.label.clone().unwrap_or_default(),
@@ -803,10 +871,7 @@ fn cmd_revoke(rest: &[String]) {
         eprintln!("revoke requires --capability DIR (whose signer to revoke)");
         exit(2);
     };
-    let Some(sig) = trust::Signature::load(&dir) else {
-        eprintln!("no {} in {}", trust::SIG_NAME, dir.display());
-        exit(1);
-    };
+    let sig = require_signature(&dir);
     let trust_path = o
         .trust
         .clone()
@@ -1014,6 +1079,10 @@ fn cmd_sync(rest: &[String]) {
             exit(1);
         });
         print_apply_report(&report, "uninstall", &into);
+        if report.has_blocked() {
+            eprintln!("\nsome files were left in place: exiting non-zero");
+            exit(1);
+        }
         return;
     }
 
@@ -1052,6 +1121,12 @@ fn cmd_sync(rest: &[String]) {
         exit(1);
     });
     print_apply_report(&report, "sync", &into);
+    // A blocked target means the requested state is not on disk. Reporting it
+    // and still exiting 0 would be the silent-success lie this project forbids.
+    if report.has_blocked() {
+        eprintln!("\nsome targets were not installed: exiting non-zero");
+        exit(1);
+    }
 }
 
 fn cmd_check(rest: &[String]) {
@@ -1150,9 +1225,17 @@ fn print_apply_report(report: &ApplyReport, verb: &str, into: &std::path::Path) 
             ChangeAction::Update => "~ update   ",
             ChangeAction::Unchanged => "· unchanged",
             ChangeAction::Prune => "－ prune    ",
+            ChangeAction::Reduce => "－ reduce   ",
+        };
+        // A shared file is one open-harness merged into rather than owns, so say
+        // so on every line — it changes what a later uninstall will do to it.
+        let shared = if c.shared {
+            "  (shared — merged)"
+        } else {
+            ""
         };
         println!(
-            "  {mark} {}{}",
+            "  {mark} {}{}{shared}",
             c.path,
             provenance(&c.harnesses, &c.sources)
         );
@@ -1161,11 +1244,12 @@ fn print_apply_report(report: &ApplyReport, verb: &str, into: &std::path::Path) 
         println!("  (no managed files)");
     }
     println!(
-        "\n  {} created, {} updated, {} unchanged, {} pruned",
+        "\n  {} created, {} updated, {} unchanged, {} pruned, {} reduced",
         report.count(ChangeAction::Create),
         report.count(ChangeAction::Update),
         report.count(ChangeAction::Unchanged),
         report.count(ChangeAction::Prune),
+        report.count(ChangeAction::Reduce),
     );
     if !report.conflicts.is_empty() {
         println!("\n  composition conflicts resolved:");
@@ -1175,7 +1259,23 @@ fn print_apply_report(report: &ApplyReport, verb: &str, into: &std::path::Path) 
             }
         }
     }
+    print_blocked(&report.blocked);
     print_deferred(&report.deferred);
+}
+
+/// Files open-harness refused to touch. Always shown, and the reason with them —
+/// a refusal that is not reported is indistinguishable from a silent drop.
+fn print_blocked(blocked: &[sync::Blocked]) {
+    if blocked.is_empty() {
+        return;
+    }
+    println!(
+        "\n  blocked: {} file(s) open-harness will not write over",
+        blocked.len()
+    );
+    for b in blocked {
+        println!("    ✗ {}: {}", b.path, b.reason);
+    }
 }
 
 fn print_drift_report(report: &DriftReport, into: &std::path::Path) {
@@ -1203,6 +1303,7 @@ fn print_drift_report(report: &DriftReport, into: &std::path::Path) {
         report.count(DriftKind::Modified),
         report.count(DriftKind::Stale),
     );
+    print_blocked(&report.blocked);
     print_deferred(&report.deferred);
     println!(
         "\n  {}",
@@ -1495,7 +1596,7 @@ fn collect_migratable(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
 /// for the same reason.
 fn cmd_install(rest: &[String]) {
     let o = parse_opts(rest);
-    if !rest.iter().any(|a| a == "--runtimes") {
+    if !o.runtimes {
         eprintln!("oh install --runtimes [--capabilities DIR | --profile FILE] [--yes]");
         exit(2);
     }
@@ -1870,9 +1971,10 @@ fn add_harness(v: &mut serde_json::Value, harness: &str) {
 }
 
 fn cmd_matrix(rest: &[String]) {
+    let o = parse_opts(rest);
     // The matrix is generated from the adapters (open_harness::matrix), the same
     // source the docs table is generated from — never hand-maintained.
-    if rest.iter().any(|a| a == "--markdown") {
+    if o.markdown {
         print!("{}", open_harness::matrix::markdown());
         return;
     }

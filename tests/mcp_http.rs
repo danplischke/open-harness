@@ -293,3 +293,78 @@ fn https_routes_to_the_tls_transport_when_enabled() {
         "https must reach the TLS transport, not the no-TLS refusal, got: {err}"
     );
 }
+
+// ---- nothing may break out of its own header line -------------------------
+
+/// A header value carrying `\r\n` would splice extra headers into the request,
+/// and a second blank line would end it entirely so a whole forged request rides
+/// along the connection. These strings come from a capability manifest's
+/// `tool.server.headers`, an `oh mcp --header` argument, and the environment
+/// variable named by `bearer_token_env` — none of them ours.
+///
+/// The refusal happens before a socket is opened, so an unreachable port is
+/// enough: reaching a connection error would mean the request was already built.
+#[test]
+fn a_header_cannot_forge_further_headers() {
+    let unreachable = "http://127.0.0.1:1/mcp";
+    let poisoned = [
+        ("X-Test", "ok\r\nX-Injected: yes"),
+        ("X-Test", "ok\nX-Injected: yes"),
+        ("X-Test", "ok\rX-Injected: yes"),
+        ("X-Test", "ok\r\n\r\nGET /admin HTTP/1.1"),
+        ("X-Test\r\nX-Injected", "ok"),
+        ("X Test", "ok"),
+        ("", "ok"),
+    ];
+    for (name, value) in poisoned {
+        let text = match open_harness::http::post(
+            unreachable,
+            "{}",
+            &[(name.to_string(), value.to_string())],
+            std::time::Duration::from_millis(200),
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a header that breaks its line must be refused: {name:?}={value:?}"),
+        };
+        assert!(
+            text.contains("header"),
+            "must be refused as a bad header, not attempted: {name:?}={value:?} -> {text}"
+        );
+    }
+
+    // An ordinary header is still accepted (it fails on the connection instead).
+    let text = match open_harness::http::post(
+        unreachable,
+        "{}",
+        &[(
+            "Authorization".to_string(),
+            "Bearer abc.def-123".to_string(),
+        )],
+        std::time::Duration::from_millis(200),
+    ) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("nothing is listening on port 1"),
+    };
+    assert!(
+        !text.contains("header"),
+        "a valid header must not be rejected: {text}"
+    );
+}
+
+/// The URL's host and path land in the request line and `Host` header, so they
+/// can forge headers exactly as a header value can.
+#[test]
+fn a_url_cannot_forge_headers_either() {
+    for url in [
+        "http://127.0.0.1:1/mcp\r\nX-Injected: yes",
+        "http://127.0.0.1:1/path with space",
+        "http://evil\r\nX-Injected: yes/mcp",
+    ] {
+        let text =
+            match open_harness::http::post(url, "{}", &[], std::time::Duration::from_millis(200)) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("a URL that breaks the request line must be refused: {url:?}"),
+            };
+        assert!(text.contains("invalid character"), "{url:?} -> {text}");
+    }
+}

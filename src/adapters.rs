@@ -8,6 +8,15 @@
 //!   3. **How the capability is registered** — JSON, TOML, an executable file,
 //!      or a generated plugin/extension.
 //!
+//! There is a fourth disagreement that shows up at *runtime*: how granular the
+//! tool event is. Cursor and Windsurf fire a separate native event per tool
+//! class, so a registration's class is the truth. Everyone else fires one event
+//! for every tool, so it is only a claim about the binding — several normalized
+//! events collapse onto that one native name, and the call itself could be
+//! anything. [`Harness::refine`] closes the gap by classifying the reported tool
+//! name ([`tool_class_of`]), so the dispatched event describes the call rather
+//! than the registration.
+//!
 //! Confidence: Claude Code, Gemini, Windsurf, and Cline conventions are well
 //! documented. Codex and Cursor were validated against primary docs and their
 //! adapters corrected (#5) — see `tests/fixtures/{codex,cursor}/` for the
@@ -246,9 +255,56 @@ impl Harness {
         }
     }
 
+    /// Narrow a registered event to the class of the call that actually arrived.
+    ///
+    /// Most harnesses expose **one** tool event (`PreToolUse` and friends) that
+    /// fires for every tool, so the class in a registration is a claim about the
+    /// binding, not about the call. Left unrefined that claim reaches the
+    /// capability as fact: a `pre.tool.shell` registration on Claude hands a
+    /// guard `"tool_class":"shell"` for a `Read`, and every class-scoped binding
+    /// fires on every tool. Classifying the reported tool name fixes both — the
+    /// payload describes the real call, and `pre.tool.shell` bindings run on
+    /// shell calls.
+    ///
+    /// Only ever *replaces* the class, never invents one: a harness whose tool
+    /// names we cannot classify (or an event carrying no tool) keeps the
+    /// registered class, which is exactly the previous behavior.
+    pub fn refine(&self, native: &Value, ev: &NormEvent) -> NormEvent {
+        if ev.subject != SubjectKind::Tool {
+            return *ev;
+        }
+        let name = self.tool_name(native);
+        match tool_class_of(*self, &name) {
+            Some(class) => NormEvent {
+                tool_class: Some(class),
+                ..*ev
+            },
+            None => *ev,
+        }
+    }
+
+    /// The tool name this harness reports, in its own spelling.
+    fn tool_name(&self, native: &Value) -> String {
+        match self {
+            // Windsurf nests the tool under `tool: { name, args }`.
+            Harness::Windsurf => native
+                .get("tool")
+                .and_then(|t| t.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            // Cursor's per-class payloads mostly carry no name at all; the ones
+            // that do (beforeMCPExecution) use `tool_name` like everyone else.
+            _ => str_at(native, "tool_name"),
+        }
+    }
+
     /// Decode this harness's native stdin payload into the canonical shape. The
     /// field-name divergence lives here; the crux divergence (deny encoding)
     /// lives in `encode`.
+    ///
+    /// `ev` should already be [`refine`](Self::refine)d — [`crate::dispatch`]
+    /// does that — so the `event` this puts in the payload describes the call.
     pub fn decode(&self, native: &Value, ev: &NormEvent) -> CanonicalPayload {
         let tool = match ev.subject {
             SubjectKind::Tool => Some(match self {
@@ -398,6 +454,15 @@ impl Harness {
                 }
             }
         }
+        let collapsed = collapse_targets(&mut targets);
+        for (name, from, to) in &collapsed {
+            warnings.push(format!(
+                "{} share the one native `{name}` event on this harness, which fires for every \
+                 tool — registered once as `{to}`; the dispatcher narrows it to the real tool \
+                 class per call, so each binding still runs on its own calls",
+                from.join(" + ")
+            ));
+        }
         let cmd = |cev: &NormEvent| format!("oh run --harness {} --event {}", self.id(), cev.id());
         let mut out = String::new();
         out.push_str(&format!(
@@ -470,6 +535,110 @@ impl Harness {
             }
         }
         out
+    }
+}
+
+/// Collapse targets that land on the **same native event**, in place.
+///
+/// The registration maps native event → command, so two normalized events that
+/// resolve to one native name (Claude sends both `pre.tool.any` and
+/// `pre.tool.shell` to `PreToolUse`) used to overwrite each other and one
+/// binding vanished with no warning. They are one native event, so they get one
+/// command, at the widest class the event actually fires for —
+/// [`Harness::refine`] narrows it per call, so both bindings still run on the
+/// calls they asked for. Returns `(native name, collapsed ids, kept id)` per
+/// collapse so the caller can report it.
+fn collapse_targets(targets: &mut Vec<(String, NormEvent)>) -> Vec<(String, Vec<String>, String)> {
+    let mut notes = Vec::new();
+    let mut seen: Vec<(String, NormEvent)> = Vec::new();
+    for (name, ev) in targets.iter() {
+        match seen.iter_mut().find(|(n, _)| n == name) {
+            None => seen.push((name.clone(), *ev)),
+            Some((_, kept)) if *kept == *ev => {}
+            Some((_, kept)) => {
+                // Same native event, different normalized class: widen to the
+                // class that native event really covers.
+                let widened = if kept.subject == SubjectKind::Tool && kept.phase == ev.phase {
+                    NormEvent::tool(kept.phase, ToolClass::Any)
+                } else {
+                    *kept
+                };
+                notes.push((name.clone(), vec![kept.id(), ev.id()], widened.id()));
+                *kept = widened;
+            }
+        }
+    }
+    *targets = seen;
+    notes
+}
+
+/// Classify a harness's tool by the **name it reports**, so a coarse native
+/// event can be narrowed to the call that actually happened (see
+/// [`Harness::refine`]).
+///
+/// `None` means "not classifiable here", and is the safe answer: the registered
+/// class stands, so nothing that fired before stops firing because a name is
+/// missing from a table. Confidence matches the rest of this module — Claude's
+/// and OpenCode's names are exercised by the test suite; Gemini's and Cline's
+/// are documentation-derived; Codex only ever fires this event for its shell
+/// tool. Cursor and Windsurf need no table: both split "before a tool" into
+/// per-class native events, so their registered class is already the truth.
+pub fn tool_class_of(harness: Harness, tool_name: &str) -> Option<ToolClass> {
+    if tool_name.is_empty() {
+        return None;
+    }
+    // The `mcp__<server>__<tool>` convention is shared by the harnesses that
+    // namespace MCP tools into the ordinary tool surface.
+    if tool_name.starts_with("mcp__") {
+        return Some(ToolClass::Mcp);
+    }
+    match harness {
+        Harness::Claude => match tool_name {
+            "Bash" | "BashOutput" | "KillShell" => Some(ToolClass::Shell),
+            "Read" | "Glob" | "Grep" | "NotebookRead" => Some(ToolClass::FileRead),
+            "Write" => Some(ToolClass::FileWrite),
+            "Edit" | "MultiEdit" | "NotebookEdit" => Some(ToolClass::FileEdit),
+            "WebFetch" | "WebSearch" => Some(ToolClass::Web),
+            _ => None,
+        },
+        // Codex fires PreToolUse for the shell tool only, so the name is a
+        // confirmation rather than a discriminator.
+        Harness::Codex => match tool_name {
+            "shell" | "local_shell" | "container.exec" => Some(ToolClass::Shell),
+            _ => None,
+        },
+        Harness::Gemini => match tool_name {
+            "run_shell_command" => Some(ToolClass::Shell),
+            "read_file" | "read_many_files" | "glob" | "search_file_content" => {
+                Some(ToolClass::FileRead)
+            }
+            "write_file" => Some(ToolClass::FileWrite),
+            "replace" => Some(ToolClass::FileEdit),
+            "web_fetch" | "google_web_search" => Some(ToolClass::Web),
+            _ => None,
+        },
+        Harness::Cline => match tool_name {
+            "execute_command" => Some(ToolClass::Shell),
+            "read_file" | "search_files" | "list_files" | "list_code_definition_names" => {
+                Some(ToolClass::FileRead)
+            }
+            "write_to_file" => Some(ToolClass::FileWrite),
+            "replace_in_file" => Some(ToolClass::FileEdit),
+            "use_mcp_tool" | "access_mcp_resource" => Some(ToolClass::Mcp),
+            _ => None,
+        },
+        Harness::OpenCode => match tool_name {
+            "bash" => Some(ToolClass::Shell),
+            "read" | "grep" | "glob" | "list" => Some(ToolClass::FileRead),
+            "write" => Some(ToolClass::FileWrite),
+            "edit" | "patch" => Some(ToolClass::FileEdit),
+            "webfetch" => Some(ToolClass::Web),
+            _ => None,
+        },
+        // Per-class native events already carry the truth (Cursor, Windsurf), or
+        // there is no documented tool vocabulary to key on (Pi), or no hooks at
+        // all (Aider, Copilot, Antigravity).
+        _ => None,
     }
 }
 

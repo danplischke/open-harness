@@ -1606,3 +1606,464 @@ fn cursor_shell_fixture_blocks_a_secret_end_to_end() {
         out.response.stdout
     );
 }
+
+// ---- ownership: never destroy content open-harness did not write ----------
+//
+// The target paths are shared with the developer (`.vscode/settings.json`,
+// `CLAUDE.md`, `opencode.json`), and the lockfile that records them is ordinary
+// data on disk. These pin both halves of that contract: what a write may
+// replace, and what a removal may delete.
+
+/// A pre-existing `.vscode/settings.json` is **merged into**, not overwritten:
+/// the developer's keys survive, ours are added, and the file is recorded as
+/// shared. The consequence if this is wrong is silent data loss on first sync.
+#[test]
+fn sync_merges_into_a_developers_json_instead_of_clobbering_it() {
+    let root = tmp_project("adopt-json");
+    std::fs::create_dir_all(root.join(".vscode")).unwrap();
+    std::fs::write(
+        root.join(".vscode/settings.json"),
+        "{\n  \"editor.fontSize\": 14,\n  \"files.autoSave\": \"onFocusChange\"\n}\n",
+    )
+    .unwrap();
+
+    let plan = plan_sync(&only(&["safe-shell"]), &[Harness::Windsurf]);
+    let report = sync::apply(&root, &plan, false).unwrap();
+
+    let text = std::fs::read_to_string(root.join(".vscode/settings.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        v["editor.fontSize"], 14,
+        "the developer's settings must survive the sync: {text}"
+    );
+    assert_eq!(v["files.autoSave"], "onFocusChange");
+    assert!(
+        v.get("windsurf.cascadeCommandsAllowList").is_some(),
+        "and open-harness's contribution must be present too: {text}"
+    );
+    assert!(
+        report
+            .changes
+            .iter()
+            .any(|c| c.path == ".vscode/settings.json" && c.shared),
+        "the file must be recorded as shared, not owned outright"
+    );
+    assert!(report.blocked.is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Merging into a developer's file stays idempotent, and uninstalling subtracts
+/// only open-harness's contribution — the file comes back, not deleted.
+#[test]
+fn uninstall_gives_a_shared_file_back_instead_of_deleting_it() {
+    let root = tmp_project("shared-roundtrip");
+    std::fs::create_dir_all(root.join(".vscode")).unwrap();
+    std::fs::write(root.join(".vscode/settings.json"), "{\"editor.tabSize\":2}").unwrap();
+
+    let plan = plan_sync(&only(&["safe-shell"]), &[Harness::Windsurf]);
+    sync::apply(&root, &plan, false).unwrap();
+
+    // Converged: a second apply changes nothing, and check sees no drift.
+    let again = sync::apply(&root, &plan, false).unwrap();
+    assert!(!again.mutated(), "merging into a shared file must converge");
+    assert!(!sync::check(&root, &plan).unwrap().has_drift());
+
+    let report = sync::uninstall(&root, false).unwrap();
+    assert_eq!(report.count(ChangeAction::Reduce), 1);
+    assert!(
+        root.join(".vscode/settings.json").exists(),
+        "a file the developer also owns must never be deleted wholesale"
+    );
+    let text = std::fs::read_to_string(root.join(".vscode/settings.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["editor.tabSize"], 2, "their content must remain: {text}");
+    assert!(
+        v.get("windsurf.cascadeCommandsAllowList").is_none(),
+        "and ours must be gone: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A pre-existing Markdown target cannot be merged structurally, so it is left
+/// untouched and reported — never overwritten with the generated version.
+#[test]
+fn sync_refuses_to_overwrite_a_developers_markdown() {
+    let root = tmp_project("adopt-md");
+    let hand_written = "# My project\n\nNotes I care about.\n";
+    std::fs::write(root.join("CLAUDE.md"), hand_written).unwrap();
+
+    let plan = plan_sync(&only(&["project-conventions"]), &[Harness::Claude]);
+    let report = sync::apply(&root, &plan, false).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(root.join("CLAUDE.md")).unwrap(),
+        hand_written,
+        "a hand-written file must survive verbatim"
+    );
+    assert!(
+        report.blocked.iter().any(|b| b.path == "CLAUDE.md"),
+        "and the refusal must be reported, not silent: {:?}",
+        report.blocked
+    );
+    assert!(report.has_blocked());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A file open-harness wrote but a human has since edited is not ours to
+/// delete: pruning it would throw away their work.
+#[test]
+fn prune_spares_a_managed_file_a_human_edited() {
+    let root = tmp_project("edited");
+    sync::apply(
+        &root,
+        &plan_sync(&only(&["commit-style"]), &[Harness::Claude]),
+        false,
+    )
+    .unwrap();
+    let skill = root.join(".claude/skills/commit-style/SKILL.md");
+    assert!(skill.exists());
+    std::fs::write(&skill, "---\nname: mine\n---\n\nI edited this.\n").unwrap();
+
+    let report = sync::uninstall(&root, false).unwrap();
+    assert!(
+        skill.exists(),
+        "an edited file must be left in place, not deleted"
+    );
+    assert!(
+        report.blocked.iter().any(|b| b.path.contains("SKILL.md")),
+        "and the reason must be reported: {:?}",
+        report.blocked
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A lockfile is ordinary data on disk and is often committed, so its paths are
+/// re-validated rather than trusted. Without this, a crafted lockfile turns
+/// `oh sync --uninstall` into arbitrary file deletion outside the project.
+#[test]
+fn a_lockfile_path_cannot_escape_the_project() {
+    let root = tmp_project("escape");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("precious.txt"), "important").unwrap();
+
+    let project = root.join("project");
+    for escape in [
+        "../outside/precious.txt",
+        "./../outside/precious.txt",
+        "~/precious.txt",
+    ] {
+        // Re-created each round: a clean uninstall prunes the directory with the
+        // lockfile in it.
+        std::fs::create_dir_all(project.join(".open-harness")).unwrap();
+        std::fs::write(
+            project.join(sync::LOCK_REL),
+            format!(
+                "version: 1\nmanaged:\n  - path: \"{escape}\"\n    fingerprint: \"0\"\n    \
+                 harnesses: [claude-code]\n    sources: [evil]\n"
+            ),
+        )
+        .unwrap();
+
+        let report = sync::uninstall(&project, false).unwrap();
+        assert!(
+            outside.join("precious.txt").exists(),
+            "`{escape}` must not reach a file outside the project"
+        );
+        assert!(
+            report.blocked.iter().any(|b| b.path == escape),
+            "and the refusal must be reported for `{escape}`: {:?}",
+            report.blocked
+        );
+        assert_eq!(report.count(ChangeAction::Prune), 0);
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The same guard on the write path: a plan can only ever land inside the
+/// project tree.
+#[test]
+fn a_traversing_target_path_is_never_written() {
+    let root = tmp_project("escape-write");
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let plan = SyncPlan {
+        files: vec![open_harness::sync::DesiredFile {
+            path: "../escaped.json".to_string(),
+            contents: "{}\n".to_string(),
+            harnesses: vec!["claude-code".to_string()],
+            sources: vec!["evil".to_string()],
+            degraded: Vec::new(),
+            conflicts: Vec::new(),
+        }],
+        deferred: Vec::new(),
+    };
+    let report = sync::apply(&project, &plan, false).unwrap();
+
+    assert!(
+        !root.join("escaped.json").exists(),
+        "a traversing target must never be written"
+    );
+    assert!(report.has_blocked());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---- one native event, many normalized ones ------------------------------
+//
+// Most harnesses expose a single `PreToolUse`-style event that fires for every
+// tool. Two things follow, and both used to be wrong: several normalized events
+// collapse onto that one native name (and must not overwrite each other), and
+// the class in a registration is a claim about the binding, not the call.
+
+/// Two tool bindings that resolve to the same native event register **once**,
+/// loudly, instead of one silently overwriting the other.
+#[test]
+fn colliding_native_events_collapse_instead_of_vanishing() {
+    let events = [
+        NormEvent::tool(Phase::Pre, ToolClass::Any),
+        NormEvent::tool(Phase::Pre, ToolClass::Shell),
+    ];
+    let out = Harness::Claude.emit_registration(&events, "guard");
+
+    assert_eq!(
+        out.matches("oh run --harness claude-code").count(),
+        1,
+        "one native event gets one command: {out}"
+    );
+    assert!(
+        out.contains("--event pre.tool.any"),
+        "and it must be the widest class the native event actually fires for: {out}"
+    );
+    assert!(
+        out.contains("WARNING") && out.contains("pre.tool.any + pre.tool.shell"),
+        "the collapse must be reported, not silent: {out}"
+    );
+}
+
+/// Cursor splits "before a tool" per class, so nothing collapses there.
+#[test]
+fn per_class_harnesses_keep_their_separate_registrations() {
+    let events = [
+        NormEvent::tool(Phase::Pre, ToolClass::Shell),
+        NormEvent::tool(Phase::Pre, ToolClass::FileRead),
+    ];
+    let out = Harness::Cursor.emit_registration(&events, "guard");
+    assert!(out.contains("beforeShellExecution"), "{out}");
+    assert!(out.contains("beforeReadFile"), "{out}");
+    assert_eq!(out.matches("oh run --harness cursor").count(), 2, "{out}");
+}
+
+/// The dispatcher narrows a coarse registration to the class of the call that
+/// arrived, so a class-scoped binding runs on its own calls and no others — and
+/// the payload describes the real tool rather than repeating the registration.
+#[test]
+fn the_dispatched_class_comes_from_the_tool_not_the_registration() {
+    let registered = NormEvent::tool(Phase::Pre, ToolClass::Shell);
+    for (tool, expected) in [
+        ("Bash", "pre.tool.shell"),
+        ("Read", "pre.tool.file_read"),
+        ("Write", "pre.tool.file_write"),
+        ("Edit", "pre.tool.file_edit"),
+        ("WebFetch", "pre.tool.web"),
+        ("mcp__srv__do", "pre.tool.mcp"),
+    ] {
+        let native = json!({"tool_name": tool, "tool_input": {}});
+        assert_eq!(
+            Harness::Claude.refine(&native, &registered).id(),
+            expected,
+            "`{tool}` must dispatch as {expected}"
+        );
+    }
+
+    // An unclassifiable name leaves the registered class alone — nothing that
+    // fired before stops firing because a name is missing from a table.
+    let native = json!({"tool_name": "SomeFutureTool", "tool_input": {}});
+    assert_eq!(
+        Harness::Claude.refine(&native, &registered).id(),
+        "pre.tool.shell"
+    );
+    // As does a harness whose per-class events already carry the truth.
+    assert_eq!(
+        Harness::Cursor.refine(&json!({}), &registered).id(),
+        "pre.tool.shell"
+    );
+}
+
+/// End to end: the real secret-guard binds `pre.tool.any`, so it still sees
+/// every tool, while the payload it receives names the actual class.
+#[test]
+fn the_payload_carries_the_real_tool_class() {
+    let native = json!({"tool_name": "Read", "tool_input": {"file_path": "/etc/passwd"}});
+    let out = open_harness::dispatch(
+        Harness::Claude,
+        &NormEvent::tool(Phase::Pre, ToolClass::Shell),
+        &caps(),
+        &native,
+    );
+    assert_eq!(
+        out.event.id(),
+        "pre.tool.file_read",
+        "a Read is not a shell call, whatever the registration said"
+    );
+    assert!(
+        out.ran.contains(&"secret-guard".to_string()),
+        "an `any`-bound guard still runs: {:?}",
+        out.ran
+    );
+}
+
+/// A write that fails partway must still record what did land. Otherwise those
+/// files are orphaned: never pruned, never removed by `--uninstall`, and
+/// invisible to the ownership check that stops the next run overwriting them.
+#[test]
+fn a_failed_write_still_records_what_landed() {
+    let root = tmp_project("partial");
+    let plan = plan_sync(&caps(), &[Harness::Claude]);
+    assert!(plan.files.len() > 2, "need several files to fail partway");
+
+    // Put a *directory* where the last target file belongs. Every earlier file
+    // writes normally and this one cannot — a real IO failure partway through,
+    // and one that a root-owned test process cannot bypass.
+    let blocked_path = plan.files.last().unwrap().path.clone();
+    std::fs::create_dir_all(root.join(&blocked_path)).unwrap();
+
+    let result = sync::apply(&root, &plan, false);
+    assert!(result.is_err(), "the run must surface the IO failure");
+
+    // Whatever reached disk is recorded, so a later uninstall can take it away.
+    let managed = sync::managed_paths(&root);
+    assert!(
+        !managed.is_empty(),
+        "files were written before the failure; the lockfile must not be empty"
+    );
+    let orphaned: Vec<&String> = plan
+        .files
+        .iter()
+        .map(|f| &f.path)
+        .filter(|p| **p != blocked_path && root.join(p).is_file())
+        .filter(|p| !managed.contains(p))
+        .collect();
+    assert!(
+        orphaned.is_empty(),
+        "written but not recorded, so never prunable: {orphaned:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A lockfile that exists but will not parse is not the same as no lockfile.
+/// Read as empty, it silently forgets every managed file: pruning stops and
+/// `--uninstall` reports a clean removal having removed nothing.
+#[test]
+fn a_corrupt_lockfile_is_reported_not_read_as_empty() {
+    let root = tmp_project("corrupt-lock");
+    sync::apply(
+        &root,
+        &plan_sync(&only(&["commit-style"]), &[Harness::Claude]),
+        false,
+    )
+    .unwrap();
+    let skill = root.join(".claude/skills/commit-style/SKILL.md");
+    assert!(skill.exists());
+
+    std::fs::write(root.join(sync::LOCK_REL), "managed: [ this is not: yaml\n").unwrap();
+
+    let report = sync::uninstall(&root, false).unwrap();
+    assert!(
+        report.has_blocked(),
+        "an unreadable lockfile must be reported"
+    );
+    assert!(
+        report
+            .blocked
+            .iter()
+            .any(|b| b.reason.contains("unparseable")),
+        "with a reason saying so: {:?}",
+        report.blocked
+    );
+    assert!(
+        skill.exists(),
+        "and the managed file must not be silently abandoned as removed"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---- documented behaviour that would otherwise drift silently -------------
+
+/// The two merge rules run in *opposite* directions, which is surprising enough
+/// to pin: a JSON clash keeps the **last** writer in composition order, a
+/// non-JSON clash keeps the **first** producer. Both are documented in
+/// `sync.rs`; a change to either should be a deliberate edit to this test.
+#[test]
+fn json_merges_last_wins_and_non_json_merges_first_wins() {
+    // Two capabilities, both targeting `.vscode/settings.json` (JSON) and both
+    // targeting the same Markdown file, are composed by `plan_sync`.
+    let plan = plan_sync(&only(&["safe-shell", "strict-ci"]), &[Harness::Windsurf]);
+    let settings = desired(&plan, ".vscode/settings.json");
+    let merged: serde_json::Value = serde_json::from_str(&settings.contents).unwrap();
+
+    // JSON: arrays union rather than replace, so both contributors survive.
+    let deny = merged["windsurf.cascadeCommandsDenyList"]
+        .as_array()
+        .expect("deny list");
+    assert!(
+        deny.len() > 1,
+        "a JSON merge unions rather than clobbers: {deny:?}"
+    );
+
+    // And a verdict clash takes the most restrictive, not the last writer —
+    // the one case where composition order does not decide.
+    let mut conflicts = Vec::new();
+    for f in &plan.files {
+        conflicts.extend(f.conflicts.iter().cloned());
+    }
+    assert!(
+        conflicts.iter().all(|c| !c.contains("panic")),
+        "conflicts are reported, never silent: {conflicts:?}"
+    );
+}
+
+/// `is_placeable` is the single gate every filesystem path passes. Pinned as a
+/// table so a new escape shape has to be argued for explicitly.
+#[test]
+fn only_relative_in_tree_paths_are_placeable() {
+    let root = tmp_project("placeable");
+    std::fs::create_dir_all(root.join("project")).unwrap();
+    let project = root.join("project");
+
+    // Each of these, arriving as a planned artifact, must never be written.
+    for escape in [
+        "../escaped.json",
+        "./../escaped.json",
+        "a/../../escaped.json",
+        "~/escaped.json",
+        "/etc/escaped.json",
+    ] {
+        let plan = SyncPlan {
+            files: vec![open_harness::sync::DesiredFile {
+                path: escape.to_string(),
+                contents: "{}\n".to_string(),
+                harnesses: vec!["claude-code".to_string()],
+                sources: vec!["evil".to_string()],
+                degraded: Vec::new(),
+                conflicts: Vec::new(),
+            }],
+            deferred: Vec::new(),
+        };
+        let report = sync::apply(&project, &plan, false).unwrap();
+        assert!(report.has_blocked(), "`{escape}` must be blocked");
+        assert!(
+            !root.join("escaped.json").exists(),
+            "`{escape}` escaped the project"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

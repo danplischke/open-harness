@@ -44,6 +44,16 @@ pub const SIG_NAME: &str = "capability.sig";
 /// are hashed individually, sorted by their forward-slash relative path, then
 /// hashed together — so the result is order- and platform-independent. The
 /// signature file itself is excluded.
+///
+/// A **symlink is hashed as a link** — its target *path*, not the bytes it
+/// points at — exactly as git records one. Dereferencing instead would make the
+/// digest describe files the capability does not ship: a link out of the tree
+/// would fold an unrelated file into the capability's identity (so editing that
+/// file reports the capability as *tampered*), an absolute link would produce a
+/// machine-dependent digest whose signature could never verify on a consumer's
+/// box, and a link cycle would be walked until the OS refused. Recording the
+/// link itself keeps the digest self-contained and cycle-free while still
+/// covering the link, so adding or repointing one is detected.
 pub fn capability_digest(dir: &Path) -> Result<String, String> {
     let mut entries: Vec<(String, String)> = Vec::new();
     collect(dir, dir, &mut entries)?;
@@ -63,24 +73,45 @@ fn collect(base: &Path, dir: &Path, out: &mut Vec<(String, String)>) -> Result<(
     for entry in rd.flatten() {
         let path = entry.path();
         let name = entry.file_name();
-        if path.is_dir() {
+        // `file_type` describes the entry itself; `Path::is_dir`/`is_file` follow
+        // the link and would let the walk leave the tree (see the fn docs). This
+        // matches `manifest::discover`, which is symlink-safe for the same reason.
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(e) => return Err(format!("stat {}: {e}", path.display())),
+        };
+        let rel = || -> Result<String, String> {
+            Ok(path
+                .strip_prefix(base)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/"))
+        };
+
+        if ft.is_symlink() {
+            if name == SIG_NAME {
+                continue;
+            }
+            let target = std::fs::read_link(&path)
+                .map_err(|e| format!("read link {}: {e}", path.display()))?;
+            // Prefixed so a link entry can never collide with a file's 64-hex
+            // digest, and normalized so the same link hashes alike either side
+            // of a Windows/POSIX boundary.
+            let target = target.to_string_lossy().replace('\\', "/");
+            out.push((rel()?, format!("symlink:{}", sha256_hex(target.as_bytes()))));
+        } else if ft.is_dir() {
             // Skip the managed cache/lock tree if present.
             if name == ".open-harness" {
                 continue;
             }
             collect(base, &path, out)?;
-        } else if path.is_file() {
+        } else if ft.is_file() {
             if name == SIG_NAME {
                 continue; // never sign the signature
             }
-            let rel = path
-                .strip_prefix(base)
-                .map_err(|e| e.to_string())?
-                .to_string_lossy()
-                .replace('\\', "/");
             let bytes =
                 std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-            out.push((rel, sha256_hex(&bytes)));
+            out.push((rel()?, sha256_hex(&bytes)));
         }
     }
     Ok(())
@@ -159,9 +190,24 @@ pub struct Signature {
 }
 
 impl Signature {
-    pub fn load(dir: &Path) -> Option<Signature> {
-        let text = std::fs::read_to_string(dir.join(SIG_NAME)).ok()?;
-        crate::config::from_str(&text, crate::config::Format::Either).ok()
+    /// Read the detached signature beside a capability.
+    ///
+    /// Three outcomes, deliberately distinguished: `Ok(None)` = no signature
+    /// file, `Ok(Some(..))` = a well-formed one, `Err` = a file that is there
+    /// but unreadable or malformed. Collapsing the last into the first would
+    /// make *corrupting* a signature strictly better for an attacker than
+    /// tampering with content — a `Trusted` capability would report as merely
+    /// `Unsigned`, which passes the gate whenever `--require-signed` is off.
+    pub fn load(dir: &Path) -> Result<Option<Signature>, String> {
+        let path = dir.join(SIG_NAME);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("read {}: {e}", path.display())),
+        };
+        crate::config::from_str(&text, crate::config::Format::Either)
+            .map(Some)
+            .map_err(|e| format!("{SIG_NAME} is present but malformed: {e}"))
     }
 
     pub fn write(&self, dir: &Path) -> Result<(), String> {
@@ -241,8 +287,11 @@ impl Verification {
 
 /// Verify a capability directory against a trust store.
 pub fn verify(dir: &Path, trust: &TrustStore) -> Verification {
-    let Some(sig) = Signature::load(dir) else {
-        return Verification::Unsigned;
+    let sig = match Signature::load(dir) {
+        Ok(Some(sig)) => sig,
+        Ok(None) => return Verification::Unsigned,
+        // Present but unusable is a broken signature, not an absent one.
+        Err(e) => return Verification::Invalid(e),
     };
     if sig.algorithm != "ed25519" {
         return Verification::Invalid(format!("unsupported algorithm '{}'", sig.algorithm));
@@ -465,7 +514,10 @@ impl TrustStore {
 
     /// Trust a root key (delegation anchor). Returns false if already trusted.
     pub fn add_root(&mut self, public_key: &str, label: &str) -> bool {
-        if self.roots.iter().any(|k| k.public_key == public_key) {
+        // Revocation gates this the same way it gates `add`. A revoked root is
+        // ignored at verification time anyway, so accepting it here only records
+        // a trust relationship that does not exist.
+        if self.roots.iter().any(|k| k.public_key == public_key) || self.is_revoked(public_key) {
             return false;
         }
         self.roots.push(TrustedKey {
@@ -539,14 +591,33 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
+/// Decode a hex string to bytes.
+///
+/// Works on **bytes**, not string slices: these strings come off disk — out of a
+/// `capability.sig`, a trust store, a keyring — so a non-ASCII one is ordinary
+/// untrusted input, and `&s[i..i + 2]` would panic on it rather than return the
+/// `Err` every caller is written to handle (`"aaa€"` splits inside the `€`).
 fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
-    if !s.len().is_multiple_of(2) {
+    let bytes = s.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
         return Err("odd-length hex".to_string());
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
+    bytes
+        .chunks_exact(2)
+        .map(|pair| Ok(hex_digit(pair[0])? << 4 | hex_digit(pair[1])?))
         .collect()
+}
+
+fn hex_digit(b: u8) -> Result<u8, String> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
+        b'A'..=b'F' => Ok(b - b'A' + 10),
+        other => Err(format!(
+            "invalid hex digit {:?}",
+            char::from_u32(other as u32).unwrap_or('?')
+        )),
+    }
 }
 
 fn decode_hex_array<const N: usize>(s: &str) -> Result<[u8; N], String> {

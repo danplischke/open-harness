@@ -32,6 +32,16 @@ sorts the `(path, hash)` pairs, and hashes the list. Any changed byte, added, or
 renamed file changes the digest. It is deterministic and platform-independent
 (forward-slash paths, sorted), so it is stable across machines.
 
+A **symlink is hashed as a link** — its target path, as git records one — and is
+never followed. Dereferencing would break the "stable across machines" property
+it claims: a link out of the tree folds a file the capability does not ship into
+its identity (editing that unrelated file then reports the capability as
+*tampered*), an absolute link digests differently on every machine so its
+signature could never verify downstream, and a link cycle is walked until the OS
+refuses. Recording the link still covers it, so adding or repointing one is
+detected. A capability with no symlinks digests exactly as it always has, so
+existing signatures are unaffected.
+
 Because the *filename* is part of the digest, migrating a manifest from
 `capability.json` to `capability.yaml` (`oh migrate`) changes the capability's
 digest and therefore **invalidates any existing `capability.sig`** — verification
@@ -47,14 +57,20 @@ runs) and the signature is checked against the embedded public key with
 
 ### Trust — an explicit key store (TOFU)
 A valid signature only proves *who* signed, not that you *trust* them. A
-`TrustStore` lists trusted public keys. Verification is four-valued:
+`TrustStore` lists trusted public keys. Verification is five-valued:
 
 | Verdict | Meaning | Passes gate? |
 |---|---|---|
-| `Trusted` | valid signature by a key in the store | always |
+| `Trusted` | valid signature by a known (or root-delegated) key | always |
 | `Untrusted` | valid signature, key not in the store | only without `--require-signed` |
-| `Invalid` | tampered content or bad signature | **never** |
-| `Unsigned` | no signature | only without `--require-signed` |
+| `Revoked` | valid signature by a **withdrawn** key | **never** |
+| `Invalid` | tampered content, a bad signature, or a signature file that is present but malformed | **never** |
+| `Unsigned` | **no** signature file | only without `--require-signed` |
+
+`Unsigned` means the file is absent, and nothing else. A `capability.sig` that is
+present but unreadable or malformed is `Invalid`: collapsing the two would make
+*corrupting* a signature strictly better for an attacker than tampering with
+content, since `Unsigned` passes the gate whenever `--require-signed` is off.
 
 `oh trust --capability DIR` adds a signer's key to the store — an explicit
 trust-on-first-use consent step. `oh sync --require-signed` refuses anything not
@@ -77,10 +93,12 @@ default and **hard failures under `--require-signed`**.
 |---|---|---|
 | Tampering with a capability in transit / at rest | recomputed `sha256` digest, verified before crypto | **enforced** |
 | Impersonating an author | ed25519 signature over the digest | **enforced** |
-| Running unknown / unsigned code silently | four-valued verdict; `--require-signed` gate; TOFU consent | **enforced (opt-in)** |
+| Running unknown / unsigned code silently | five-valued verdict; `--require-signed` gate; TOFU consent | **enforced (opt-in)** |
 | Over-broad capability privileges | declared permission manifest, surfaced + policy-checked | **advisory / enforced under `--require-signed`** |
-| `sync` writing outside the project or clobbering user files | path-traversal guard (no `..`/absolute/`~`); prune only lockfile-managed paths | **enforced** |
-| A capability that forks grandchildren evading the timeout kill | only the direct child is killed today | **deferred** (needs process-group kill) |
+| `sync` writing or deleting outside the project | every filesystem path — planned artifacts **and** lockfile entries alike — is normalized and rejected if it carries `..` / an absolute prefix / `~`; containment is structural, not a lexical prefix test | **enforced** |
+| `sync` clobbering a developer's own file | writes are gated on ownership (the lockfile fingerprint): a foreign JSON file is merged into, a foreign non-JSON file is refused and reported, and a file edited since we wrote it is never deleted | **enforced** |
+| A capability that forks grandchildren evading the timeout kill | only the direct child is killed today; a grandchild holding an inherited pipe can no longer wedge the dispatcher (`output-stuck`), but it is not killed | **partial** (bounded, not reaped — needs process-group kill) |
+| Header/request forgery through the hand-rolled HTTP client | header names, values, and the URL's host and path are refused if they carry control characters, before a socket is opened | **enforced** |
 | Untrusted code doing anything at all once installed (sandboxing) | not sandboxed; runs with agent privileges | **deferred** |
 | Key compromise / revocation | trust-store revocation list; a revoked key never verifies again, even in advisory mode (#22) | **enforced** |
 | Rollback / downgrade to an old vulnerable version | the profile lockfile pins commit + digest; no signed-version-monotonicity yet | **partial** (pinning only) |
@@ -91,8 +109,9 @@ default and **hard failures under `--require-signed`**.
 **Enforced:** content-digest integrity, ed25519 signature verification, the
 trust store + `--require-signed` gate, **key revocation** (a revoked key never
 verifies again, even in advisory mode — #22), permission-manifest surfacing +
-policy checks, the `sync` path-traversal and prune-only-managed guarantees, and
-lockfile pinning (commit + digest) from #15.
+policy checks, the `sync` path-containment and content-ownership guarantees
+(nothing open-harness did not write is overwritten or deleted, and no path from a
+lockfile can leave the project), and lockfile pinning (commit + digest) from #15.
 
 **Deferred (documented, not silently missing):** runtime **sandbox enforcement**
 of the permission manifest — real fs/net/exec confinement needs OS mechanisms

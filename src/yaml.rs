@@ -95,10 +95,26 @@ pub fn render_value(v: &Value) -> String {
         Value::Object(o) => {
             let items: Vec<String> = o
                 .iter()
-                .map(|(k, val)| format!("{k}: {}", render_value(val)))
+                // Keys need quoting on exactly the same terms as values: a key
+                // holding `,` or `: ` ends the flow mapping early and emits YAML
+                // that no longer parses. These come from a capability's
+                // `overrides`, so they are author input, not our own literals.
+                .map(|(k, val)| format!("{}: {}", flow_key(k), render_value(val)))
                 .collect();
             format!("{{{}}}", items.join(", "))
         }
+    }
+}
+
+/// A mapping key inside a **flow** mapping (`{k: v}`), quoted when a bare one
+/// would be misread. Stricter than [`scalar`]: `,` `{` `}` `[` `]` are
+/// structural inside flow context even though they are harmless in a block
+/// scalar, and a `:` anywhere in a key ends it early.
+fn flow_key(k: &str) -> String {
+    if k.is_empty() || k.contains([',', ':', '{', '}', '[', ']']) || needs_quoting(k) {
+        quote(k)
+    } else {
+        k.to_string()
     }
 }
 
@@ -112,7 +128,10 @@ pub fn flow_list(items: &[String]) -> String {
 pub fn frontmatter(pairs: &[(String, String)]) -> String {
     let mut s = String::from("---\n");
     for (k, v) in pairs {
-        s.push_str(k);
+        // Most keys here are our own literals, but `apply_overrides` lets a
+        // capability author add their own, so they are quoted on the same terms
+        // as any other scalar. An ordinary key is unchanged by this.
+        s.push_str(&scalar(k));
         s.push_str(": ");
         s.push_str(v);
         s.push('\n');
@@ -259,16 +278,10 @@ pub fn parse_document(text: &str) -> Result<(Map<String, Value>, String), String
         // `---` not on its own line — treat as ordinary body.
         return Ok((Map::new(), text.to_string()));
     }
-    let close = after_open
-        .find("\n---")
-        .ok_or("missing closing '---' for the frontmatter block")?;
-    let fm_text = &after_open[..close];
-    // The body starts after the rest of the closing `---` line.
-    let after_marker = &after_open[close + 1..];
-    let body = match after_marker.find('\n') {
-        Some(nl) => after_marker[nl + 1..].to_string(),
-        None => String::new(),
-    };
+    let (fence_start, body_start) =
+        find_closing_fence(after_open).ok_or("missing closing '---' for the frontmatter block")?;
+    let fm_text = &after_open[..fence_start];
+    let body = &after_open[body_start..];
     let fm = parse_frontmatter(fm_text)?;
     Ok((fm, body.trim_start_matches(['\n', '\r']).to_string()))
 }
@@ -292,6 +305,29 @@ pub fn parse_value(text: &str) -> Result<Value, String> {
         None | Some(Yaml::Null) | Some(Yaml::BadValue) => Ok(Value::Object(Map::new())),
         Some(doc) => yaml_to_value(doc),
     }
+}
+
+/// Find the closing fence: the first line that is **exactly** `---`.
+///
+/// Returns `(offset where that line starts, offset where the body starts)`.
+/// Matching a bare `"\n---"` instead would end the frontmatter at the first line
+/// merely *beginning* with three dashes — a `----` rule, or a `---` inside a
+/// block scalar — silently truncating the manifest and spilling the rest into
+/// the body.
+fn find_closing_fence(after_open: &str) -> Option<(usize, usize)> {
+    let mut offset = 0usize;
+    for line in after_open.split_inclusive('\n') {
+        let text = line
+            .strip_suffix('\n')
+            .unwrap_or(line)
+            .strip_suffix('\r')
+            .unwrap_or_else(|| line.strip_suffix('\n').unwrap_or(line));
+        if text.trim_end() == "---" {
+            return Some((offset, offset + line.len()));
+        }
+        offset += line.len();
+    }
+    None
 }
 
 /// Parse a YAML frontmatter block into a JSON object.
@@ -339,8 +375,17 @@ fn yaml_to_value(y: Yaml) -> Result<Value, String> {
             }
             Value::Object(out)
         }
-        // Anchors/aliases aren't used in capability frontmatter.
-        Yaml::Alias(_) => Value::Null,
+        // An alias resolves to a node this converter has no way to reach, so
+        // there is nothing honest to put here. Yielding `null` would silently
+        // blank a field the author filled in — the manifest would load, and the
+        // capability would ship with the value quietly missing.
+        Yaml::Alias(_) => {
+            return Err(
+                "YAML anchors/aliases are not supported in capability frontmatter; \
+                        write the value out in full"
+                    .to_string(),
+            )
+        }
     })
 }
 

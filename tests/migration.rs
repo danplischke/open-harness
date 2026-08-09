@@ -326,10 +326,15 @@ fn a_project_synced_before_the_switch_converges_and_prunes() {
     // A project synced by the previous version: a JSON lockfile claiming a file
     // whose capability no longer exists.
     write(&wd.join("project/.claude/skills/gone/SKILL.md"), "stale\n");
+    // The fingerprint is what marks the file as open-harness's to prune, so the
+    // fixture carries the real one — exactly what the pre-YAML sync recorded.
     write(
         &wd.join("project/.open-harness/sync.lock.json"),
-        r#"{"version":1,"managed":[{"path":".claude/skills/gone/SKILL.md",
-            "harnesses":["claude-code"],"sources":["gone"],"fingerprint":"x"}]}"#,
+        &format!(
+            r#"{{"version":1,"managed":[{{"path":".claude/skills/gone/SKILL.md",
+            "harnesses":["claude-code"],"sources":["gone"],"fingerprint":"{}"}}]}}"#,
+            open_harness::sync::fingerprint("stale\n")
+        ),
     );
 
     let out = oh(
@@ -374,8 +379,11 @@ fn uninstall_removes_a_legacy_sync_lockfile_too() {
     write(&wd.join("project/.claude/skills/gone/SKILL.md"), "stale\n");
     write(
         &wd.join("project/.open-harness/sync.lock.json"),
-        r#"{"version":1,"managed":[{"path":".claude/skills/gone/SKILL.md",
-            "harnesses":["claude-code"],"sources":["gone"],"fingerprint":"x"}]}"#,
+        &format!(
+            r#"{{"version":1,"managed":[{{"path":".claude/skills/gone/SKILL.md",
+            "harnesses":["claude-code"],"sources":["gone"],"fingerprint":"{}"}}]}}"#,
+            open_harness::sync::fingerprint("stale\n")
+        ),
     );
 
     let out = oh(&["sync", "--into", "project", "--uninstall"], &wd);

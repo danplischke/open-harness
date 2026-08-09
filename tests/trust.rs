@@ -381,3 +381,163 @@ fn keyfile_and_trust_store_round_trip() {
     assert!(reloaded.contains(&key.public_key));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- malformed input reaches these parsers off disk ------------------------
+//
+// `capability.sig`, the trust store and keyrings are files an attacker may
+// influence, so every one of these is ordinary untrusted input.
+
+/// A signature file that is *present but broken* is `Invalid`, never `Unsigned`.
+/// The consequence if this is wrong: corrupting a signature would be strictly
+/// better for an attacker than tampering with content, because `Unsigned` passes
+/// the gate whenever `--require-signed` is off.
+#[test]
+fn a_malformed_signature_is_invalid_not_unsigned() {
+    let dir = tmp("malformed-sig");
+    make_cap(&dir);
+    let key = trust::generate_keyfile("alice").unwrap();
+    trust::sign(&dir, &key).unwrap().write(&dir).unwrap();
+
+    write(&dir.join(trust::SIG_NAME), "not: [valid, yaml");
+
+    let store = trust::TrustStore::default();
+    let verdict = trust::verify(&dir, &store);
+    assert!(
+        matches!(verdict, Verification::Invalid(_)),
+        "a broken signature must be Invalid, got {verdict:?}"
+    );
+    assert!(
+        !verdict.passes(false),
+        "and it must fail the gate even without --require-signed"
+    );
+}
+
+/// Non-ASCII in a hex field returns an error rather than panicking. `"aaa€"`
+/// splits inside the `€`, which byte-index slicing would panic on.
+#[test]
+fn non_ascii_in_a_key_field_is_rejected_not_a_panic() {
+    for bad in ["aaa\u{20AC}", "\u{20AC}\u{20AC}", "zz", "abc"] {
+        let dir = tmp("bad-hex");
+        make_cap(&dir);
+        let key = trust::generate_keyfile("alice").unwrap();
+        let mut sig = trust::sign(&dir, &key).unwrap();
+        sig.public_key = bad.to_string();
+        sig.write(&dir).unwrap();
+
+        let verdict = trust::verify(&dir, &trust::TrustStore::default());
+        assert!(
+            matches!(verdict, Verification::Invalid(_)),
+            "public_key {bad:?} must be Invalid, got {verdict:?}"
+        );
+
+        // The same field on the signature itself, and on a keyring's root.
+        let mut sig2 = trust::sign(&dir, &key).unwrap();
+        sig2.signature = bad.to_string();
+        sig2.write(&dir).unwrap();
+        assert!(matches!(
+            trust::verify(&dir, &trust::TrustStore::default()),
+            Verification::Invalid(_)
+        ));
+
+        let keyring = trust::Keyring {
+            keys: Vec::new(),
+            root_public_key: bad.to_string(),
+            signature: bad.to_string(),
+        };
+        assert!(!keyring.verify(), "a keyring with {bad:?} must not verify");
+    }
+}
+
+/// A symlink is hashed as a *link* (its target path), not as the bytes it points
+/// at. Dereferencing would fold a file the capability does not ship into its
+/// identity — so editing an unrelated file would report it as tampered — and an
+/// absolute or cyclic link would make the digest machine-dependent or unwalkable.
+#[test]
+fn a_symlink_is_hashed_as_a_link_not_dereferenced() {
+    #[cfg(unix)]
+    {
+        let root = tmp("symlink-digest");
+        let outside = root.join("outside.txt");
+        write(&outside, "not part of the capability");
+        let dir = root.join("cap");
+        make_cap(&dir);
+        std::os::unix::fs::symlink("../outside.txt", dir.join("link")).unwrap();
+
+        let before = trust::capability_digest(&dir).unwrap();
+
+        // Editing what the link points at must not change the capability.
+        write(&outside, "edited out from under it");
+        assert_eq!(
+            trust::capability_digest(&dir).unwrap(),
+            before,
+            "a file outside the tree must not be part of the digest"
+        );
+
+        // Repointing the link itself must be caught.
+        std::fs::remove_file(dir.join("link")).unwrap();
+        std::os::unix::fs::symlink("../elsewhere.txt", dir.join("link")).unwrap();
+        assert_ne!(
+            trust::capability_digest(&dir).unwrap(),
+            before,
+            "repointing a link is a change to the capability and must be detected"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// A link cycle terminates instead of walking until the OS refuses.
+#[test]
+fn a_symlink_cycle_does_not_walk() {
+    #[cfg(unix)]
+    {
+        let dir = tmp("symlink-cycle");
+        make_cap(&dir);
+        std::os::unix::fs::symlink("..", dir.join("loop")).unwrap();
+        assert!(
+            trust::capability_digest(&dir).is_ok(),
+            "a cyclic link must be recorded, not followed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A capability with no symlinks digests exactly as before this change, so
+/// existing signatures keep verifying.
+#[test]
+fn the_digest_of_an_ordinary_tree_is_unchanged() {
+    let dir = tmp("digest-stable");
+    write(&dir.join("capability.yaml"), "id: web\nkind: tool\n");
+    write(&dir.join("body.md"), "capability asset contents");
+    write(&dir.join("nested/asset.txt"), "nested");
+    assert_eq!(
+        trust::capability_digest(&dir).unwrap(),
+        // Pinned against the binary from before symlinks were handled: hashing
+        // a link as a link must not renumber every existing signature.
+        "sha256:65d447970f2d94e918ad2ca05564b0672e8a176c2aa4e6c12f7a1eff060bb2de",
+        "the digest of a symlink-free tree is a compatibility contract"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Revocation gates roots exactly as it gates authors. A revoked root is ignored
+/// at verification time anyway, so accepting it into the store only records a
+/// trust relationship that does not exist.
+#[test]
+fn a_revoked_key_cannot_be_added_as_a_root_either() {
+    let key = trust::generate_keyfile("acme").unwrap();
+    let mut store = trust::TrustStore::default();
+
+    assert!(store.add_root(&key.public_key, "acme"), "trusted once");
+    assert!(store.revoke(&key.public_key, "compromised"));
+    assert!(
+        !store.add_root(&key.public_key, "acme"),
+        "a revoked key must not be re-added as a root"
+    );
+
+    // And a fresh store refuses it up front, matching `add`.
+    let mut fresh = trust::TrustStore::default();
+    assert!(fresh.revoke(&key.public_key, "compromised"));
+    assert!(!fresh.add_root(&key.public_key, "acme"));
+    assert!(!fresh.add(&key.public_key, "acme"));
+}

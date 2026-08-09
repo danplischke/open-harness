@@ -130,6 +130,12 @@ fn request(
     timeout: Duration,
 ) -> Result<Response, Error> {
     let (scheme, host, port, path) = parse_url(url)?;
+    // Everything interpolated into the raw request is checked first — see
+    // `validate_header`. Refusing here, before a socket is opened, keeps a
+    // malformed header from ever reaching the wire.
+    for (k, v) in extra_headers {
+        validate_header(k, v)?;
+    }
     let raw_request = build_request(method, &host, &path, body, extra_headers);
     let raw = match scheme.as_str() {
         "http" => send_plain(&host, port, raw_request.as_bytes(), timeout)?,
@@ -141,6 +147,40 @@ fn request(
         }
     };
     parse_response(&raw)
+}
+
+/// Reject a header that could break out of its own line.
+///
+/// Name and value are interpolated verbatim into the raw request, so a `\r\n` in
+/// either splices in headers of someone else's choosing — and a second blank
+/// line ends the request entirely, letting a whole extra one ride along the
+/// connection (request smuggling). None of these strings are ours: they come
+/// from a capability manifest's `tool.server.headers`, an `oh mcp --header`
+/// argument, and the environment variable named by `bearer_token_env`. Writing
+/// HTTP by hand means owning this check.
+///
+/// Names are RFC 9110 tokens; values may hold visible ASCII, space and tab, but
+/// no other control characters.
+fn validate_header(name: &str, value: &str) -> Result<(), Error> {
+    fn is_token(c: char) -> bool {
+        c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c)
+    }
+    if name.is_empty() || !name.chars().all(is_token) {
+        return Err(msg(format!(
+            "invalid HTTP header name {name:?}: expected a token (letters, digits, or !#$%&'*+-.^_`|~)"
+        )));
+    }
+    if let Some(bad) = value
+        .chars()
+        .find(|c| (c.is_control() && *c != '\t') || !c.is_ascii())
+    {
+        return Err(msg(format!(
+            "invalid character {bad:?} in the value of HTTP header `{name}`: a header value \
+             cannot contain control characters or non-ASCII (a newline would let it forge \
+             further headers)"
+        )));
+    }
+    Ok(())
 }
 
 /// Build the raw HTTP/1.1 request bytes (shared by the plain + TLS transports).
@@ -171,17 +211,34 @@ fn build_request(
 
 /// Connect a `TcpStream` to `host:port` with the timeout applied to connect,
 /// read, and write.
+///
+/// Tries **every** address the name resolves to, not just the first. A dual-stack
+/// host whose AAAA record is unroutable from here is ordinary, and giving up on
+/// the first candidate turns that into a hard failure with a confusing message.
 fn connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, Error> {
-    let addr = (host, port)
+    let addrs: Vec<_> = (host, port)
         .to_socket_addrs()
         .map_err(|e| msg(format!("resolve {host}:{port}: {e}")))?
-        .next()
-        .ok_or_else(|| msg(format!("no address for {host}:{port}")))?;
-    let stream = TcpStream::connect_timeout(&addr, timeout)
-        .map_err(|e| msg(format!("connect {addr}: {e}")))?;
-    stream.set_read_timeout(Some(timeout)).ok();
-    stream.set_write_timeout(Some(timeout)).ok();
-    Ok(stream)
+        .collect();
+    if addrs.is_empty() {
+        return Err(msg(format!("no address for {host}:{port}")));
+    }
+    let mut last = None;
+    for addr in &addrs {
+        match TcpStream::connect_timeout(addr, timeout) {
+            Ok(stream) => {
+                stream.set_read_timeout(Some(timeout)).ok();
+                stream.set_write_timeout(Some(timeout)).ok();
+                return Ok(stream);
+            }
+            Err(e) => last = Some(format!("{addr}: {e}")),
+        }
+    }
+    Err(msg(format!(
+        "connect {host}:{port}: no address succeeded ({} tried, last error {})",
+        addrs.len(),
+        last.unwrap_or_default()
+    )))
 }
 
 /// Plain-HTTP transport: write the request, read the response to EOF.
@@ -308,6 +365,20 @@ fn parse_url(url: &str) -> Result<(String, String, u16, String), Error> {
     };
     if authority.is_empty() {
         return Err(msg(format!("malformed URL '{url}' (no host)")));
+    }
+    // Checked before the port split so the diagnosis is the real problem, not a
+    // downstream symptom: the authority and path are interpolated into the
+    // request line and the `Host` header, where a newline forges headers exactly
+    // as one in a header value would.
+    for (part, label) in [(authority, "host"), (path, "path")] {
+        if let Some(bad) = part
+            .chars()
+            .find(|c| c.is_control() || *c == ' ' || !c.is_ascii())
+        {
+            return Err(msg(format!(
+                "invalid character {bad:?} in the {label} of '{url}'"
+            )));
+        }
     }
     let default_port = if scheme == "https" { 443 } else { 80 };
     let (host, port) = match authority.rsplit_once(':') {
