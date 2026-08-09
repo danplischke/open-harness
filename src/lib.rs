@@ -10,6 +10,7 @@ pub mod api;
 pub mod capture;
 pub mod dispatch;
 pub mod event;
+pub mod http;
 pub mod kind;
 pub mod kinds;
 pub mod manifest;

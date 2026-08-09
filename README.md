@@ -233,7 +233,7 @@ existing MCP *server's* tools still be called through the allowlisted shell:
 agent never needs the harness's MCP client. It is a minimal, hand-rolled JSON-RPC
 2.0 client over **stdio** and **streamable-HTTP** (chunked / Content-Length JSON
 and SSE replies, `Mcp-Session-Id` threading); `http://` needs no dependency, and
-`https://` is available via the optional **`mcp-http-tls`** feature (rustls),
+`https://` is available via the optional **`http-tls`** feature (rustls),
 with `OPEN_HARNESS_CA_FILE` to trust a private/corporate CA. Every emitted bridge
 artifact carries a loud "the server still runs — this bridges the call path, not
 the server or its egress" caveat.
@@ -286,7 +286,8 @@ The default build is deliberately lean: `serde` / `serde_json`, `ed25519-dalek`
 / `sha2` / `getrandom` for trust (integrity verification is always available, so
 it is not feature-gated), and `yaml-rust2` to read single-file capability
 frontmatter. Everything else that would pull weight is **opt-in**: `ffi` (uniffi,
-for the Python binding), `mcp-http-tls` (rustls, for https on the bridge). The
+for the Python binding), `http-tls` (rustls, for https on the bridge and on
+remote registry indexes). The
 line we draw: the *simple, fully-specified* wire formats — the stdio JSON-RPC
 client, the http client, hex/base64 — are hand-rolled to stay lean, but YAML
 frontmatter is *read* with a real parser (`yaml-rust2`), because YAML is a

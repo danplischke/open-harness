@@ -37,7 +37,7 @@ getrandom = "0.2"
 # is a complex spec and correctness (quotes, nesting, anchors) is what a library
 # is for. Reading only; we emit our own frontmatter.
 yaml-rust2 = "0.10"
-# Optional TLS for the MCP bridge (#25) — only compiled with `mcp-http-tls`.
+# Optional TLS for https:// (#25) — only compiled with `http-tls`.
 # `ring` provider (no cmake/build tooling) + Mozilla roots, both pure-Rust.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 webpki-roots = { version = "0.26", optional = true }
@@ -45,10 +45,14 @@ webpki-roots = { version = "0.26", optional = true }
 [features]
 # Opt-in FFI surface (uniffi). Off by default so the core build stays lean.
 ffi = ["dep:uniffi"]
-# Opt-in TLS for the streamable-HTTP MCP bridge (#25). Off by default so the
-# default build + the language bindings stay dependency-free; without it the
-# bridge speaks http:// and honestly refuses https.
-mcp-http-tls = ["dep:rustls", "dep:webpki-roots"]
+# Opt-in TLS for `https://` — used by the streamable-HTTP MCP bridge (#25) and
+# by remote capability sources (a registry index served over HTTPS). Off by
+# default so the default build + the language bindings stay dependency-free;
+# without it those callers honestly refuse https instead of downgrading.
+http-tls = ["dep:rustls", "dep:webpki-roots"]
+# Compatibility alias for the name this feature had while the transport lived
+# only in the MCP bridge.
+mcp-http-tls = ["http-tls"]
 
 [profile.dev]
 opt-level = 0

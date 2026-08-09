@@ -14,8 +14,10 @@ source](#what-exists-today). A CDN registry is that same concept with the index
 > **Status.** To stay honest about what ships versus what is proposed, every
 > concrete change is tagged **Implemented** or **Proposed** in
 > [Implementation](#implementation-implemented-vs-proposed). In prose: the
-> `Registry` source, the lockfile, and the whole trust module exist today; HTTPS
-> fetch, an HTTP/tarball leaf source, and a publish command do not.
+> `Registry` source, the lockfile, the whole trust module, and — as of the first
+> slice — **fetching the index over HTTP(S)** exist today; an HTTP/tarball leaf
+> source (so the capability *bytes* come from the CDN too) and a publish command
+> do not.
 
 ## Two axes of distribution
 
@@ -57,13 +59,33 @@ resolver.
 |---|---|---|
 | `Source::Registry { name, version, index }` | `profile.rs` | A **central JSON index** mapping capability names → their real source. |
 | `RegistryIndex` / `RegistryEntry` | `profile.rs` | The index schema (below). |
+| Index from a **URL** | `profile.rs` | `index` accepts an `http(s)://` URL, a `file://` URL, or a workdir-relative path. |
 | Lockfile (`Lock`, `LockedSource`, `LockedCap`) | `profile.rs` | Pins id + version + fingerprint per capability, and each git source's commit SHA. |
 | Trust module | `trust.rs` | sha256 content digests, ed25519 signatures, a trust store, a root-of-trust keyring, and revocation. |
-| HTTP/1.1 + rustls client | `mcp.rs` (`mcp-http-tls` feature) | The TLS building blocks, already in-tree (used today by the MCP bridge). |
+| HTTP/1.1 + rustls client | `http.rs` (`http-tls` feature) | The shared transport, used by both the MCP bridge and registry fetches. |
 
-The conceptual model is done. What is missing is hosting the index on a URL
-instead of a local path, and (optionally) serving the capability bytes from the
-CDN instead of a git clone.
+The conceptual model is done, and the index can already be CDN-hosted. What is
+missing is serving the capability *bytes* from the CDN (rather than a git clone)
+and a publish side to produce them.
+
+### Hosting the index
+
+```jsonc
+{ "registry": { "index": "https://cdn.example.com/registry.json", "name": "commit-style" } }
+{ "registry": { "index": "file:///srv/catalog/registry.json",     "name": "commit-style" } }
+{ "registry": { "index": "registry.json",                         "name": "commit-style" } }
+```
+
+A fetch failure is a **loud warning**, never a silent skip, and `https://`
+without the `http-tls` feature is refused with a pointer to `file://`, a local
+path, or a git source — the transport reports that TLS is missing, the caller
+supplies the remedy.
+
+One rule falls out of hosting the index remotely: **a remote index may not
+select paths on this machine.** An entry pointing at a `local` source would
+otherwise resolve against the *consumer's* workdir — a file chosen by whoever
+wrote the catalog. Such an entry is refused loudly. Remote indexes point at
+fetchable sources; local indexes keep their local reach.
 
 ## The registry index
 
@@ -199,35 +221,33 @@ applies unchanged:
 
 **Implemented (today):**
 
-- `Source::Registry` with a **local** `index` path; `Source::Git`
-  (clone/fetch/pin via system `git`); `Source::Local`.
+- `Source::Registry`, `Source::Git` (clone/fetch/pin via system `git`),
+  `Source::Local`.
+- **A registry index loaded from an `http(s)://` URL, a `file://` URL, or a
+  workdir-relative path** — with a loud warning on fetch failure, an honest
+  refusal when `https` meets a build without `http-tls`, and a refusal when a
+  *remote* index names a `local` path.
 - The lockfile and the full dependency resolver.
 - `trust.rs`: `capability_digest`, `sign`/`verify`, `TrustStore`, `Keyring`
   (root of trust), and revocation — surfaced through `oh sign|verify|trust|
   revoke|keyring` and `oh resolve --require-signed`.
-- A hand-rolled HTTP/1.1 + rustls client in `mcp.rs` behind the `mcp-http-tls`
-  feature (the TLS stack is already a dependency, just gated).
+- A hand-rolled HTTP/1.1 + rustls client in **`http.rs`**, shared by the MCP
+  bridge and registry fetches, with TLS behind the `http-tls` feature
+  (`mcp-http-tls` remains as a compatibility alias).
 
 **Proposed (the delta to CDN-native):**
 
-1. **Fetch the index over HTTPS.** Today `RegistryIndex::load` only does
-   `std::fs::read_to_string`. Teach it scheme detection and an HTTPS `GET`.
-   In-grain options, best fit first: extract a small `http_get(url) -> bytes`
-   from the existing rustls path in `mcp.rs`; **or** shell out to `curl`
-   (matches the "shell out to system `git`" precedent); **or** add a tiny client
-   crate (against the dependency-light grain). A `file://` scheme keeps offline
-   tests trivial.
-2. **An `http` / tarball leaf source.** `Source::Http { url, sha256 }`:
+1. **An `http` / tarball leaf source.** `Source::Http { url, sha256 }`:
    download → verify the digest → unpack into the cache → scan. Lock kind
    `"http"`, pinning the sha256. This is the fourth `Source` variant beside
    `Local`/`Git`/`Registry`, and the reason a registry entry can resolve to CDN
    bytes rather than a git clone.
-3. **A publish command.** `oh pack` / `oh registry publish`: package each
+2. **A publish command.** `oh pack` / `oh registry publish`: package each
    capability into a content-addressed tarball, compute its sha256 (reuse
    `capability_digest`), sign it, and emit/update the index snapshot + pointer.
    This is the capability-content analog of what `release.yml` does for the
    binary.
-4. **Pin the cryptographic digest in the lock.** `LockedCap.fingerprint` today
+3. **Pin the cryptographic digest in the lock.** `LockedCap.fingerprint` today
    is a non-cryptographic FNV-1a hash used for *drift* detection — distinct from
    the sha256 `capability_digest` used for *integrity*. A remote artifact's pin
    should record the sha256 (the content address), so the lock is the tamper
@@ -246,8 +266,6 @@ applies unchanged:
 
 **Decisions to make deliberately:**
 
-- **HTTP client.** Reuse the in-tree rustls path (feature-gated, most in-grain)
-  vs. shell out to `curl` (matches git) vs. a client crate (simplest, heaviest).
 - **Mutable-pointer scheme and TTL** — e.g. `registry.json → index/<n>.json`
   with a short TTL, and whether the pointer is signed.
 - **Default posture for remote sources.** Recommendation: treat an unsigned or

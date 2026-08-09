@@ -8,8 +8,11 @@
 use open_harness::adapters::Harness;
 use open_harness::profile::{self, Lock, Profile};
 use serde_json::json;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::thread;
 
 fn tmp(tag: &str) -> PathBuf {
     static N: AtomicU32 = AtomicU32::new(0);
@@ -29,6 +32,38 @@ fn write(path: &Path, contents: &str) {
 
 fn profile_from(v: serde_json::Value) -> Profile {
     Profile::from_json(&v.to_string()).expect("valid profile")
+}
+
+/// Serve `body` as `application/json` on an ephemeral loopback port, returning
+/// the index URL. Exercises the real HTTP transport with no network egress, so
+/// it runs on every platform (the same `TcpListener` trick as the MCP tests).
+fn serve_index(body: String) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf); // drain the request head
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    format!("http://127.0.0.1:{port}/registry.json")
+}
+
+/// A `file://` URL for `path` (absolute paths only, as the loader expects).
+fn file_url(path: &Path) -> String {
+    let s = path.to_string_lossy().replace('\\', "/");
+    if s.starts_with('/') {
+        format!("file://{s}")
+    } else {
+        format!("file:///{s}") // Windows drive path: file:///C:/…
+    }
 }
 
 fn cap_json(id: &str, version: &str, kind: &str, extra: serde_json::Value) -> String {
@@ -190,6 +225,101 @@ fn registry_missing_entry_is_warned_not_dropped() {
     assert!(
         r.warnings.iter().any(|w| w.contains("nope")),
         "a missing registry entry is loudly reported: {:?}",
+        r.warnings
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+// ---- registry index: local path, file:// URL, or fetched over http --------
+
+#[test]
+fn registry_index_resolves_through_a_file_url() {
+    let wd = tmp("registry-file-url");
+    write(
+        &wd.join("packs/greeter/capability.json"),
+        &cap_json(
+            "greeter",
+            "2.1.0",
+            "skill",
+            json!({ "skill": { "body": "hi" } }),
+        ),
+    );
+    let index = wd.join("registry.json");
+    write(
+        &index,
+        &json!({
+            "capabilities": [
+                { "name": "greeter-pack", "version": "2.1.0",
+                  "source": { "local": { "path": "packs" } } }
+            ]
+        })
+        .to_string(),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "registry": { "index": file_url(&index), "name": "greeter-pack" } }],
+    }));
+
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    let ids: Vec<&str> = r
+        .capabilities
+        .iter()
+        .map(|c| c.manifest.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["greeter"],
+        "a file:// index resolves like a bare path: {ids:?} ({:?})",
+        r.warnings
+    );
+    assert_eq!(r.lock.sources[0].kind, "registry");
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+/// The index is fetched over HTTP and parsed — proven by the resolver finding
+/// the named entry. A *remote* index may not select a path on this machine, so
+/// that entry is refused loudly rather than read.
+#[test]
+fn remote_index_is_fetched_and_a_local_entry_is_refused() {
+    let wd = tmp("registry-http-local");
+    let url = serve_index(
+        json!({
+            "capabilities": [
+                { "name": "greeter-pack", "source": { "local": { "path": "packs" } } }
+            ]
+        })
+        .to_string(),
+    );
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "registry": { "index": url, "name": "greeter-pack" } }],
+    }));
+
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    assert!(r.capabilities.is_empty());
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("refused") && w.contains("greeter-pack")),
+        "a remote index must not select local paths: {:?}",
+        r.warnings
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn unreachable_remote_index_is_warned_not_silently_skipped() {
+    let wd = tmp("registry-http-down");
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        // Port 1: nothing listens, so the fetch fails fast.
+        "sources": [{ "registry": { "index": "http://127.0.0.1:1/registry.json", "name": "x" } }],
+    }));
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    assert!(r.capabilities.is_empty());
+    assert!(
+        r.warnings.iter().any(|w| w.contains("registry index")),
+        "an unreachable index is loudly reported: {:?}",
         r.warnings
     );
     let _ = std::fs::remove_dir_all(&wd);
@@ -489,6 +619,65 @@ mod git_backed {
         assert!(
             ids.contains(&"x") && !ids.contains(&"y"),
             "pinned tree only: {ids:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&wd);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Acceptance for the CDN-registry shape: the index is *fetched over HTTP*
+    /// and its entry resolves to real capability bytes from a git source — the
+    /// full indirection, end to end, with no network egress.
+    #[test]
+    fn remote_index_resolves_a_git_entry() {
+        let (repo, sha) = init_repo_with(
+            "caps/conv/capability.json",
+            &cap_json(
+                "conv",
+                "0.4.1",
+                "rule",
+                json!({ "rule": { "body": "tabs" } }),
+            ),
+        );
+        let wd = tmp("registry-http-git");
+        let url = serve_index(
+            json!({
+                "capabilities": [{
+                    "name": "conv-pack",
+                    "version": "0.4.1",
+                    "source": { "git": { "url": repo.to_string_lossy(), "rev": "HEAD", "subdir": "caps" } }
+                }]
+            })
+            .to_string(),
+        );
+        let profile = profile_from(json!({
+            "name": "p", "harnesses": ["claude-code"],
+            "sources": [{ "registry": { "index": url, "name": "conv-pack" } }],
+        }));
+
+        let r = profile::resolve(&profile, &wd, None).unwrap();
+        let ids: Vec<&str> = r
+            .capabilities
+            .iter()
+            .map(|c| c.manifest.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["conv"],
+            "the fetched index resolved its git entry: {ids:?} ({:?})",
+            r.warnings
+        );
+        let src = &r.lock.sources[0];
+        assert_eq!(src.kind, "registry", "provenance stays registry");
+        assert_eq!(
+            src.rev.as_deref(),
+            Some(sha.as_str()),
+            "the leaf git commit is still pinned through the registry"
+        );
+        assert!(
+            src.origin.contains("conv-pack") && src.origin.contains("http://"),
+            "the remote index + name is the recorded origin: {}",
+            src.origin
         );
 
         let _ = std::fs::remove_dir_all(&wd);

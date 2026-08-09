@@ -5,7 +5,9 @@
 //! source resolves to capabilities from a **local path**, a **git repo**
 //! (personal-repo sync — cloned/fetched and pinned to a commit), or a
 //! **registry** (#21) — a JSON index mapping names to their real local/git
-//! source, one point of indirection over many repos. Resolving a profile
+//! source, one point of indirection over many repos. The index itself may be a
+//! local path, a `file://` URL, or fetched over `http(s)://` (a CDN-hosted
+//! catalog; see `docs/src/distribution.md`). Resolving a profile
 //! composes the sources in order and writes an `open-harness.lock` pinning every
 //! resolved capability (id + version + content fingerprint) and every git
 //! source's exact commit — so a re-resolve is reproducible.
@@ -28,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 /// Default lockfile name, written next to the profile.
 pub const LOCK_NAME: &str = "open-harness.lock";
@@ -87,9 +90,10 @@ pub struct RegistrySource {
     /// Optional exact version to select (else the first matching entry).
     #[serde(default)]
     pub version: Option<String>,
-    /// Path to the registry index (JSON), relative to the profile workdir. The
-    /// index maps names → real sources (local/git), giving one point of
-    /// indirection over many repos. Without it the source is a loud no-op.
+    /// Where the registry index (JSON) lives: an `http(s)://` URL, a `file://`
+    /// URL, or a path relative to the profile workdir. The index maps names →
+    /// real sources (local/git), giving one point of indirection over many
+    /// repos. Without it the source is a loud no-op.
     #[serde(default)]
     pub index: Option<String>,
 }
@@ -112,11 +116,62 @@ struct RegistryEntry {
     source: Source,
 }
 
+/// How long to wait on a remote registry index before giving up.
+const INDEX_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Is `spec` a URL the index is *fetched* from (rather than read from disk)?
+fn is_remote_index(spec: &str) -> bool {
+    spec.starts_with("http://") || spec.starts_with("https://")
+}
+
+/// The filesystem path a `file://` URL names, or `None` when `spec` is not one.
+///
+/// Percent-escapes are **not** decoded — a location whose path needs escaping
+/// should be given as a bare path instead.
+fn file_url_path(spec: &str) -> Result<Option<PathBuf>, String> {
+    let Some(rest) = spec.strip_prefix("file://") else {
+        return Ok(None);
+    };
+    // `file://localhost/p` names the same file as `file:///p`.
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    if rest.is_empty() {
+        return Err(format!("malformed file URL '{spec}' (no path)"));
+    }
+    // A Windows drive path arrives as `/C:/x`; drop the leading slash.
+    let trimmed = rest.strip_prefix('/').unwrap_or(rest);
+    let bytes = trimmed.as_bytes();
+    let drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    Ok(Some(PathBuf::from(if drive { trimmed } else { rest })))
+}
+
 impl RegistryIndex {
-    fn load(path: &Path) -> Result<RegistryIndex, String> {
-        let text =
-            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    /// Load the index named by `spec`: an `http(s)://` URL (fetched), a `file://`
+    /// URL, or a path relative to `workdir`.
+    fn load(spec: &str, workdir: &Path) -> Result<RegistryIndex, String> {
+        let text = Self::read_text(spec, workdir)?;
         serde_json::from_str(&text).map_err(|e| format!("invalid registry index: {e}"))
+    }
+
+    fn read_text(spec: &str, workdir: &Path) -> Result<String, String> {
+        if is_remote_index(spec) {
+            let headers = [("Accept".to_string(), "application/json".to_string())];
+            // The transport reports *that* TLS is missing; the remedy here is a
+            // local index or a git source, not the MCP bridge's advice.
+            let resp = crate::http::get(spec, &headers, INDEX_TIMEOUT).map_err(|e| match e {
+                crate::http::Error::NoTls { host } => format!(
+                    "this build has no TLS: cannot fetch the registry index from https://{host}. \
+                     Rebuild with `--features http-tls`, or point `index` at a file:// URL, a \
+                     local path, or a git source."
+                ),
+                other => format!("fetch registry index '{spec}': {other}"),
+            })?;
+            return Ok(resp.into_body());
+        }
+        let path = match file_url_path(spec)? {
+            Some(p) => p,
+            None => workdir.join(spec),
+        };
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))
     }
 
     fn find(&self, name: &str, version: Option<&str>) -> Option<&RegistryEntry> {
@@ -342,24 +397,24 @@ fn resolve_registry(
     lock: Option<&Lock>,
     warnings: &mut Vec<String>,
 ) -> Result<Option<ResolvedSource>, String> {
-    let Some(index_rel) = &r.index else {
+    let Some(index_spec) = &r.index else {
         warnings.push(format!(
             "registry source '{}' has no `index` — skipped (set an index path to resolve it)",
             r.name
         ));
         return Ok(None);
     };
-    let index = match RegistryIndex::load(&workdir.join(index_rel)) {
+    let index = match RegistryIndex::load(index_spec, workdir) {
         Ok(i) => i,
         Err(e) => {
-            warnings.push(format!("registry index '{index_rel}': {e}"));
+            warnings.push(format!("registry index '{index_spec}': {e}"));
             return Ok(None);
         }
     };
     let want = r.version.as_deref();
     let Some(entry) = index.find(&r.name, want) else {
         warnings.push(format!(
-            "registry '{index_rel}' has no capability '{}'{}",
+            "registry '{index_spec}' has no capability '{}'{}",
             r.name,
             want.map(|v| format!("@{v}")).unwrap_or_default()
         ));
@@ -372,9 +427,23 @@ fn resolve_registry(
         ));
         return Ok(None);
     }
+    // A *remote* index must not be able to select paths on this machine: the
+    // index is written elsewhere, so a `local` entry would resolve against the
+    // consumer's workdir. Refuse loudly rather than read a path a remote file
+    // chose.
+    if is_remote_index(index_spec) {
+        if let Source::Local(l) = &entry.source {
+            warnings.push(format!(
+                "registry entry '{}' from remote index '{index_spec}' points at local path '{}' \
+                 — refused (a remote index must not select paths on this machine)",
+                r.name, l.path
+            ));
+            return Ok(None);
+        }
+    }
     // Resolve the leaf source, then relabel it with registry provenance (the
     // resolved git rev, if any, is still recorded for auditability).
-    let origin = format!("{index_rel}#{}", r.name);
+    let origin = format!("{index_spec}#{}", r.name);
     Ok(resolve_source(&entry.source, workdir, lock, warnings)?
         .map(|(_, _, rev, subdir, caps)| (origin, "registry", rev, subdir, caps)))
 }
