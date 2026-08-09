@@ -694,10 +694,7 @@ fn cmd_trust(rest: &[String]) {
             });
             (key.public_key, o.label.clone().unwrap_or(key.label))
         } else if let Some(dir) = o.capability_one.clone() {
-            let sig = trust::Signature::load(&dir).unwrap_or_else(|| {
-                eprintln!("no {} in {}", trust::SIG_NAME, dir.display());
-                exit(1);
-            });
+            let sig = require_signature(&dir);
             (sig.public_key, o.label.clone().unwrap_or_default())
         } else {
             eprintln!("trust --root requires --key ROOT_KEYFILE or --capability DIR");
@@ -721,10 +718,7 @@ fn cmd_trust(rest: &[String]) {
         eprintln!("trust requires --capability DIR (whose signer to trust)");
         exit(2);
     };
-    let Some(sig) = trust::Signature::load(&dir) else {
-        eprintln!("no {} in {}", trust::SIG_NAME, dir.display());
-        exit(1);
-    };
+    let sig = require_signature(&dir);
     let label = o.label.clone().unwrap_or_default();
     let fp = trust::fingerprint(&sig.public_key);
     if store.add(&sig.public_key, &label) {
@@ -738,6 +732,27 @@ fn cmd_trust(rest: &[String]) {
         exit(1);
     } else {
         println!("already trusted: {fp}");
+    }
+}
+
+/// The signature beside a capability, or exit explaining why there isn't one.
+/// Keeps the two failures distinct: a capability that was never signed, and one
+/// whose signature file is there but broken.
+fn require_signature(dir: &std::path::Path) -> trust::Signature {
+    match trust::Signature::load(dir) {
+        Ok(Some(sig)) => sig,
+        Ok(None) => {
+            eprintln!(
+                "no {} in {} (sign it first)",
+                trust::SIG_NAME,
+                dir.display()
+            );
+            exit(1);
+        }
+        Err(e) => {
+            eprintln!("{}: {e}", dir.display());
+            exit(1);
+        }
     }
 }
 
@@ -757,14 +772,7 @@ fn cmd_keyring(rest: &[String]) {
         eprintln!("{e}");
         exit(1);
     });
-    let sig = trust::Signature::load(&dir).unwrap_or_else(|| {
-        eprintln!(
-            "no {} in {} (sign it first)",
-            trust::SIG_NAME,
-            dir.display()
-        );
-        exit(1);
-    });
+    let sig = require_signature(&dir);
     let author = trust::TrustedKey {
         public_key: sig.public_key,
         label: o.label.clone().unwrap_or_default(),
@@ -795,10 +803,7 @@ fn cmd_revoke(rest: &[String]) {
         eprintln!("revoke requires --capability DIR (whose signer to revoke)");
         exit(2);
     };
-    let Some(sig) = trust::Signature::load(&dir) else {
-        eprintln!("no {} in {}", trust::SIG_NAME, dir.display());
-        exit(1);
-    };
+    let sig = require_signature(&dir);
     let trust_path = o
         .trust
         .clone()

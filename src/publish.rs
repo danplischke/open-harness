@@ -83,7 +83,11 @@ pub fn pack_capabilities(caps: &[LoadedCapability]) -> Result<Vec<Packed>, Strin
             kind: cap.manifest.kind.as_str().to_string(),
             digest,
             bytes,
-            signed: crate::trust::Signature::load(&cap.dir).is_some(),
+            // A malformed signature stops the pack rather than being published
+            // as `signed: false` — the catalog would understate what ships.
+            signed: crate::trust::Signature::load(&cap.dir)
+                .map_err(|e| format!("{}: {e}", cap.manifest.id))?
+                .is_some(),
         });
     }
     // Stable order in, stable catalog out.
