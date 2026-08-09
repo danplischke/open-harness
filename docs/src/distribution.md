@@ -57,6 +57,7 @@ resolver.
 
 | Piece | Where | What it gives you |
 |---|---|---|
+| `Source::Git` + pip-style specs | `profile.rs` | `git+<url>@<rev>#subdirectory=<path>` — install straight from a repo, no catalog needed. |
 | `Source::Registry { name, version, index }` | `profile.rs` | A **central JSON index** mapping capability names → their real source. |
 | `RegistryIndex` / `RegistryEntry` | `profile.rs` | The index schema (below). |
 | Index from a **URL** | `profile.rs` | `index` accepts an `http(s)://` URL, a `file://` URL, or a workdir-relative path. |
@@ -90,6 +91,28 @@ select paths on this machine.** An entry pointing at a `local` source would
 otherwise resolve against the *consumer's* workdir — a file chosen by whoever
 wrote the catalog. Such an entry is refused loudly. Remote indexes point at
 fetchable sources; local indexes keep their local reach.
+
+## Straight from a git repo
+
+A catalog is not required. A git source installs a repository directly, the way
+a Python package is installed from one:
+
+```jsonc
+{ "git": "git+https://github.com/me/my-skill@v1.2.0" }
+{ "git": "git+ssh://git@github.com/acme/caps@main#subdirectory=capabilities" }
+```
+
+`[git+]<url>[@<rev>][#subdirectory=<path>]`. The rev is any branch, tag, or SHA
+(default `HEAD`) and is pinned to an exact commit in the lock, so this is as
+reproducible as a digest-pinned archive — git's content addressing does the same
+job as sha256 here. A repository may also *be* one capability, with its manifest
+at the root; it then installs as a single package and takes its id from the
+repository name.
+
+Reach for a **registry** instead when one catalog must span many repos, or when
+consumers should resolve by *name* rather than by URL. Reach for an **archive**
+when the bytes should come from a CDN rather than a clone. All three are just
+sources, and a profile can mix them.
 
 ## The registry index
 

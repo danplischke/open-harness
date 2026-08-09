@@ -789,6 +789,80 @@ fn unknown_harness_is_rejected() {
 // ---- git-backed personal-repo sync (unix-gated fixture) -------------------
 
 #[cfg(unix)]
+// ---- pip-style git specs ---------------------------------------------------
+#[test]
+fn git_specs_parse_like_a_pip_requirement() {
+    use open_harness::profile::GitSource;
+
+    let g = GitSource::parse_spec("git+https://github.com/acme/caps@v1.2.0#subdirectory=caps/x")
+        .unwrap();
+    assert_eq!(g.url, "https://github.com/acme/caps");
+    assert_eq!(g.rev, "v1.2.0");
+    assert_eq!(g.subdir.as_deref(), Some("caps/x"));
+
+    // The `git+` prefix, the rev, and the fragment are all optional.
+    let plain = GitSource::parse_spec("https://github.com/acme/caps.git").unwrap();
+    assert_eq!(plain.url, "https://github.com/acme/caps.git");
+    assert_eq!(plain.rev, "HEAD", "an unpinned spec defaults to HEAD");
+    assert_eq!(plain.subdir, None);
+
+    // A bare fragment is accepted alongside pip's `subdirectory=` spelling.
+    assert_eq!(
+        GitSource::parse_spec("git+https://h/r#caps/x")
+            .unwrap()
+            .subdir
+            .as_deref(),
+        Some("caps/x")
+    );
+    // A local path is a valid repo location too.
+    let local = GitSource::parse_spec("/srv/mirrors/caps@v1.0.0").unwrap();
+    assert_eq!(local.url, "/srv/mirrors/caps");
+    assert_eq!(local.rev, "v1.0.0");
+}
+
+#[test]
+fn an_ssh_spec_keeps_its_userinfo_instead_of_reading_it_as_a_revision() {
+    use open_harness::profile::GitSource;
+
+    // `git@` is userinfo, not a rev: splitting on the last `@` naively would
+    // turn this into url `ssh://git` at rev `github.com/acme/caps`.
+    let g = GitSource::parse_spec("git+ssh://git@github.com/acme/caps").unwrap();
+    assert_eq!(g.url, "ssh://git@github.com/acme/caps");
+    assert_eq!(g.rev, "HEAD");
+
+    // …and with a rev, both are recovered.
+    let pinned = GitSource::parse_spec("git+ssh://git@github.com/acme/caps@main").unwrap();
+    assert_eq!(pinned.url, "ssh://git@github.com/acme/caps");
+    assert_eq!(pinned.rev, "main");
+
+    // scp-style shorthand has no scheme and no slash before the userinfo.
+    let scp = GitSource::parse_spec("git@github.com:acme/caps.git").unwrap();
+    assert_eq!(scp.url, "git@github.com:acme/caps.git");
+    assert_eq!(scp.rev, "HEAD");
+}
+
+#[test]
+fn a_malformed_git_spec_is_refused() {
+    use open_harness::profile::GitSource;
+    assert!(GitSource::parse_spec("").is_err());
+    assert!(
+        GitSource::parse_spec("https://h/r@").is_err(),
+        "an empty revision is a typo, not a default"
+    );
+}
+
+#[test]
+fn a_git_source_may_be_written_as_a_spec_string() {
+    let profile = profile_from(json!({
+        "name": "p", "harnesses": ["claude-code"],
+        "sources": [{ "git": "git+https://github.com/acme/caps@v2#subdirectory=capabilities" }],
+    }));
+    let json_back = serde_json::to_value(&profile.sources[0]).unwrap();
+    assert_eq!(json_back["git"]["url"], "https://github.com/acme/caps");
+    assert_eq!(json_back["git"]["rev"], "v2");
+    assert_eq!(json_back["git"]["subdir"], "capabilities");
+}
+
 mod git_backed {
     use super::*;
     use std::process::Command;
@@ -827,6 +901,78 @@ mod git_backed {
 
     /// Acceptance: a profile composed from a git source + a local source, with a
     /// reproducible lockfile that pins the git commit.
+    #[test]
+    fn a_repo_that_is_one_capability_installs_like_a_package() {
+        // The shape you get from `pip install git+https://github.com/me/my-skill`:
+        // the repository *is* the package, with its manifest at the root rather
+        // than in a `capabilities/` container.
+        let (repo, _) = init_repo_with(
+            "SKILL.md",
+            "---\nname: commit-style\ndescription: a whole repo, one capability\n---\nbody\n",
+        );
+        let wd = tmp("rootcap");
+        let profile = profile_from(json!({
+            "name": "p", "harnesses": ["claude-code"],
+            "sources": [{ "git": format!("git+{}", repo.display()) }],
+        }));
+
+        let r = profile::resolve(&profile, &wd, None).unwrap();
+        assert_eq!(
+            r.capabilities.len(),
+            1,
+            "a repo whose root is the capability resolves, rather than silently \
+             finding nothing: {:?}",
+            r.warnings
+        );
+        // The checkout lives under a cache slug, so the id must come from the
+        // repository's name — not from the directory the clone happens to land in.
+        let repo_name = repo.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(r.capabilities[0].manifest.id, repo_name);
+        let _ = std::fs::remove_dir_all(&wd);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_spec_pins_a_tag_from_the_repo() {
+        let (repo, first) = init_repo_with(
+            "capabilities/greet/capability.json",
+            &cap_json(
+                "greet",
+                "1.0.0",
+                "skill",
+                json!({ "skill": { "body": "v1" } }),
+            ),
+        );
+        git(&["tag", "v1.0.0"], &repo);
+        // Move the branch on, so resolving the tag proves the pin is honored.
+        write(
+            &repo.join("capabilities/greet/capability.json"),
+            &cap_json(
+                "greet",
+                "2.0.0",
+                "skill",
+                json!({ "skill": { "body": "v2" } }),
+            ),
+        );
+        git(&["add", "-A"], &repo);
+        git(&["commit", "-qm", "v2"], &repo);
+
+        let wd = tmp("tagpin");
+        let profile = profile_from(json!({
+            "name": "p", "harnesses": ["claude-code"],
+            "sources": [{ "git": format!("git+{}@v1.0.0#subdirectory=capabilities", repo.display()) }],
+        }));
+        let r = profile::resolve(&profile, &wd, None).unwrap();
+        assert_eq!(
+            r.capabilities[0].manifest.version, "1.0.0",
+            "the tag in the spec selected the older commit"
+        );
+        assert_eq!(r.lock.sources[0].rev.as_deref(), Some(first.as_str()));
+        assert_eq!(r.lock.sources[0].subdir.as_deref(), Some("capabilities"));
+        let _ = std::fs::remove_dir_all(&wd);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
     #[test]
     fn profile_composes_git_and_local_with_pinned_lock() {
         let (repo, sha) = init_repo_with(

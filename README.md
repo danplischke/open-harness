@@ -91,7 +91,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 180 tests, green on Linux/macOS/Windows
+cargo test                            # 186 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -106,7 +106,8 @@ are implemented.**
 The **document kinds** (skill, agent, command, rule, instructions) are authored
 as a **single file** whose YAML frontmatter *is* the manifest — a skill is just a
 `SKILL.md`, an agent an `AGENT.md` — so you write the artifact itself, no sidecar
-`capability.json`. `id` defaults to the directory name, `kind` to the filename.
+`capability.json`. `id` defaults to the directory name (or the repository name
+when a whole repo is one capability), `kind` to the filename.
 Hooks and tools keep a `capability.json` (no body, structured `run`/`server`
 config); it also still works for any kind, and wins when both are present.
 
@@ -195,10 +196,29 @@ so the catalog can live on a CDN ([distribution](./docs/src/distribution.md)).
   "sources": [
     { "local": { "path": "capabilities" } },
     { "git": { "url": "https://github.com/me/my-caps", "rev": "main", "subdir": "capabilities" } },
+    { "git": "git+https://github.com/me/my-skill@v1.2.0" },   // pip-style shorthand
     { "http": { "url": "https://cdn.example.com/blobs/sha256/9f86…a08.tar", "sha256": "9f86…a08" } },
     { "registry": { "index": "https://cdn.example.com/registry.json", "name": "acme-guards" } }
   ] }
 ```
+
+### Installing from a git repo
+
+A git source can be written as a single **pip-style spec**, the way a Python
+package is installed from a repo — `[git+]<url>[@<rev>][#subdirectory=<path>]`:
+
+```sh
+oh add --profile open-harness.json --git git+https://github.com/me/my-skill@v1.2.0
+oh add --profile open-harness.json --git 'git+ssh://git@github.com/acme/caps@main#subdirectory=capabilities'
+oh sync --profile open-harness.json --into .
+```
+
+`@<rev>` is any branch, tag, or SHA (default `HEAD`) and is pinned to an exact
+commit in the lock; the fragment accepts pip's `subdirectory=<path>` or a bare
+path. A repository may also **be** a single capability — its manifest at the
+repo root, no `capabilities/` container — in which case it installs as one
+package and takes its id from the repository name (override with an explicit
+`id:`).
 
 An `http` source is an **uncompressed tar**, always pinned: the digest is
 verified before anything is unpacked, the extractor refuses any entry that could
@@ -291,7 +311,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
 | `docs/` | mdBook site (concepts, authoring guide, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 180 tests: conformance (70) + sourcing (27) + new kinds (24) + single-file (19) + trust (15) + MCP bridge (7) + publishing (6) + authoring (5) + unit (5) + capture (2) |
+| `tests/` | 186 tests: conformance (70) + sourcing (33) + new kinds (24) + single-file (19) + trust (15) + MCP bridge (7) + publishing (6) + authoring (5) + unit (5) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies

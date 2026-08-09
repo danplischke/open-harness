@@ -245,6 +245,17 @@ impl LoadedCapability {
     /// the frontmatter sets them. The frontmatter's non-reserved keys plus the
     /// body become the kind's config block, so the same `Kind` impl runs unchanged.
     pub fn from_doc(doc_path: &Path, kind_hint: KindId) -> Result<Self, String> {
+        Self::from_doc_named(doc_path, kind_hint, None)
+    }
+
+    /// As [`from_doc`](Self::from_doc), but `id_hint` replaces the directory-name
+    /// fallback for the capability's id. Used when the containing directory is a
+    /// checkout cache slug rather than a name the author chose.
+    pub fn from_doc_named(
+        doc_path: &Path,
+        kind_hint: KindId,
+        id_hint: Option<&str>,
+    ) -> Result<Self, String> {
         let text = std::fs::read_to_string(doc_path)
             .map_err(|e| format!("read {}: {e}", doc_path.display()))?;
         let (mut fm, body) = crate::yaml::parse_document(&text)
@@ -258,6 +269,7 @@ impl LoadedCapability {
             .get("id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
+            .or_else(|| id_hint.map(|s| s.to_string()))
             .or_else(|| dir.file_name().map(|n| n.to_string_lossy().into_owned()))
             .ok_or_else(|| format!("{}: cannot determine capability id", doc_path.display()))?;
         let kind = match fm.get("kind").and_then(|v| v.as_str()) {
@@ -396,6 +408,22 @@ const DOC_FILES: &[(&str, KindId)] = &[
 /// are skipped (the latter keeps the walk cycle-safe). A malformed capability is
 /// a hard error, never a silent skip — nothing is dropped without a reason.
 pub fn discover(dir: &Path) -> Result<Vec<LoadedCapability>, String> {
+    discover_named(dir, None)
+}
+
+/// Like [`discover`], but `dir` may itself **be** a single capability rather than
+/// a container of them — the shape you get when a whole repository is one
+/// capability (`git+https://github.com/me/my-skill`), the way a Python package
+/// is installed straight from a repo.
+///
+/// `id_hint` names that root capability when its document carries no explicit
+/// `id`. Normally the id falls back to the directory name, but the directory
+/// here is a checkout cache slug that means nothing to the author, so the caller
+/// passes something meaningful (a git source passes the repository name).
+pub fn discover_named(dir: &Path, id_hint: Option<&str>) -> Result<Vec<LoadedCapability>, String> {
+    if let Some(cap) = load_capability_dir_named(dir, id_hint)? {
+        return Ok(vec![cap]);
+    }
     let mut out = Vec::new();
     scan_container(dir, &mut out)?;
     out.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
@@ -438,6 +466,17 @@ fn scan_capability_or_category(dir: &Path, out: &mut Vec<LoadedCapability>) -> R
 /// Load the capability rooted directly at `dir`, if any: a `capability.json`
 /// wins, otherwise the first recognized single-file document.
 fn load_capability_dir(dir: &Path) -> Result<Option<LoadedCapability>, String> {
+    load_capability_dir_named(dir, None)
+}
+
+/// `id_hint` supplies the id for a single-file capability whose document has no
+/// explicit `id` and whose directory name is not meaningful — see
+/// [`discover_named`]. A `capability.json` always carries its own id, so the
+/// hint never applies there.
+fn load_capability_dir_named(
+    dir: &Path,
+    id_hint: Option<&str>,
+) -> Result<Option<LoadedCapability>, String> {
     let json = dir.join("capability.json");
     if json.is_file() {
         return Ok(Some(LoadedCapability::load(&json)?));
@@ -445,7 +484,9 @@ fn load_capability_dir(dir: &Path) -> Result<Option<LoadedCapability>, String> {
     for (name, kind) in DOC_FILES {
         let doc = dir.join(name);
         if doc.is_file() {
-            return Ok(Some(LoadedCapability::from_doc(&doc, *kind)?));
+            return Ok(Some(LoadedCapability::from_doc_named(
+                &doc, *kind, id_hint,
+            )?));
         }
     }
     Ok(None)

@@ -18,7 +18,7 @@ use open_harness::adapters::{Harness, ALL};
 use open_harness::kind::{kind_impl, Artifact, Installability, KindId};
 use open_harness::manifest::{discover, LoadedCapability, PermissionPolicy};
 use open_harness::mcp::{self, HttpServerSpec, McpServer, ServerSpec};
-use open_harness::profile::{self, Lock, Profile, Resolved};
+use open_harness::profile::{self, GitSource, Lock, Profile, Resolved};
 use open_harness::publish;
 use open_harness::scaffold::{self, Lang};
 use open_harness::sync::{self, ApplyReport, ChangeAction, Deferred, DriftKind, DriftReport};
@@ -55,7 +55,7 @@ fn main() {
         "remove" => cmd_remove(&rest),
         _ => {
             eprintln!(
-                "oh <init|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|pack|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix|version> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--base-url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\npublish:   oh pack --capabilities capabilities --base-url https://cdn.example.com --out dist\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
+                "oh <init|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|pack|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix|version> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git SPEC]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--base-url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nsources:   oh add --profile open-harness.json --git git+https://github.com/me/my-skill@v1.2.0\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\npublish:   oh pack --capabilities capabilities --base-url https://cdn.example.com --out dist\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
             );
             exit(2);
         }
@@ -1389,7 +1389,20 @@ fn cmd_add(rest: &[String]) {
     let source = if let Some(p) = &o.local {
         serde_json::json!({ "local": { "path": p } })
     } else if let Some(u) = &o.git {
-        serde_json::json!({ "git": { "url": u, "rev": "HEAD" } })
+        // Accept a pip-style spec (`git+URL@rev#subdirectory=path`), so a tag or
+        // a subdirectory can be pinned from the command line rather than by
+        // hand-editing the profile afterwards.
+        let g = GitSource::parse_spec(u).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            exit(2);
+        });
+        let mut m = serde_json::Map::new();
+        m.insert("url".into(), serde_json::json!(g.url));
+        m.insert("rev".into(), serde_json::json!(g.rev));
+        if let Some(sub) = &g.subdir {
+            m.insert("subdir".into(), serde_json::json!(sub));
+        }
+        serde_json::json!({ "git": m })
     } else {
         eprintln!("add requires --local PATH or --git URL");
         exit(2);

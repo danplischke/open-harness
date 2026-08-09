@@ -71,7 +71,7 @@ pub struct LocalSource {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GitSource {
     pub url: String,
     /// Branch / tag / SHA to resolve. Defaults to `HEAD`.
@@ -84,6 +84,94 @@ pub struct GitSource {
 
 fn default_rev() -> String {
     "HEAD".to_string()
+}
+
+impl GitSource {
+    /// Parse a **pip-style git requirement** — the way a Python package is
+    /// installed from a repo:
+    ///
+    /// ```text
+    /// [git+]<url>[@<rev>][#subdirectory=<path>]
+    ///
+    /// git+https://github.com/acme/caps@v1.2.0#subdirectory=capabilities/commit-style
+    /// git+ssh://git@github.com/acme/caps@main
+    /// https://github.com/acme/caps.git
+    /// /srv/mirrors/caps@v1.0.0
+    /// ```
+    ///
+    /// The `git+` prefix is optional, `@<rev>` defaults to `HEAD`, and the
+    /// fragment accepts pip's `subdirectory=<path>` as well as a bare `<path>`.
+    pub fn parse_spec(spec: &str) -> Result<GitSource, String> {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return Err("empty git spec".to_string());
+        }
+        let rest = spec.strip_prefix("git+").unwrap_or(spec);
+
+        // The fragment comes off first, so a `#` payload can never be mistaken
+        // for part of the rev.
+        let (locator, fragment) = match rest.split_once('#') {
+            Some((l, f)) => (l, Some(f)),
+            None => (rest, None),
+        };
+        let subdir = fragment
+            .map(|f| f.strip_prefix("subdirectory=").unwrap_or(f))
+            .map(|p| p.trim_matches('/').to_string())
+            .filter(|p| !p.is_empty());
+
+        // A rev is the text after the last `@` — but only when that `@` falls
+        // after the last `/`, so `ssh://git@host/repo` keeps its userinfo
+        // instead of reading `git@host/repo` as a revision.
+        let last_slash = locator.rfind('/');
+        let (url, rev) = match locator.rfind('@') {
+            Some(at) if last_slash.is_none_or(|s| at > s) => {
+                (&locator[..at], Some(locator[at + 1..].to_string()))
+            }
+            _ => (locator, None),
+        };
+        if url.is_empty() {
+            return Err(format!("git spec '{spec}' has no URL"));
+        }
+        if rev.as_deref().is_some_and(str::is_empty) {
+            return Err(format!("git spec '{spec}' has an empty revision after '@'"));
+        }
+        Ok(GitSource {
+            url: url.to_string(),
+            rev: rev.unwrap_or_else(default_rev),
+            subdir,
+        })
+    }
+
+    /// The repository's own name, used to identify a repo that *is* one
+    /// capability (see [`crate::manifest::discover_named`]).
+    fn repo_name(&self) -> String {
+        let trimmed = self.url.trim_end_matches('/').replace('\\', "/");
+        let last = trimmed.rsplit('/').next().unwrap_or(&trimmed);
+        last.strip_suffix(".git").unwrap_or(last).to_string()
+    }
+}
+
+/// A git source is written either as an object or as a single pip-style spec
+/// string: `{"git": {"url": "…", "rev": "v1"}}` or `{"git": "git+https://…@v1"}`.
+impl<'de> Deserialize<'de> for GitSource {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Spec(String),
+            Full {
+                url: String,
+                #[serde(default = "default_rev")]
+                rev: String,
+                #[serde(default)]
+                subdir: Option<String>,
+            },
+        }
+        match Repr::deserialize(d)? {
+            Repr::Spec(s) => GitSource::parse_spec(&s).map_err(serde::de::Error::custom),
+            Repr::Full { url, rev, subdir } => Ok(GitSource { url, rev, subdir }),
+        }
+    }
 }
 
 /// A capability archive fetched by URL and pinned by content digest — the
@@ -401,7 +489,9 @@ fn resolve_source(
                 Some(s) => checkout_dir.join(s),
                 None => checkout_dir,
             };
-            let caps = crate::manifest::discover(&scan)?;
+            // The checkout lives under a cache slug, so if the scanned root *is*
+            // the capability, name it after the repository rather than the slug.
+            let caps = crate::manifest::discover_named(&scan, Some(&g.repo_name()))?;
             Ok(Some((
                 g.url.clone(),
                 "git",
