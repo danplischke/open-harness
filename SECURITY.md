@@ -79,7 +79,8 @@ default and **hard failures under `--require-signed`**.
 | Impersonating an author | ed25519 signature over the digest | **enforced** |
 | Running unknown / unsigned code silently | four-valued verdict; `--require-signed` gate; TOFU consent | **enforced (opt-in)** |
 | Over-broad capability privileges | declared permission manifest, surfaced + policy-checked | **advisory / enforced under `--require-signed`** |
-| `sync` writing outside the project or clobbering user files | path-traversal guard (no `..`/absolute/`~`); prune only lockfile-managed paths | **enforced** |
+| `sync` writing or deleting outside the project | every filesystem path — planned artifacts **and** lockfile entries alike — is normalized and rejected if it carries `..` / an absolute prefix / `~`; containment is structural, not a lexical prefix test | **enforced** |
+| `sync` clobbering a developer's own file | writes are gated on ownership (the lockfile fingerprint): a foreign JSON file is merged into, a foreign non-JSON file is refused and reported, and a file edited since we wrote it is never deleted | **enforced** |
 | A capability that forks grandchildren evading the timeout kill | only the direct child is killed today | **deferred** (needs process-group kill) |
 | Untrusted code doing anything at all once installed (sandboxing) | not sandboxed; runs with agent privileges | **deferred** |
 | Key compromise / revocation | trust-store revocation list; a revoked key never verifies again, even in advisory mode (#22) | **enforced** |
@@ -91,8 +92,9 @@ default and **hard failures under `--require-signed`**.
 **Enforced:** content-digest integrity, ed25519 signature verification, the
 trust store + `--require-signed` gate, **key revocation** (a revoked key never
 verifies again, even in advisory mode — #22), permission-manifest surfacing +
-policy checks, the `sync` path-traversal and prune-only-managed guarantees, and
-lockfile pinning (commit + digest) from #15.
+policy checks, the `sync` path-containment and content-ownership guarantees
+(nothing open-harness did not write is overwritten or deleted, and no path from a
+lockfile can leave the project), and lockfile pinning (commit + digest) from #15.
 
 **Deferred (documented, not silently missing):** runtime **sandbox enforcement**
 of the permission manifest — real fs/net/exec confinement needs OS mechanisms

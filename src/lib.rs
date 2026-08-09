@@ -51,7 +51,7 @@ pub use runtime::{
     resolve_requirement, RunError, RunLimits,
 };
 pub use sync::{
-    apply, check, plan_sync, ApplyReport, ChangeAction, DesiredFile, DriftKind, DriftReport,
-    SyncPlan,
+    apply, check, plan_sync, ApplyReport, Blocked, ChangeAction, DesiredFile, DriftKind,
+    DriftReport, SyncPlan,
 };
 pub use trust::{capability_digest, sign, verify, Keyfile, Signature, TrustStore, Verification};

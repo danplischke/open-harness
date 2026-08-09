@@ -1009,6 +1009,10 @@ fn cmd_sync(rest: &[String]) {
             exit(1);
         });
         print_apply_report(&report, "uninstall", &into);
+        if report.has_blocked() {
+            eprintln!("\nsome files were left in place: exiting non-zero");
+            exit(1);
+        }
         return;
     }
 
@@ -1043,6 +1047,12 @@ fn cmd_sync(rest: &[String]) {
         exit(1);
     });
     print_apply_report(&report, "sync", &into);
+    // A blocked target means the requested state is not on disk. Reporting it
+    // and still exiting 0 would be the silent-success lie this project forbids.
+    if report.has_blocked() {
+        eprintln!("\nsome targets were not installed: exiting non-zero");
+        exit(1);
+    }
 }
 
 fn cmd_check(rest: &[String]) {
@@ -1137,9 +1147,17 @@ fn print_apply_report(report: &ApplyReport, verb: &str, into: &std::path::Path) 
             ChangeAction::Update => "~ update   ",
             ChangeAction::Unchanged => "· unchanged",
             ChangeAction::Prune => "－ prune    ",
+            ChangeAction::Reduce => "－ reduce   ",
+        };
+        // A shared file is one open-harness merged into rather than owns, so say
+        // so on every line — it changes what a later uninstall will do to it.
+        let shared = if c.shared {
+            "  (shared — merged)"
+        } else {
+            ""
         };
         println!(
-            "  {mark} {}{}",
+            "  {mark} {}{}{shared}",
             c.path,
             provenance(&c.harnesses, &c.sources)
         );
@@ -1148,11 +1166,12 @@ fn print_apply_report(report: &ApplyReport, verb: &str, into: &std::path::Path) 
         println!("  (no managed files)");
     }
     println!(
-        "\n  {} created, {} updated, {} unchanged, {} pruned",
+        "\n  {} created, {} updated, {} unchanged, {} pruned, {} reduced",
         report.count(ChangeAction::Create),
         report.count(ChangeAction::Update),
         report.count(ChangeAction::Unchanged),
         report.count(ChangeAction::Prune),
+        report.count(ChangeAction::Reduce),
     );
     if !report.conflicts.is_empty() {
         println!("\n  composition conflicts resolved:");
@@ -1162,7 +1181,23 @@ fn print_apply_report(report: &ApplyReport, verb: &str, into: &std::path::Path) 
             }
         }
     }
+    print_blocked(&report.blocked);
     print_deferred(&report.deferred);
+}
+
+/// Files open-harness refused to touch. Always shown, and the reason with them —
+/// a refusal that is not reported is indistinguishable from a silent drop.
+fn print_blocked(blocked: &[sync::Blocked]) {
+    if blocked.is_empty() {
+        return;
+    }
+    println!(
+        "\n  blocked: {} file(s) open-harness will not write over",
+        blocked.len()
+    );
+    for b in blocked {
+        println!("    ✗ {}: {}", b.path, b.reason);
+    }
 }
 
 fn print_drift_report(report: &DriftReport, into: &std::path::Path) {
@@ -1190,6 +1225,7 @@ fn print_drift_report(report: &DriftReport, into: &std::path::Path) {
         report.count(DriftKind::Modified),
         report.count(DriftKind::Stale),
     );
+    print_blocked(&report.blocked);
     print_deferred(&report.deferred);
     println!(
         "\n  {}",

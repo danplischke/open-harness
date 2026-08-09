@@ -1606,3 +1606,211 @@ fn cursor_shell_fixture_blocks_a_secret_end_to_end() {
         out.response.stdout
     );
 }
+
+// ---- ownership: never destroy content open-harness did not write ----------
+//
+// The target paths are shared with the developer (`.vscode/settings.json`,
+// `CLAUDE.md`, `opencode.json`), and the lockfile that records them is ordinary
+// data on disk. These pin both halves of that contract: what a write may
+// replace, and what a removal may delete.
+
+/// A pre-existing `.vscode/settings.json` is **merged into**, not overwritten:
+/// the developer's keys survive, ours are added, and the file is recorded as
+/// shared. The consequence if this is wrong is silent data loss on first sync.
+#[test]
+fn sync_merges_into_a_developers_json_instead_of_clobbering_it() {
+    let root = tmp_project("adopt-json");
+    std::fs::create_dir_all(root.join(".vscode")).unwrap();
+    std::fs::write(
+        root.join(".vscode/settings.json"),
+        "{\n  \"editor.fontSize\": 14,\n  \"files.autoSave\": \"onFocusChange\"\n}\n",
+    )
+    .unwrap();
+
+    let plan = plan_sync(&only(&["safe-shell"]), &[Harness::Windsurf]);
+    let report = sync::apply(&root, &plan, false).unwrap();
+
+    let text = std::fs::read_to_string(root.join(".vscode/settings.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        v["editor.fontSize"], 14,
+        "the developer's settings must survive the sync: {text}"
+    );
+    assert_eq!(v["files.autoSave"], "onFocusChange");
+    assert!(
+        v.get("windsurf.cascadeCommandsAllowList").is_some(),
+        "and open-harness's contribution must be present too: {text}"
+    );
+    assert!(
+        report
+            .changes
+            .iter()
+            .any(|c| c.path == ".vscode/settings.json" && c.shared),
+        "the file must be recorded as shared, not owned outright"
+    );
+    assert!(report.blocked.is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Merging into a developer's file stays idempotent, and uninstalling subtracts
+/// only open-harness's contribution — the file comes back, not deleted.
+#[test]
+fn uninstall_gives_a_shared_file_back_instead_of_deleting_it() {
+    let root = tmp_project("shared-roundtrip");
+    std::fs::create_dir_all(root.join(".vscode")).unwrap();
+    std::fs::write(root.join(".vscode/settings.json"), "{\"editor.tabSize\":2}").unwrap();
+
+    let plan = plan_sync(&only(&["safe-shell"]), &[Harness::Windsurf]);
+    sync::apply(&root, &plan, false).unwrap();
+
+    // Converged: a second apply changes nothing, and check sees no drift.
+    let again = sync::apply(&root, &plan, false).unwrap();
+    assert!(!again.mutated(), "merging into a shared file must converge");
+    assert!(!sync::check(&root, &plan).unwrap().has_drift());
+
+    let report = sync::uninstall(&root, false).unwrap();
+    assert_eq!(report.count(ChangeAction::Reduce), 1);
+    assert!(
+        root.join(".vscode/settings.json").exists(),
+        "a file the developer also owns must never be deleted wholesale"
+    );
+    let text = std::fs::read_to_string(root.join(".vscode/settings.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["editor.tabSize"], 2, "their content must remain: {text}");
+    assert!(
+        v.get("windsurf.cascadeCommandsAllowList").is_none(),
+        "and ours must be gone: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A pre-existing Markdown target cannot be merged structurally, so it is left
+/// untouched and reported — never overwritten with the generated version.
+#[test]
+fn sync_refuses_to_overwrite_a_developers_markdown() {
+    let root = tmp_project("adopt-md");
+    let hand_written = "# My project\n\nNotes I care about.\n";
+    std::fs::write(root.join("CLAUDE.md"), hand_written).unwrap();
+
+    let plan = plan_sync(&only(&["project-conventions"]), &[Harness::Claude]);
+    let report = sync::apply(&root, &plan, false).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(root.join("CLAUDE.md")).unwrap(),
+        hand_written,
+        "a hand-written file must survive verbatim"
+    );
+    assert!(
+        report.blocked.iter().any(|b| b.path == "CLAUDE.md"),
+        "and the refusal must be reported, not silent: {:?}",
+        report.blocked
+    );
+    assert!(report.has_blocked());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A file open-harness wrote but a human has since edited is not ours to
+/// delete: pruning it would throw away their work.
+#[test]
+fn prune_spares_a_managed_file_a_human_edited() {
+    let root = tmp_project("edited");
+    sync::apply(
+        &root,
+        &plan_sync(&only(&["commit-style"]), &[Harness::Claude]),
+        false,
+    )
+    .unwrap();
+    let skill = root.join(".claude/skills/commit-style/SKILL.md");
+    assert!(skill.exists());
+    std::fs::write(&skill, "---\nname: mine\n---\n\nI edited this.\n").unwrap();
+
+    let report = sync::uninstall(&root, false).unwrap();
+    assert!(
+        skill.exists(),
+        "an edited file must be left in place, not deleted"
+    );
+    assert!(
+        report.blocked.iter().any(|b| b.path.contains("SKILL.md")),
+        "and the reason must be reported: {:?}",
+        report.blocked
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A lockfile is ordinary data on disk and is often committed, so its paths are
+/// re-validated rather than trusted. Without this, a crafted lockfile turns
+/// `oh sync --uninstall` into arbitrary file deletion outside the project.
+#[test]
+fn a_lockfile_path_cannot_escape_the_project() {
+    let root = tmp_project("escape");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("precious.txt"), "important").unwrap();
+
+    let project = root.join("project");
+    for escape in [
+        "../outside/precious.txt",
+        "./../outside/precious.txt",
+        "~/precious.txt",
+    ] {
+        // Re-created each round: a clean uninstall prunes the directory with the
+        // lockfile in it.
+        std::fs::create_dir_all(project.join(".open-harness")).unwrap();
+        std::fs::write(
+            project.join(sync::LOCK_REL),
+            format!(
+                "version: 1\nmanaged:\n  - path: \"{escape}\"\n    fingerprint: \"0\"\n    \
+                 harnesses: [claude-code]\n    sources: [evil]\n"
+            ),
+        )
+        .unwrap();
+
+        let report = sync::uninstall(&project, false).unwrap();
+        assert!(
+            outside.join("precious.txt").exists(),
+            "`{escape}` must not reach a file outside the project"
+        );
+        assert!(
+            report.blocked.iter().any(|b| b.path == escape),
+            "and the refusal must be reported for `{escape}`: {:?}",
+            report.blocked
+        );
+        assert_eq!(report.count(ChangeAction::Prune), 0);
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The same guard on the write path: a plan can only ever land inside the
+/// project tree.
+#[test]
+fn a_traversing_target_path_is_never_written() {
+    let root = tmp_project("escape-write");
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let plan = SyncPlan {
+        files: vec![open_harness::sync::DesiredFile {
+            path: "../escaped.json".to_string(),
+            contents: "{}\n".to_string(),
+            harnesses: vec!["claude-code".to_string()],
+            sources: vec!["evil".to_string()],
+            degraded: Vec::new(),
+            conflicts: Vec::new(),
+        }],
+        deferred: Vec::new(),
+    };
+    let report = sync::apply(&project, &plan, false).unwrap();
+
+    assert!(
+        !root.join("escaped.json").exists(),
+        "a traversing target must never be written"
+    );
+    assert!(report.has_blocked());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
