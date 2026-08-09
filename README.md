@@ -80,6 +80,9 @@ oh trust  --root --key acme-root.key --trust trust.json   # trust a root (delega
 oh keyring --key acme-root.key --capability caps/web --out keyring.json   # a root vouches for an author
 oh revoke --capability caps/web --trust trust.json --reason "compromised"
 
+# Publish a catalog (content-addressed archives + a registry index, ready for a CDN)
+oh pack --capabilities capabilities --base-url https://cdn.example.com --out dist
+
 # MCP→CLI bridge (for orgs whose harness MCP client is disabled)
 oh mcp list --id echo-bridge                              # speak MCP to a server through the shell
 oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
@@ -88,7 +91,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 172 tests, green on Linux/macOS/Windows
+cargo test                            # 180 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -278,6 +281,8 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
 | `src/profile.rs` | Profiles + sources (local / git / http archive / registry) + transitive deps → `open-harness.lock` |
+| `src/publish.rs` | `oh pack`: capabilities → content-addressed archives + a registry index |
+| `src/archive.rs` | Deterministic tar writer + a hardened reader (no path escapes, no links) |
 | `src/trust.rs` | ed25519 signing/verification, trust store, root-of-trust keyrings, revocation, permissions |
 | `src/mcp.rs` | Minimal MCP client (stdio + streamable-HTTP, optional TLS) — the bridge runtime |
 | `src/scaffold.rs` + `src/capture.rs` + `src/matrix.rs` | `oh scaffold` / `oh capture` / the generated support matrix |
@@ -286,7 +291,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
 | `docs/` | mdBook site (concepts, authoring guide, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 172 tests: conformance (70) + sourcing (27) + new kinds (24) + single-file (19) + trust (15) + MCP bridge (7) + authoring (5) + unit (3) + capture (2) |
+| `tests/` | 180 tests: conformance (70) + sourcing (27) + new kinds (24) + single-file (19) + trust (15) + MCP bridge (7) + publishing (6) + authoring (5) + unit (5) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies

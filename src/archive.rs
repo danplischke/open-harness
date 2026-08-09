@@ -297,9 +297,183 @@ fn safe_relative_path(name: &str) -> Result<String, String> {
     Ok(parts.join("/"))
 }
 
+// ---- writing --------------------------------------------------------------
+//
+// Publishing is the inverse of the above, with one extra requirement: the output
+// must be **deterministic**. A capability's archive is named by its own sha256,
+// so two publishers packing identical bytes have to produce an identical
+// archive — otherwise the content address changes for reasons that have nothing
+// to do with the content. Every field that would otherwise vary (mtime, uid/gid,
+// owner names, directory iteration order) is therefore fixed.
+
+/// Ordinary file mode written for every member — see the determinism note above.
+const PACK_MODE: u32 = 0o644;
+
+/// Build a deterministic uncompressed tar from `(path, contents)` members.
+///
+/// Paths are validated with the same rules the reader enforces, and sorted, so
+/// the archive is byte-identical for the same input regardless of how the caller
+/// discovered its files. Directory entries are not emitted: the reader (and
+/// `tar -x`) creates parent directories as needed.
+pub fn write_tar(members: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
+    let mut sorted: Vec<(String, &Vec<u8>)> = Vec::with_capacity(members.len());
+    for (path, data) in members {
+        sorted.push((safe_relative_path(path)?, data));
+    }
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    sorted.dedup_by(|a, b| a.0 == b.0);
+
+    let mut out = Vec::new();
+    for (path, data) in sorted {
+        out.extend_from_slice(&header(&path, data.len())?);
+        out.extend_from_slice(data);
+        out.resize(out.len() + (BLOCK - data.len() % BLOCK) % BLOCK, 0);
+    }
+    // Two zero blocks terminate the archive.
+    out.resize(out.len() + 2 * BLOCK, 0);
+    Ok(out)
+}
+
+/// A ustar header for one regular file.
+fn header(path: &str, size: usize) -> Result<[u8; BLOCK], String> {
+    let (name, prefix) = split_name(path)?;
+    let mut h = [0u8; BLOCK];
+    h[..name.len()].copy_from_slice(name.as_bytes());
+    write_field(&mut h, 100, &format!("{PACK_MODE:07o}\0"));
+    write_field(&mut h, 108, "0000000\0"); // uid
+    write_field(&mut h, 116, "0000000\0"); // gid
+    write_field(&mut h, 124, &format!("{size:011o}\0"));
+    write_field(&mut h, 136, "00000000000\0"); // mtime — fixed, for reproducibility
+    h[156] = b'0'; // regular file
+    write_field(&mut h, 257, "ustar\0");
+    write_field(&mut h, 263, "00");
+    // uname/gname stay empty: an owner name would leak the publisher's account
+    // into the content address.
+    write_field(&mut h, 345, prefix);
+
+    // The checksum is computed with its own field read as spaces.
+    for b in h.iter_mut().skip(148).take(8) {
+        *b = b' ';
+    }
+    let sum: u32 = h.iter().map(|&b| b as u32).sum();
+    write_field(&mut h, 148, &format!("{sum:06o}\0 "));
+    Ok(h)
+}
+
+fn write_field(h: &mut [u8; BLOCK], off: usize, s: &str) {
+    h[off..off + s.len()].copy_from_slice(s.as_bytes());
+}
+
+/// Split a path into ustar's `name` (≤100) and `prefix` (≤155) fields, which
+/// together carry up to 255 bytes. Anything longer is refused rather than
+/// silently truncated.
+fn split_name(path: &str) -> Result<(&str, &str), String> {
+    if path.len() <= 100 {
+        return Ok((path, ""));
+    }
+    // Find the split point that leaves a ≤100-byte name and a ≤155-byte prefix.
+    for (i, _) in path.match_indices('/') {
+        let (prefix, rest) = (&path[..i], &path[i + 1..]);
+        if rest.len() <= 100 && prefix.len() <= 155 {
+            return Ok((rest, prefix));
+        }
+    }
+    Err(format!(
+        "path '{path}' is too long for a tar header (max 100 bytes after the last \
+         directory split, 155 before it)"
+    ))
+}
+
+/// Read `dir` into deterministic tar members, each prefixed with `root_name` so
+/// the archive unpacks to `root_name/…` — the layout `discover` expects.
+///
+/// The managed cache tree is skipped; a `capability.sig` is **kept**, so a
+/// published archive can carry its own signature.
+pub fn read_dir_members(dir: &Path, root_name: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut out = Vec::new();
+    collect_files(dir, &PathBuf::from(root_name), &mut out)?;
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+fn collect_files(dir: &Path, rel: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<(), String> {
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("scan {}: {e}", dir.display()))?;
+    // Sort locally: directory iteration order is filesystem-dependent, and the
+    // archive's digest must not be.
+    let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for path in entries {
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let child = rel.join(&name);
+        if path.is_dir() {
+            if name == ".open-harness" {
+                continue;
+            }
+            collect_files(&path, &child, out)?;
+        } else if path.is_file() {
+            let data = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+            out.push((child.to_string_lossy().replace('\\', "/"), data));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn written_archives_round_trip_and_are_deterministic() {
+        let members = vec![
+            ("pack/b.md".to_string(), b"second".to_vec()),
+            ("pack/a/capability.json".to_string(), b"{}".to_vec()),
+        ];
+        let once = write_tar(&members).unwrap();
+        // Reversing the input must not change the archive: the content address
+        // depends on content, not on discovery order.
+        let mut reversed = members.clone();
+        reversed.reverse();
+        assert_eq!(
+            once,
+            write_tar(&reversed).unwrap(),
+            "packing is deterministic"
+        );
+
+        let dest = std::env::temp_dir().join(format!("oh-archive-rt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dest);
+        assert_eq!(unpack_tar(&once, &dest).unwrap(), 2);
+        assert_eq!(
+            std::fs::read_to_string(dest.join("pack/a/capability.json")).unwrap(),
+            "{}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("pack/b.md")).unwrap(),
+            "second"
+        );
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn long_paths_use_the_ustar_prefix_and_over_long_ones_are_refused() {
+        let deep = format!("{}/{}", "d".repeat(120), "f".repeat(40));
+        let archive = write_tar(&[(deep.clone(), b"x".to_vec())]).unwrap();
+        let dest = std::env::temp_dir().join(format!("oh-archive-long-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dest);
+        unpack_tar(&archive, &dest).unwrap();
+        assert!(
+            dest.join(&deep).is_file(),
+            "a prefix-split path round-trips"
+        );
+        let _ = std::fs::remove_dir_all(&dest);
+
+        let unsplittable = "x".repeat(120);
+        assert!(
+            write_tar(&[(unsplittable, b"x".to_vec())]).is_err(),
+            "a name too long to split is refused, not truncated"
+        );
+    }
 
     #[test]
     fn rejects_traversal_and_absolute_paths() {

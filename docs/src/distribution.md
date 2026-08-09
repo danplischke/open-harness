@@ -15,9 +15,9 @@ source](#what-exists-today). A CDN registry is that same concept with the index
 > concrete change is tagged **Implemented** or **Proposed** in
 > [Implementation](#implementation-implemented-vs-proposed). In prose: the
 > `Registry` source, the lockfile, the whole trust module, **fetching the index
-> over HTTP(S)**, and **the archive leaf** (so the capability *bytes* come from
-> the CDN too) exist today; a publish command and signature verification of a
-> fetched archive do not.
+> over HTTP(S)**, **the archive leaf** (so the capability *bytes* come from the
+> CDN too), and **`oh pack`** (the producer side) exist today; signature
+> verification of a *fetched* archive does not.
 
 ## Two axes of distribution
 
@@ -62,13 +62,15 @@ resolver.
 | Index from a **URL** | `profile.rs` | `index` accepts an `http(s)://` URL, a `file://` URL, or a workdir-relative path. |
 | `Source::Http { url, sha256 }` | `profile.rs` | A digest-pinned **archive leaf**: the capability bytes themselves, fetched from the CDN. |
 | tar reader + hardened extractor | `archive.rs` | Unpacks an archive without letting it write outside its destination. |
+| Deterministic tar writer | `archive.rs` | Packs a capability so identical content always yields an identical digest. |
+| `oh pack` | `publish.rs` | Capabilities → content-addressed archives + a registry index, ready to upload. |
 | Lockfile (`Lock`, `LockedSource`, `LockedCap`) | `profile.rs` | Pins id + version + fingerprint per capability, and each git source's commit SHA. |
 | Trust module | `trust.rs` | sha256 content digests, ed25519 signatures, a trust store, a root-of-trust keyring, and revocation. |
 | HTTP/1.1 + rustls client | `http.rs` (`http-tls` feature) | The shared transport, used by both the MCP bridge and registry fetches. |
 
-The conceptual model is done, and both the index and the capability bytes can
-already be CDN-hosted. What is missing is the **publish** side that produces them
-and signature verification on the way in.
+The conceptual model is done: the catalog and the capability bytes can be
+CDN-hosted, and `oh pack` produces them. What is missing is verifying an
+archive's *signature* on the way in.
 
 ### Hosting the index
 
@@ -147,26 +149,67 @@ fights the CDN. Short TTLs defeat caching; long TTLs plus an invalidation on
 every publish cost money, propagate slowly, and still let a consumer read a
 stale index.
 
-The standard fix is **immutable content + a tiny mutable pointer**:
+The fix is **immutable content plus exactly one mutable object**. This is the
+tree `oh pack` emits:
 
 ```text
 s3://oh-registry/                       (origin behind CloudFront)
   blobs/sha256/<digest>.tar             # immutable, content-addressed
                                         #   Cache-Control: public, max-age=31536000, immutable
-  index/1.json  index/2.json  …         # immutable index snapshots
-  registry.json                         # { "latest": "index/2.json" } — tiny, short TTL
+  index/sha256/<digest>.json            # immutable snapshot of one exact catalog
+  registry.json                         # the current catalog — the only mutable object
 ```
 
 - **Blobs are content-addressed and cached forever.** The URL *is* the sha256,
   so a byte can never change under a URL; the cache never has to be invalidated.
-- **Index snapshots are immutable too** — `index/2.json` is a frozen catalog;
-  publishing writes `index/3.json`, never edits an existing one.
-- **Only `registry.json` is mutable,** and it is a few bytes with a short TTL.
+- **Index snapshots are content-addressed too,** so publishing never edits an
+  existing one and rollback is a copy rather than a rebuild.
+- **Only `registry.json` is mutable** — one object, short TTL.
 
-**Publish ordering makes it atomic:** upload the blobs, then the new immutable
-index snapshot, then flip the pointer *last*. A consumer reading the pointer
-only ever sees an index that references artifacts already present — there is no
-window where the catalog names a blob that hasn't landed.
+**Publish ordering makes it atomic:** upload the blobs, then the snapshot, then
+replace `registry.json` *last* (an S3 `PUT` swaps an object atomically). A
+consumer therefore never reads a catalog naming a blob that has not landed.
+`oh pack` writes the tree in that same order and prints the matching upload
+commands.
+
+> An earlier draft of this note proposed making `registry.json` a *tiny pointer*
+> (`{"latest": "index/2.json"}`) so the mutable object stayed a few bytes. That
+> is deliberately **not** what shipped: it costs every consumer an extra round
+> trip and needs pointer-following in the resolver, to shrink an object that is
+> already small at the scale this format targets. Content-addressing the
+> snapshots keeps the immutability benefit without the indirection. If a catalog
+> ever outgrows a single mutable file, sharding it by name-prefix is the better
+> next move — the `name → metadata` contract already allows it.
+
+## Publishing a catalog
+
+```sh
+oh sign --capability capabilities/commit-style --key author.key   # optional, but see below
+oh pack --capabilities capabilities \
+        --base-url https://cdn.example.com \
+        --out dist
+```
+
+`pack` walks the capability directory, packs each capability into a
+deterministic archive, names it by its sha256, and writes `dist/` in the layout
+above with a ready-to-consume `registry.json`. Point a profile at that file and
+the catalog resolves:
+
+```jsonc
+{ "registry": { "index": "https://cdn.example.com/registry.json", "name": "commit-style" } }
+```
+
+**Determinism is the load-bearing property.** Because an archive is named by its
+own digest, packing must not be sensitive to anything but content — so mtimes,
+uid/gid, owner names, file mode, and directory iteration order are all fixed.
+The same capability packs to the same bytes on any machine, which is what makes
+a consumer's pin survive a re-publish of unchanged content.
+
+**Signing stays separate and explicit.** `oh pack` never signs; `oh sign` writes
+`capability.sig` into the capability directory and packing carries that file
+along, so the signature travels inside the archive. A capability packed without
+one is *listed in the output* — a catalog should not quietly ship code nobody
+vouched for.
 
 ## The trust flow
 
@@ -245,19 +288,19 @@ applies unchanged:
   artifact cannot be expressed. The archive is an uncompressed tar, read by the
   hand-rolled `archive.rs` (see [Archive format](#archive-format)).
 
+- **`oh pack --capabilities DIR --base-url URL --out DIR`** — the producer:
+  packs each capability into a deterministic archive, names it by its sha256,
+  and writes the tree below. Unsigned capabilities are listed in the output
+  rather than passed over silently.
+
 **Proposed (the delta to CDN-native):**
 
-1. **A publish command.** `oh pack` / `oh registry publish`: package each
-   capability into a content-addressed tarball, compute its sha256 (reuse
-   `capability_digest`), sign it, and emit/update the index snapshot + pointer.
-   This is the capability-content analog of what `release.yml` does for the
-   binary. Until it exists, a publisher uses `tar -cf` + `sha256sum` — which is
-   exactly what the archive leaf consumes.
-2. **Verify signatures on a fetched archive.** The digest pin makes an archive
+1. **Verify signatures on a fetched archive.** The digest pin makes an archive
    *tamper-evident against the profile*; it does not yet check `capability.sig`
    against the `TrustStore` on the way in, so `--require-signed` does not yet
-   gate an `http` source.
-3. **Pin the per-capability cryptographic digest in the lock.**
+   gate an `http` source. The signature already travels *inside* the archive, so
+   this is a verification step, not a format change.
+2. **Pin the per-capability cryptographic digest in the lock.**
    `LockedCap.fingerprint` is still a non-cryptographic FNV-1a hash used for
    *drift* detection. The archive's sha256 is now pinned at the **source** level
    (`LockedSource.rev`); doing the same per capability would make the lock a

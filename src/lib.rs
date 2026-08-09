@@ -19,6 +19,7 @@ pub mod matrix;
 pub mod mcp;
 pub mod model;
 pub mod profile;
+pub mod publish;
 pub mod runtime;
 pub mod scaffold;
 pub mod sync;

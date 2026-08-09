@@ -10,6 +10,8 @@
 //!   drift vs a synced project with `--ci`).
 //! Trust:      `keygen` · `sign` · `verify` · `trust` · `revoke` · `keyring`
 //!   (a root of trust: `keyring` + `trust --root`/`--keyring`).
+//! Publishing: `pack` (capabilities → content-addressed archives + a registry
+//!   index, ready to upload to a CDN).
 //! Reporting:  `matrix` (the event × harness support grid; `--markdown`).
 
 use open_harness::adapters::{Harness, ALL};
@@ -17,6 +19,7 @@ use open_harness::kind::{kind_impl, Artifact, Installability, KindId};
 use open_harness::manifest::{discover, LoadedCapability, PermissionPolicy};
 use open_harness::mcp::{self, HttpServerSpec, McpServer, ServerSpec};
 use open_harness::profile::{self, Lock, Profile, Resolved};
+use open_harness::publish;
 use open_harness::scaffold::{self, Lang};
 use open_harness::sync::{self, ApplyReport, ChangeAction, Deferred, DriftKind, DriftReport};
 use open_harness::trust::{self, TrustStore};
@@ -33,6 +36,7 @@ fn main() {
         "emit" => cmd_emit(&rest),
         "keygen" => cmd_keygen(&rest),
         "sign" => cmd_sign(&rest),
+        "pack" => cmd_pack(&rest),
         "verify" => cmd_verify(&rest),
         "trust" => cmd_trust(&rest),
         "revoke" => cmd_revoke(&rest),
@@ -51,7 +55,7 @@ fn main() {
         "remove" => cmd_remove(&rest),
         _ => {
             eprintln!(
-                "oh <init|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix|version> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
+                "oh <init|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|pack|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix|version> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--base-url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\npublish:   oh pack --capabilities capabilities --base-url https://cdn.example.com --out dist\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
             );
             exit(2);
         }
@@ -97,6 +101,8 @@ struct Opts {
     scaffold_project: bool,
     local: Option<String>,
     git: Option<String>,
+    // publishing (#21)
+    base_url: Option<String>,
 }
 
 fn parse_opts(rest: &[String]) -> Opts {
@@ -135,6 +141,7 @@ fn parse_opts(rest: &[String]) -> Opts {
         scaffold_project: false,
         local: None,
         git: None,
+        base_url: None,
     };
     let mut i = 0;
     while i < rest.len() {
@@ -217,6 +224,10 @@ fn parse_opts(rest: &[String]) -> Opts {
             }
             "--url" => {
                 o.mcp_url = rest.get(i + 1).cloned();
+                i += 2;
+            }
+            "--base-url" => {
+                o.base_url = rest.get(i + 1).cloned();
                 i += 2;
             }
             "--header" => {
@@ -495,6 +506,74 @@ fn cmd_keygen(rest: &[String]) {
     println!("  fingerprint: {}", trust::fingerprint(&key.public_key));
     eprintln!(
         "keep the secret key private — do not commit {}",
+        out.display()
+    );
+}
+
+/// `oh pack` — turn a capability directory into the publishable CDN tree
+/// (content-addressed archives + a registry index). See
+/// `docs/src/distribution.md`.
+fn cmd_pack(rest: &[String]) {
+    let o = parse_opts(rest);
+    let Some(base_url) = o.base_url.clone() else {
+        eprintln!(
+            "pack requires --base-url URL (where the published tree will be served, \
+             e.g. https://cdn.example.com)"
+        );
+        exit(2);
+    };
+    let out = o.out.clone().unwrap_or_else(|| PathBuf::from("dist"));
+
+    let caps = discover(&o.capabilities).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        exit(1);
+    });
+    if caps.is_empty() {
+        eprintln!("no capabilities found in {}", o.capabilities.display());
+        exit(1);
+    }
+    let packed = publish::pack_capabilities(&caps).unwrap_or_else(|e| {
+        eprintln!("pack failed: {e}");
+        exit(1);
+    });
+    let report = publish::write_tree(&packed, &base_url, &out).unwrap_or_else(|e| {
+        eprintln!("pack failed: {e}");
+        exit(1);
+    });
+
+    println!("packed {} capabilities → {}", report.blobs, out.display());
+    for p in &packed {
+        println!(
+            "  {} {} [{}]  sha256:{}  ({} bytes){}",
+            p.id,
+            p.version,
+            p.kind,
+            p.digest,
+            p.bytes.len(),
+            if p.signed { "" } else { "  ⚠ unsigned" }
+        );
+    }
+    println!();
+    println!("  index:    {}", report.index_path.display());
+    println!("  snapshot: {}", report.snapshot_path.display());
+    if !report.unsigned.is_empty() {
+        // Honest by design: a catalog that ships unvouched-for code says so.
+        println!();
+        println!(
+            "note: {} of {} capabilities are unsigned ({}). Consumers cannot verify \
+             their author — run `oh sign --capability DIR --key FILE` before packing.",
+            report.unsigned.len(),
+            packed.len(),
+            report.unsigned.join(", ")
+        );
+    }
+    println!();
+    println!("publish by uploading blobs/ and index/ first, then registry.json last —");
+    println!("so the catalog never names an artifact that has not landed:");
+    println!("  aws s3 sync {}/blobs s3://BUCKET/blobs", out.display());
+    println!("  aws s3 sync {}/index s3://BUCKET/index", out.display());
+    println!(
+        "  aws s3 cp   {}/registry.json s3://BUCKET/registry.json",
         out.display()
     );
 }
