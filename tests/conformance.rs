@@ -1814,3 +1814,107 @@ fn a_traversing_target_path_is_never_written() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---- one native event, many normalized ones ------------------------------
+//
+// Most harnesses expose a single `PreToolUse`-style event that fires for every
+// tool. Two things follow, and both used to be wrong: several normalized events
+// collapse onto that one native name (and must not overwrite each other), and
+// the class in a registration is a claim about the binding, not the call.
+
+/// Two tool bindings that resolve to the same native event register **once**,
+/// loudly, instead of one silently overwriting the other.
+#[test]
+fn colliding_native_events_collapse_instead_of_vanishing() {
+    let events = [
+        NormEvent::tool(Phase::Pre, ToolClass::Any),
+        NormEvent::tool(Phase::Pre, ToolClass::Shell),
+    ];
+    let out = Harness::Claude.emit_registration(&events, "guard");
+
+    assert_eq!(
+        out.matches("oh run --harness claude-code").count(),
+        1,
+        "one native event gets one command: {out}"
+    );
+    assert!(
+        out.contains("--event pre.tool.any"),
+        "and it must be the widest class the native event actually fires for: {out}"
+    );
+    assert!(
+        out.contains("WARNING") && out.contains("pre.tool.any + pre.tool.shell"),
+        "the collapse must be reported, not silent: {out}"
+    );
+}
+
+/// Cursor splits "before a tool" per class, so nothing collapses there.
+#[test]
+fn per_class_harnesses_keep_their_separate_registrations() {
+    let events = [
+        NormEvent::tool(Phase::Pre, ToolClass::Shell),
+        NormEvent::tool(Phase::Pre, ToolClass::FileRead),
+    ];
+    let out = Harness::Cursor.emit_registration(&events, "guard");
+    assert!(out.contains("beforeShellExecution"), "{out}");
+    assert!(out.contains("beforeReadFile"), "{out}");
+    assert_eq!(out.matches("oh run --harness cursor").count(), 2, "{out}");
+}
+
+/// The dispatcher narrows a coarse registration to the class of the call that
+/// arrived, so a class-scoped binding runs on its own calls and no others — and
+/// the payload describes the real tool rather than repeating the registration.
+#[test]
+fn the_dispatched_class_comes_from_the_tool_not_the_registration() {
+    let registered = NormEvent::tool(Phase::Pre, ToolClass::Shell);
+    for (tool, expected) in [
+        ("Bash", "pre.tool.shell"),
+        ("Read", "pre.tool.file_read"),
+        ("Write", "pre.tool.file_write"),
+        ("Edit", "pre.tool.file_edit"),
+        ("WebFetch", "pre.tool.web"),
+        ("mcp__srv__do", "pre.tool.mcp"),
+    ] {
+        let native = json!({"tool_name": tool, "tool_input": {}});
+        assert_eq!(
+            Harness::Claude.refine(&native, &registered).id(),
+            expected,
+            "`{tool}` must dispatch as {expected}"
+        );
+    }
+
+    // An unclassifiable name leaves the registered class alone — nothing that
+    // fired before stops firing because a name is missing from a table.
+    let native = json!({"tool_name": "SomeFutureTool", "tool_input": {}});
+    assert_eq!(
+        Harness::Claude.refine(&native, &registered).id(),
+        "pre.tool.shell"
+    );
+    // As does a harness whose per-class events already carry the truth.
+    assert_eq!(
+        Harness::Cursor.refine(&json!({}), &registered).id(),
+        "pre.tool.shell"
+    );
+}
+
+/// End to end: the real secret-guard binds `pre.tool.any`, so it still sees
+/// every tool, while the payload it receives names the actual class.
+#[test]
+fn the_payload_carries_the_real_tool_class() {
+    let native = json!({"tool_name": "Read", "tool_input": {"file_path": "/etc/passwd"}});
+    let out = open_harness::dispatch(
+        Harness::Claude,
+        &NormEvent::tool(Phase::Pre, ToolClass::Shell),
+        &caps(),
+        &native,
+    );
+    assert_eq!(
+        out.event.id(),
+        "pre.tool.file_read",
+        "a Read is not a shell call, whatever the registration said"
+    );
+    assert!(
+        out.ran.contains(&"secret-guard".to_string()),
+        "an `any`-bound guard still runs: {:?}",
+        out.ran
+    );
+}

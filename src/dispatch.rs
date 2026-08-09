@@ -19,6 +19,10 @@ use serde_json::Value;
 
 pub struct DispatchOutcome {
     pub response: NativeResponse,
+    /// The event actually dispatched — the registered one narrowed to the class
+    /// of the call that arrived (see [`Harness::refine`]). Reported because it is
+    /// what decided who ran, and it can differ from the registered event.
+    pub event: NormEvent,
     pub ran: Vec<String>,
     pub skipped: Vec<String>,
     pub errored: Vec<String>,
@@ -42,6 +46,10 @@ pub fn dispatch_with_limits(
     native_stdin: &Value,
     limits: &RunLimits,
 ) -> DispatchOutcome {
+    // A registration names the event it was *bound* to; most harnesses fire one
+    // tool event for every tool, so narrow it to the call that actually arrived
+    // before deciding who runs (and before telling them what this is).
+    let ev = &harness.refine(native_stdin, ev);
     let payload = harness.decode(native_stdin, ev);
 
     // Fan out: run every bound hook capability concurrently, but keep the
@@ -109,6 +117,7 @@ pub fn dispatch_with_limits(
     let response = harness.encode(&merged, ev);
     DispatchOutcome {
         response,
+        event: *ev,
         ran,
         skipped,
         errored,

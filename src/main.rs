@@ -376,8 +376,19 @@ fn cmd_run(rest: &[String]) {
 
     if o.explain {
         eprintln!(
-            "[explain] harness={harness} event={event} ran={:?} skipped={:?} errored={:?} -> exit={}",
-            result.ran, result.skipped, result.errored, result.exit_code
+            // Show the dispatched event, and the registered one alongside it when
+            // the tool's class narrowed it — that is what decided who ran.
+            "[explain] harness={harness} event={}{} ran={:?} skipped={:?} errored={:?} -> exit={}",
+            result.event,
+            if result.event == event {
+                String::new()
+            } else {
+                format!(" (registered {event})")
+            },
+            result.ran,
+            result.skipped,
+            result.errored,
+            result.exit_code
         );
     }
     if !result.stdout.is_empty() {

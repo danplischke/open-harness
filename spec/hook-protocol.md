@@ -57,6 +57,14 @@ harnesses split "before a tool runs" into per-tool-class events:
 | `boundary` | string? | `start`, `end` (session/subagent) |
 | `task_kind` | string? | `start`, `resume`, `cancel` (task) |
 
+`tool_class` describes **the call being made**, not the binding that caught it.
+On a harness that fires one tool event for everything, the dispatcher classifies
+the tool the harness reported before building this payload, so a capability bound
+to `pre.tool.shell` is invoked for shell calls and reads `"tool_class":"shell"`
+truthfully. Where a tool cannot be classified — an unrecognized name, or a
+harness with no documented tool vocabulary — the class of the registration
+stands; a capability that must be certain should check `tool.name` (or `raw`).
+
 ## Decision (capability → dispatcher, stdout)
 
 | field | type | required | meaning |
