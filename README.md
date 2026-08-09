@@ -53,6 +53,7 @@ target at all (Aider/Copilot for tool gating), that's reported, not faked.
 # Author
 oh init                                                   # write an open-harness.yaml profile
 oh migrate                                                # rewrite legacy JSON configs as YAML
+oh install --runtimes                                     # run capabilities' provisioning commands (shows first; --yes to run)
 oh scaffold --kind hook --lang python --id my-guard       # a runnable capability starter (py|node|typescript|bash)
 oh scaffold --kind agent --id db-engineer                 # or: skill | rule | command | tool | permission | instructions
 oh scaffold --project  --id my-cap                        # a typed TypeScript capability as an npm package
@@ -90,7 +91,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 300 tests, green on Linux/macOS/Windows
+cargo test                            # 317 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -316,7 +317,14 @@ session ever starts, and if it still reaches dispatch the failure has its own
 class (`runtime-missing`) naming the tool instead of a traceback. The verdict is
 deliberately unchanged — a guard that cannot run leaves you unguarded.
 
-**open-harness installs nothing and bundles nobody else's toolchain.** `pip` and
+A capability may also declare how to *make* its dependencies ready
+(`runtime.provision`), which `oh install --runtimes` will run — behind three
+gates: it is a separate verb (`sync` never provisions), it prints the exact
+commands and stops until `--yes`, and `--deny-network` refuses outright. A
+provisioner that exits 0 without satisfying `requires` is reported as a failure,
+because the command ran and the dependency still is not there.
+
+**open-harness installs nothing on its own and bundles nobody else's toolchain.** `pip` and
 `npm` execute arbitrary code at install time, which is a bigger hole than the
 one gating transitive acquisition closes; and vendoring `uv` (50 MB) or `node`
 (119 MB) into a 2.8 MB static binary would ship third-party code with none of
@@ -407,7 +415,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
 | `docs/` | mdBook site (concepts, authoring, dependencies, runtimes, plugins, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 300 tests: conformance (70) + sourcing & dependencies (40) + new kinds (24) + deps vocabulary (21) + selection (21) + plugin import (21) + config/YAML (20) + single-file (19) + trust (15) + runtimes (12) + JSON→YAML migration (12) + `--locked` (9) + MCP bridge (7) + authoring (5) + capture (2) + unit (2) |
+| `tests/` | 317 tests: conformance (70) + sourcing & dependencies (40) + runtimes & provisioning (29) + new kinds (24) + deps vocabulary (21) + selection (21) + plugin import (21) + config/YAML (20) + single-file (19) + trust (15) + JSON→YAML migration (12) + `--locked` (9) + MCP bridge (7) + authoring (5) + capture (2) + unit (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies

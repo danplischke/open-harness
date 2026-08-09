@@ -37,13 +37,16 @@ pub use deps::{Dependencies, Dependency, Relation, Requirement, Version};
 pub use dispatch::{dispatch, dispatch_with_limits, DispatchOutcome};
 pub use event::NormEvent;
 pub use kind::{kind_impl, Artifact, Installability, Kind, KindId, KindPlan};
-pub use manifest::{discover, LoadedCapability, Runtime};
+pub use manifest::{discover, LoadedCapability, Provision, Runtime};
 pub use model::{
     merge, negotiate, parse_decision, validate_decision, Decision, NativeResponse, Verdict,
     PROTOCOL, PROTOCOL_VERSION,
 };
 pub use profile::{resolve, Lock, PluginSource, Profile, Resolved, Select, Source};
-pub use runtime::{find_executable, install_hint, missing_requirements, RunError, RunLimits};
+pub use runtime::{
+    find_executable, install_hint, missing_requirements, provision, resolve_program,
+    resolve_requirement, RunError, RunLimits,
+};
 pub use sync::{
     apply, check, plan_sync, ApplyReport, ChangeAction, DesiredFile, DriftKind, DriftReport,
     SyncPlan,

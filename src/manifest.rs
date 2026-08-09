@@ -16,7 +16,7 @@ pub const MANIFEST_STEM: &str = "capability";
 /// The canonical manifest filename, for messages and scaffolding.
 pub const MANIFEST_NAME: &str = "capability.yaml";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RunSpec {
     /// Interpreter/binary, e.g. `python3`, `node`, `./guard` (a compiled bin) —
     /// or, when `interpreter` is set, the **script** to run through it.
@@ -169,11 +169,44 @@ pub struct Runtime {
     /// Checked before spawning, and reported by `oh check` / `oh doctor`.
     #[serde(default)]
     pub requires: Vec<String>,
+    /// How to make this capability's dependencies ready — `uv sync --script`,
+    /// `npm ci`, or whatever its ecosystem uses.
+    ///
+    /// **Never run by `sync`.** Only `oh install --runtimes` runs it, and only
+    /// when explicitly confirmed. Installing config and executing a package
+    /// manager are different acts and do not share a verb: `pip`/`npm` run
+    /// arbitrary code at install time (build backends, `postinstall`), which is
+    /// a larger hole than the one [`crate::profile::TransitiveTrust`] closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<Provision>,
+}
+
+/// A provisioning command. Deliberately not a [`RunSpec`]: there is no
+/// interpreter indirection here, just an executable and its arguments, run in
+/// the capability's own directory.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Provision {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl Provision {
+    /// The command as a human would type it — what `oh install --runtimes`
+    /// shows before running anything.
+    pub fn display(&self) -> String {
+        if self.args.is_empty() {
+            self.command.clone()
+        } else {
+            format!("{} {}", self.command, self.args.join(" "))
+        }
+    }
 }
 
 impl Runtime {
     pub fn is_empty(&self) -> bool {
-        self.requires.is_empty()
+        self.requires.is_empty() && self.provision.is_none()
     }
 }
 

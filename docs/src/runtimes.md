@@ -62,13 +62,22 @@ that it names the tool, offers the fix, and `check` told you before the session
 started.
 
 `requires` is a list of **executable names**, resolved on `PATH` exactly the way
-the dispatcher resolves them, so `check` and the runtime can never disagree.
-Unknown tools simply get no install hint, which is more useful than a wrong one.
+the dispatcher resolves them — including the per-OS interpreter remap, so a
+`requires: [python3]` is satisfied on Windows where the binary is `python.exe`.
+`check`, `doctor`, `run` and `provision` therefore cannot disagree about whether
+a capability will start. Unknown tools simply get no install hint, which is more
+useful than a wrong one.
 
 ## What open-harness will not do
 
-**It does not install anything.** `sync` writes config; it never runs a package
-manager. There is no `oh` command that shells out to `pip`.
+**It never resolves dependencies itself.** There is no open-harness dependency
+solver for Python or Node, no lockfile of ours for them, no cache of ours. When
+you ask for provisioning, it runs *the ecosystem's own tool* — `uv`, `npm` — and
+that tool owns resolution, caching and reproducibility.
+
+**And it never provisions implicitly.** `sync` writes config and nothing else;
+running a package manager is a separate verb (`oh install --runtimes`) that
+shows the commands and stops until you confirm.
 
 That's a deliberate line, and the reasoning is the same one this project applies
 everywhere else:
@@ -76,8 +85,9 @@ everywhere else:
 - `pip install` and `npm install` **execute arbitrary code** at install time —
   build backends, `setup.py`, `postinstall`. That is strictly more dangerous than
   the capability itself, which at least only runs when an event fires. Gating
-  transitive capability acquisition on signatures while opening an ungated
-  code-execution path underneath it would be theatre.
+  transitive capability acquisition on signatures while opening an *ungated*
+  code-execution path underneath it would be theatre — which is why the one path
+  that does execute is confirmed, refusable, and signature-gateable.
 - Owning resolution, lockfiles, caches and wheel matrices for three-plus
   ecosystems, cross-platform, is a bigger project than open-harness.
 - "`run` is just a command line" stops being true the moment the manifest knows
@@ -157,6 +167,51 @@ resolving something new.
 
 The trade: needs the tool, and needs network at least once.
 
+#### Provisioning it
+
+Declaring `provision` lets `oh install --runtimes` run the ecosystem's own tool
+for you:
+
+```yaml
+runtime:
+  requires: [uv]
+  provision:
+    command: uv
+    args: [sync, --script, guard.py]
+```
+
+```
+$ oh install --runtimes
+1 capability(ies) declare a provisioning command:
+
+  secret-guard         uv sync --script guard.py
+                         in capabilities/secret-guard · missing uv (install: brew install uv)
+
+These commands run with your privileges and may execute code from the package
+registries they contact.
+Re-run with --yes to proceed.
+```
+
+Three gates stand in front of that, all deliberate:
+
+1. **It is a separate verb.** `sync` writes config and never provisions —
+   installing config and executing a package manager are different acts.
+2. **It shows before it runs.** Without `--yes` it prints the exact commands and
+   stops. `pip` and `npm` execute arbitrary code at install time, so the blast
+   radius should be visible beforehand, not afterwards.
+3. **`--deny-network` refuses outright**, because provisioning is
+   network-touching by nature and honouring the flag by running anyway would
+   make it a lie.
+
+`--require-signed` additionally restricts it to capabilities whose signature
+verifies — the same gate transitive acquisition uses, for the same reason.
+
+The command runs in the capability's own directory, and its requirements are
+re-probed afterwards. A provisioner that exits 0 *without* satisfying
+`runtime.requires` is reported as a failure, not a success: the command ran, the
+dependency is not there, and calling that ✓ would be the same silent lie this
+project refuses everywhere else.
+
 ### 4. System packages
 
 The host has to already be right. `requires` can tell you it isn't; it cannot
@@ -188,8 +243,11 @@ matrix entry and an example capability. Not a match arm.
 
 ## Cross-platform notes
 
-- `requires` resolution honors `PATHEXT` on Windows and never relies on a `#!`
-  shebang, matching how the dispatcher resolves interpreters.
+- `requires`, `run` and `provision` all resolve a command the **same** way:
+  `PATHEXT` on Windows, no `#!` reliance, and the per-OS interpreter remap
+  (`python3` → `python`). Three code paths spawning or probing the same name
+  must not disagree — otherwise a capability that runs fine is reported as
+  having a missing runtime, or fails to provision, on Windows only.
 - Install hints are per-OS: `brew` on macOS, the distribution's package manager
   on Linux, and the vendor's own documentation where a package identifier would
   be a guess.

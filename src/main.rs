@@ -2,8 +2,9 @@
 //!
 //! Authoring:  `init` (write a profile) · `scaffold` (a runnable capability
 //!   starter) · `add`/`remove` (edit a profile's sources) · `migrate` (rewrite
-//!   legacy JSON configs as YAML) · `doctor` (check the environment +
-//!   capability health).
+//!   legacy JSON configs as YAML) · `install --runtimes` (run capabilities'
+//!   declared provisioning commands, confirmed) · `doctor` (check the
+//!   environment + capability health).
 //! Runtime:    `run` (a harness's single native hook entrypoint) · `mcp`
 //!   (list/call an MCP server's tools through the shell — the MCP→CLI bridge).
 //! Delivery:   `emit` (native registration config) · `resolve` (sources → lock)
@@ -48,12 +49,13 @@ fn main() {
         "capture" => cmd_capture(&rest),
         "init" => cmd_init(&rest),
         "migrate" => cmd_migrate(&rest),
+        "install" => cmd_install(&rest),
         "doctor" => cmd_doctor(&rest),
         "add" => cmd_add(&rest),
         "remove" => cmd_remove(&rest),
         _ => {
             eprintln!(
-                "oh <init|migrate|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix|version> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--locked] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh migrate (JSON configs → YAML) · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
+                "oh <init|migrate|install|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix|version> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--locked] [--runtimes] [--yes] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh migrate (JSON configs → YAML) · oh install --runtimes · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
             );
             exit(2);
         }
@@ -71,6 +73,8 @@ struct Opts {
     ci: bool,
     /// Treat the lockfile as a contract: never rewrite it, fail if it is stale.
     locked: bool,
+    /// Confirm an action that executes code (`install --runtimes`).
+    yes: bool,
     explain: bool,
     timeout_ms: u64,
     max_output_bytes: u64,
@@ -114,6 +118,7 @@ fn parse_opts(rest: &[String]) -> Opts {
         uninstall: false,
         ci: false,
         locked: false,
+        yes: false,
         explain: false,
         timeout_ms: 0,
         max_output_bytes: 0,
@@ -288,6 +293,10 @@ fn parse_opts(rest: &[String]) -> Opts {
             }
             "--locked" => {
                 o.locked = true;
+                i += 1;
+            }
+            "--yes" | "-y" => {
+                o.yes = true;
                 i += 1;
             }
             "--ci" => {
@@ -1372,6 +1381,123 @@ fn collect_migratable(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
             out.push(entry.path());
         }
     }
+}
+
+/// `oh install --runtimes` — run capabilities' declared provisioning commands.
+///
+/// The only place in open-harness that executes something a capability author
+/// chose but the wire protocol did not define. Three gates stand in front of it,
+/// all deliberate:
+///
+///  1. **It is a separate verb.** `sync` writes config and never provisions;
+///     executing a package manager is a different act.
+///  2. **It shows before it runs.** Without `--yes` it prints the exact commands
+///     and stops. `pip`/`npm` execute arbitrary code at install time, so the
+///     blast radius should be visible before it happens, not after.
+///  3. **`--deny-network` refuses outright**, because provisioning is
+///     network-touching by nature and the flag would otherwise be a lie.
+///
+/// `--require-signed` additionally restricts it to capabilities whose signature
+/// verifies against the trust store — the same gate transitive acquisition uses,
+/// for the same reason.
+fn cmd_install(rest: &[String]) {
+    let o = parse_opts(rest);
+    if !rest.iter().any(|a| a == "--runtimes") {
+        eprintln!("oh install --runtimes [--capabilities DIR | --profile FILE] [--yes]");
+        exit(2);
+    }
+    if o.deny_network {
+        eprintln!(
+            "--deny-network refuses runtime provisioning: fetching dependencies needs the \
+             network, so running it under this flag would be dishonest"
+        );
+        exit(1);
+    }
+
+    let caps = match o.profile.clone() {
+        Some(p) => resolve_profile_opts(&p, o.locked).capabilities,
+        None => load_caps(&o),
+    };
+    let store = load_trust(&o);
+
+    let mut queued = Vec::new();
+    for cap in &caps {
+        let Some(spec) = cap.manifest.runtime.provision.as_ref() else {
+            continue;
+        };
+        if o.require_signed {
+            let v = trust::verify(&cap.dir, &store);
+            if !v.passes(true) {
+                eprintln!(
+                    "  skipped   {} — {} (--require-signed)",
+                    cap.manifest.id,
+                    v.status()
+                );
+                continue;
+            }
+        }
+        queued.push((cap, spec));
+    }
+
+    if queued.is_empty() {
+        println!("no capabilities declare `runtime.provision`.");
+        return;
+    }
+
+    println!(
+        "{} capability(ies) declare a provisioning command:\n",
+        queued.len()
+    );
+    for (cap, spec) in &queued {
+        let state = match open_harness::runtime::missing_requirements(&cap.manifest.runtime) {
+            None => "ready".to_string(),
+            Some(gap) => format!("missing {gap}"),
+        };
+        println!("  {:<20} {}", cap.manifest.id, spec.display());
+        println!("  {:<20}   in {} · {state}", "", cap.dir.display());
+    }
+
+    if !o.yes {
+        println!(
+            "\nThese commands run with your privileges and may execute code from the \
+             package registries they contact.\nRe-run with --yes to proceed."
+        );
+        return;
+    }
+
+    println!("\nprovisioning:");
+    let mut failed = 0;
+    for (cap, _) in &queued {
+        let Some(outcome) = open_harness::runtime::provision(cap) else {
+            continue;
+        };
+        let mark = if outcome.success && outcome.requirements_met {
+            "✓"
+        } else {
+            failed += 1;
+            "✗"
+        };
+        println!("  {mark} {:<20} {}", outcome.capability, outcome.command);
+        // A provisioner that exits 0 without satisfying the declared
+        // requirement has not done its job, and saying "✓" there would be the
+        // same silent lie this project refuses everywhere else.
+        if outcome.success && !outcome.requirements_met {
+            println!(
+                "      exited 0 but `runtime.requires` is still unsatisfied — \
+                 the command ran, the dependency is not there"
+            );
+        }
+        if !outcome.output.is_empty() && !outcome.success {
+            for line in outcome.output.lines().take(5) {
+                println!("      {line}");
+            }
+        }
+    }
+    if failed > 0 {
+        eprintln!("\n{failed} provisioning command(s) did not succeed");
+        exit(1);
+    }
+    println!("\nall provisioned.");
 }
 
 fn cmd_doctor(rest: &[String]) {

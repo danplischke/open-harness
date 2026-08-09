@@ -327,13 +327,29 @@ pub fn find_executable(program: &str) -> Option<String> {
     which(program)
 }
 
+/// Resolve a declared `runtime.requires` entry, applying the **same
+/// per-OS interpreter remapping the dispatcher applies** before spawning.
+///
+/// Without this the probe and the runtime disagree on Windows: a capability
+/// declaring `requires: [python3]` runs fine there — `resolve_program` maps
+/// `python3` → `python` — while a literal `PATH` lookup for `python3` finds
+/// nothing and `oh check` reports a missing runtime for a capability that
+/// works. Asking a different question than the dispatcher is exactly the
+/// inconsistency this probe exists to remove.
+pub fn resolve_requirement(program: &str) -> Option<String> {
+    match interpreter_candidates(program) {
+        Some(candidates) => first_on_path(&candidates),
+        None => which(program),
+    }
+}
+
 /// The executables a capability declares but the host does not have, rendered
 /// with install hints. `None` when everything is present.
 pub fn missing_requirements(runtime: &crate::manifest::Runtime) -> Option<String> {
     let missing: Vec<&String> = runtime
         .requires
         .iter()
-        .filter(|exe| find_executable(exe).is_none())
+        .filter(|exe| resolve_requirement(exe).is_none())
         .collect();
     if missing.is_empty() {
         return None;
@@ -346,6 +362,60 @@ pub fn missing_requirements(runtime: &crate::manifest::Runtime) -> Option<String
         })
         .collect();
     Some(rendered.join(", "))
+}
+
+/// The outcome of running one capability's provisioning command.
+#[derive(Debug, Clone)]
+pub struct ProvisionOutcome {
+    pub capability: String,
+    /// The command as it was run.
+    pub command: String,
+    pub success: bool,
+    /// Combined stderr/stdout tail, for reporting a failure.
+    pub output: String,
+    /// Whether `runtime.requires` was satisfied *after* the command ran — the
+    /// only evidence that provisioning achieved anything.
+    pub requirements_met: bool,
+}
+
+/// Run a capability's `runtime.provision` command in its own directory.
+///
+/// This executes code the capability's author chose, which is why nothing calls
+/// it implicitly: `sync` never does, and `oh install --runtimes` shows the
+/// command and requires confirmation first. The caller owns that gate; this
+/// function just runs the thing and reports honestly whether it helped.
+pub fn provision(cap: &LoadedCapability) -> Option<ProvisionOutcome> {
+    let spec = cap.manifest.runtime.provision.as_ref()?;
+    // Resolve the command the same way `run` and `requires` are resolved, so a
+    // `command: python3` starts on Windows too. Three code paths spawning or
+    // probing the same name must not disagree about what it means.
+    let program = resolve_requirement(&spec.command).unwrap_or_else(|| spec.command.clone());
+    let out = Command::new(&program)
+        .args(&spec.args)
+        .current_dir(&cap.dir)
+        .output();
+
+    let (success, output) = match out {
+        Ok(o) => {
+            let mut text = String::from_utf8_lossy(&o.stderr).into_owned();
+            if text.trim().is_empty() {
+                text = String::from_utf8_lossy(&o.stdout).into_owned();
+            }
+            (o.status.success(), text.trim().to_string())
+        }
+        Err(e) => (false, format!("{}: {e}", spec.command)),
+    };
+
+    Some(ProvisionOutcome {
+        capability: cap.manifest.id.clone(),
+        command: spec.display(),
+        success,
+        output,
+        // Re-probe rather than trust the exit code: a provisioner can exit 0
+        // and still leave the declared requirement unsatisfied, and that is
+        // worth distinguishing from a clean success.
+        requirements_met: missing_requirements(&cap.manifest.runtime).is_none(),
+    })
 }
 
 /// How to obtain `program` on *this* OS.
