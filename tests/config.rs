@@ -297,3 +297,115 @@ fn format_is_chosen_by_extension() {
     assert_eq!(Format::of(Path::new("open-harness.lock")), Format::Either);
     assert_eq!(Format::of(Path::new("capability.sig")), Format::Either);
 }
+
+// ---- emitting YAML that survives being read back --------------------------
+//
+// Everything below comes from *author* input — a capability's `overrides` block,
+// or a frontmatter key — so "our own literals are fine" is not a defence.
+
+/// A flow mapping's keys need quoting on the same terms as its values. An
+/// unquoted key holding `,` or `:` ends the mapping early and emits YAML that no
+/// longer parses — the value is silently reshaped or the document is lost.
+#[test]
+fn flow_mapping_keys_are_quoted_when_they_need_it() {
+    for key in [
+        "plain",
+        "has, comma",
+        "has: colon",
+        "has{brace}",
+        "has[bracket]",
+        "",
+        "true",
+        "123",
+        "#comment",
+    ] {
+        let v = json!({ key: "value" });
+        let rendered = yaml::render_value(&v);
+        // Read it back as frontmatter and confirm the key survived intact.
+        let doc = format!("---\nwrapper: {rendered}\n---\n");
+        let (fm, _) = yaml::parse_document(&doc)
+            .unwrap_or_else(|e| panic!("key {key:?} emitted unparseable YAML {rendered:?}: {e}"));
+        let wrapper = fm.get("wrapper").expect("wrapper key");
+        assert_eq!(
+            wrapper.get(key).and_then(|v| v.as_str()),
+            Some("value"),
+            "key {key:?} did not survive: {rendered}"
+        );
+    }
+}
+
+/// The same for a frontmatter key, which `apply_overrides` lets an author set.
+#[test]
+fn frontmatter_keys_are_quoted_when_they_need_it() {
+    let mut pairs = vec![("name".to_string(), "Skill".to_string())];
+    let mut extra = serde_json::Map::new();
+    extra.insert("odd: key".to_string(), json!("v"));
+    yaml::apply_overrides(&mut pairs, &extra);
+
+    let block = yaml::frontmatter(&pairs);
+    let (fm, _) = yaml::parse_document(&format!("{block}\nbody\n"))
+        .unwrap_or_else(|e| panic!("emitted unparseable frontmatter:\n{block}\n{e}"));
+    assert_eq!(fm.get("odd: key").and_then(|v| v.as_str()), Some("v"));
+    assert_eq!(fm.get("name").and_then(|v| v.as_str()), Some("Skill"));
+    // An ordinary key is untouched, so existing output does not churn.
+    assert!(block.contains("\nname: Skill\n"), "{block}");
+}
+
+/// The frontmatter block ends at a line that is **exactly** `---`.
+///
+/// Previously any line merely *beginning* with three dashes closed it, so a
+/// four-dash rule was silently accepted as the fence and the frontmatter ended
+/// somewhere the author did not write. Now a malformed fence is named as one
+/// rather than guessed at.
+#[test]
+fn only_an_exact_fence_closes_the_frontmatter() {
+    // Four dashes are not a fence: with no real one, the document is refused.
+    let err = yaml::parse_document("---\nname: S\n----\nbody\n")
+        .expect_err("`----` must not pass as a closing fence");
+    assert!(err.contains("closing '---'"), "{err}");
+
+    // Trailing whitespace on a real fence still closes it, and CRLF is fine.
+    let (fm, body) = yaml::parse_document("---\r\nname: S\r\n---  \r\n\r\nbody\r\n").unwrap();
+    assert_eq!(fm.get("name").and_then(|v| v.as_str()), Some("S"));
+    assert!(body.starts_with("body"), "{body:?}");
+
+    // An indented `----` inside a block scalar stays part of the value.
+    let doc =
+        "---\nname: Skill\ndescription: |\n  a rule follows\n  ----\n  and more\n---\n\nbody text\n";
+    let (fm, body) = yaml::parse_document(doc).unwrap();
+    assert!(
+        fm.get("description")
+            .and_then(|v| v.as_str())
+            .is_some_and(|d| d.contains("and more")),
+        "the block scalar must survive intact: {fm:?}"
+    );
+    assert_eq!(body, "body text\n");
+
+    // A horizontal rule in the *body* is past the fence and untouched.
+    let (_, body) = yaml::parse_document("---\nname: S\n---\n\nintro\n\n----\n\nmore\n").unwrap();
+    assert!(body.contains("----"), "body kept its rule: {body:?}");
+}
+
+/// An anchored value must **resolve or fail** — never come back empty.
+///
+/// `yaml-rust2` resolves aliases before they reach our converter, so the
+/// `Yaml::Alias` arm is not reachable today; it used to yield `null`, which
+/// would have blanked a field the author filled in while the manifest still
+/// loaded. This pins the invariant from both sides so neither a parser upgrade
+/// that stops resolving, nor a rewrite of the converter, can reintroduce the
+/// silent version.
+#[test]
+fn an_anchored_value_resolves_or_fails_but_is_never_silently_nulled() {
+    let doc = "---\nbase: &anchor real-value\nname: *anchor\n---\n\nbody\n";
+    match yaml::parse_document(doc) {
+        Ok((fm, _)) => assert_eq!(
+            fm.get("name").and_then(|v| v.as_str()),
+            Some("real-value"),
+            "resolved — but to the anchor's value, not null: {fm:?}"
+        ),
+        Err(e) => assert!(
+            e.contains("anchor") || e.contains("alias"),
+            "refused — and the reason names the construct: {e}"
+        ),
+    }
+}

@@ -97,7 +97,8 @@ default and **hard failures under `--require-signed`**.
 | Over-broad capability privileges | declared permission manifest, surfaced + policy-checked | **advisory / enforced under `--require-signed`** |
 | `sync` writing or deleting outside the project | every filesystem path — planned artifacts **and** lockfile entries alike — is normalized and rejected if it carries `..` / an absolute prefix / `~`; containment is structural, not a lexical prefix test | **enforced** |
 | `sync` clobbering a developer's own file | writes are gated on ownership (the lockfile fingerprint): a foreign JSON file is merged into, a foreign non-JSON file is refused and reported, and a file edited since we wrote it is never deleted | **enforced** |
-| A capability that forks grandchildren evading the timeout kill | only the direct child is killed today | **deferred** (needs process-group kill) |
+| A capability that forks grandchildren evading the timeout kill | only the direct child is killed today; a grandchild holding an inherited pipe can no longer wedge the dispatcher (`output-stuck`), but it is not killed | **partial** (bounded, not reaped — needs process-group kill) |
+| Header/request forgery through the hand-rolled HTTP client | header names, values, and the URL's host and path are refused if they carry control characters, before a socket is opened | **enforced** |
 | Untrusted code doing anything at all once installed (sandboxing) | not sandboxed; runs with agent privileges | **deferred** |
 | Key compromise / revocation | trust-store revocation list; a revoked key never verifies again, even in advisory mode (#22) | **enforced** |
 | Rollback / downgrade to an old vulnerable version | the profile lockfile pins commit + digest; no signed-version-monotonicity yet | **partial** (pinning only) |

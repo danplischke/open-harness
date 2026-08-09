@@ -79,6 +79,10 @@ struct Opts {
     locked: bool,
     /// Confirm an action that executes code (`install --runtimes`).
     yes: bool,
+    /// `install --runtimes`: provision capabilities' declared dependencies.
+    runtimes: bool,
+    /// `matrix --markdown`: emit the support grid as a Markdown table.
+    markdown: bool,
     explain: bool,
     timeout_ms: u64,
     max_output_bytes: u64,
@@ -125,6 +129,8 @@ fn parse_opts(rest: &[String]) -> Opts {
         ci: false,
         locked: false,
         yes: false,
+        runtimes: false,
+        markdown: false,
         explain: false,
         timeout_ms: 0,
         max_output_bytes: 0,
@@ -157,45 +163,43 @@ fn parse_opts(rest: &[String]) -> Opts {
     while i < rest.len() {
         match rest[i].as_str() {
             "--harness" => {
-                o.harness = rest.get(i + 1).cloned();
+                o.harness = Some(value_for(rest, i));
                 i += 2;
             }
             "--event" => {
-                o.event = rest.get(i + 1).cloned();
+                o.event = Some(value_for(rest, i));
                 i += 2;
             }
             "--capabilities" => {
-                if let Some(p) = rest.get(i + 1) {
-                    o.capabilities = PathBuf::from(p);
-                }
+                o.capabilities = PathBuf::from(value_for(rest, i));
                 i += 2;
             }
             "--profile" => {
-                o.profile = rest.get(i + 1).map(PathBuf::from);
+                o.profile = Some(PathBuf::from(value_for(rest, i)));
                 i += 2;
             }
             "--capability" => {
-                o.capability_one = rest.get(i + 1).map(PathBuf::from);
+                o.capability_one = Some(PathBuf::from(value_for(rest, i)));
                 i += 2;
             }
             "--key" => {
-                o.key = rest.get(i + 1).map(PathBuf::from);
+                o.key = Some(PathBuf::from(value_for(rest, i)));
                 i += 2;
             }
             "--trust" => {
-                o.trust = rest.get(i + 1).map(PathBuf::from);
+                o.trust = Some(PathBuf::from(value_for(rest, i)));
                 i += 2;
             }
             "--label" => {
-                o.label = rest.get(i + 1).cloned();
+                o.label = Some(value_for(rest, i));
                 i += 2;
             }
             "--reason" => {
-                o.reason = rest.get(i + 1).cloned();
+                o.reason = Some(value_for(rest, i));
                 i += 2;
             }
             "--out" => {
-                o.out = rest.get(i + 1).map(PathBuf::from);
+                o.out = Some(PathBuf::from(value_for(rest, i)));
                 i += 2;
             }
             "--require-signed" => {
@@ -207,7 +211,7 @@ fn parse_opts(rest: &[String]) -> Opts {
                 i += 1;
             }
             "--keyring" => {
-                o.keyring = rest.get(i + 1).map(PathBuf::from);
+                o.keyring = Some(PathBuf::from(value_for(rest, i)));
                 i += 2;
             }
             "--deny-network" => {
@@ -219,51 +223,55 @@ fn parse_opts(rest: &[String]) -> Opts {
                 i += 1;
             }
             "--id" => {
-                o.id = rest.get(i + 1).cloned();
+                o.id = Some(value_for(rest, i));
                 i += 2;
             }
             "--command" => {
-                o.mcp_command = rest.get(i + 1).cloned();
+                o.mcp_command = Some(value_for(rest, i));
                 i += 2;
             }
             "--mcp-arg" => {
-                if let Some(a) = rest.get(i + 1) {
-                    o.mcp_args.push(a.clone());
-                }
+                o.mcp_args.push(value_for(rest, i));
                 i += 2;
             }
             "--url" => {
-                o.mcp_url = rest.get(i + 1).cloned();
+                o.mcp_url = Some(value_for(rest, i));
                 i += 2;
             }
             "--base-url" => {
-                o.base_url = rest.get(i + 1).cloned();
+                o.base_url = Some(value_for(rest, i));
                 i += 2;
             }
             "--header" => {
                 // `--header "Name: value"` (repeatable), for http MCP endpoints.
-                if let Some(h) = rest.get(i + 1) {
-                    if let Some((k, v)) = h.split_once(':') {
-                        o.mcp_headers
-                            .push((k.trim().to_string(), v.trim().to_string()));
+                let h = value_for(rest, i);
+                match h.split_once(':') {
+                    Some((k, v)) => o
+                        .mcp_headers
+                        .push((k.trim().to_string(), v.trim().to_string())),
+                    // Silently dropping it would send the request without the
+                    // header the user asked for — an auth header, usually.
+                    None => {
+                        eprintln!("`--header` wants \"Name: value\", got `{h}`");
+                        exit(2);
                     }
                 }
                 i += 2;
             }
             "--tool" => {
-                o.tool = rest.get(i + 1).cloned();
+                o.tool = Some(value_for(rest, i));
                 i += 2;
             }
             "--json" => {
-                o.json_args = rest.get(i + 1).cloned();
+                o.json_args = Some(value_for(rest, i));
                 i += 2;
             }
             "--kind" => {
-                o.scaffold_kind = rest.get(i + 1).cloned();
+                o.scaffold_kind = Some(value_for(rest, i));
                 i += 2;
             }
             "--lang" => {
-                o.scaffold_lang = rest.get(i + 1).cloned();
+                o.scaffold_lang = Some(value_for(rest, i));
                 i += 2;
             }
             "--project" => {
@@ -271,27 +279,23 @@ fn parse_opts(rest: &[String]) -> Opts {
                 i += 1;
             }
             "--local" => {
-                o.local = rest.get(i + 1).cloned();
+                o.local = Some(value_for(rest, i));
                 i += 2;
             }
             "--git" => {
-                o.git = rest.get(i + 1).cloned();
+                o.git = Some(value_for(rest, i));
                 i += 2;
             }
             "--timeout-ms" => {
-                o.timeout_ms = rest.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                o.timeout_ms = numeric_value(rest, i);
                 i += 2;
             }
             "--max-output-kb" => {
-                o.max_output_bytes = rest
-                    .get(i + 1)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(|kb| kb * 1024)
-                    .unwrap_or(0);
+                o.max_output_bytes = numeric_value(rest, i) * 1024;
                 i += 2;
             }
             "--into" => {
-                o.into = rest.get(i + 1).map(PathBuf::from);
+                o.into = Some(PathBuf::from(value_for(rest, i)));
                 i += 2;
             }
             "--dry-run" => {
@@ -314,14 +318,56 @@ fn parse_opts(rest: &[String]) -> Opts {
                 o.ci = true;
                 i += 1;
             }
+            "--runtimes" => {
+                o.runtimes = true;
+                i += 1;
+            }
+            "--markdown" => {
+                o.markdown = true;
+                i += 1;
+            }
             "--explain" => {
                 o.explain = true;
                 i += 1;
+            }
+            // A flag we do not know is a typo, and absorbing it silently means
+            // running with the opposite of what was asked — `--require-signd`
+            // installs unsigned code, `--dry-run` misspelt writes the project.
+            // Positional arguments are accepted (`oh mcp list` takes one).
+            other if other.starts_with('-') => {
+                eprintln!("unknown option `{other}`");
+                exit(2);
             }
             _ => i += 1,
         }
     }
     o
+}
+
+/// A numeric flag value, or exit. Parsing failure used to fall back to `0`,
+/// which means "use the default" — so `--timeout-ms 5o00` silently ran with the
+/// default timeout instead of the one asked for.
+fn numeric_value(rest: &[String], i: usize) -> u64 {
+    let raw = value_for(rest, i);
+    raw.parse::<u64>().unwrap_or_else(|_| {
+        eprintln!("option `{}` wants a number, got `{raw}`", rest[i]);
+        exit(2);
+    })
+}
+
+/// The value following a flag, or exit saying which flag is missing one.
+///
+/// Reading a missing value as `None` and moving on silently drops the flag —
+/// `oh run --harness` would dispatch against no harness at all — and swallows
+/// the next argument along with it.
+fn value_for(rest: &[String], i: usize) -> String {
+    match rest.get(i + 1) {
+        Some(v) if !v.starts_with("--") => v.clone(),
+        _ => {
+            eprintln!("option `{}` needs a value", rest[i]);
+            exit(2);
+        }
+    }
 }
 
 /// The target harness set for the generative commands (`emit`/`sync`/`check`):
@@ -339,12 +385,16 @@ fn select_harnesses(o: &Opts) -> Vec<Harness> {
 fn load_caps(o: &Opts) -> Vec<LoadedCapability> {
     match discover(&o.capabilities) {
         Ok(c) => c,
+        // `discover` promises that a malformed capability is a hard error and
+        // never a silent skip. Returning an empty set here undid that: the
+        // caller could not tell "nothing to load" from "could not read any of
+        // it", and reported the former.
         Err(e) => {
             eprintln!(
                 "could not load capabilities from {}: {e}",
                 o.capabilities.display()
             );
-            Vec::new()
+            exit(1);
         }
     }
 }
@@ -1533,7 +1583,7 @@ fn collect_migratable(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
 /// for the same reason.
 fn cmd_install(rest: &[String]) {
     let o = parse_opts(rest);
-    if !rest.iter().any(|a| a == "--runtimes") {
+    if !o.runtimes {
         eprintln!("oh install --runtimes [--capabilities DIR | --profile FILE] [--yes]");
         exit(2);
     }
@@ -1856,9 +1906,10 @@ fn add_harness(v: &mut serde_json::Value, harness: &str) {
 }
 
 fn cmd_matrix(rest: &[String]) {
+    let o = parse_opts(rest);
     // The matrix is generated from the adapters (open_harness::matrix), the same
     // source the docs table is generated from — never hand-maintained.
-    if rest.iter().any(|a| a == "--markdown") {
+    if o.markdown {
         print!("{}", open_harness::matrix::markdown());
         return;
     }

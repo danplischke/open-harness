@@ -519,3 +519,25 @@ fn the_digest_of_an_ordinary_tree_is_unchanged() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Revocation gates roots exactly as it gates authors. A revoked root is ignored
+/// at verification time anyway, so accepting it into the store only records a
+/// trust relationship that does not exist.
+#[test]
+fn a_revoked_key_cannot_be_added_as_a_root_either() {
+    let key = trust::generate_keyfile("acme").unwrap();
+    let mut store = trust::TrustStore::default();
+
+    assert!(store.add_root(&key.public_key, "acme"), "trusted once");
+    assert!(store.revoke(&key.public_key, "compromised"));
+    assert!(
+        !store.add_root(&key.public_key, "acme"),
+        "a revoked key must not be re-added as a root"
+    );
+
+    // And a fresh store refuses it up front, matching `add`.
+    let mut fresh = trust::TrustStore::default();
+    assert!(fresh.revoke(&key.public_key, "compromised"));
+    assert!(!fresh.add_root(&key.public_key, "acme"));
+    assert!(!fresh.add(&key.public_key, "acme"));
+}

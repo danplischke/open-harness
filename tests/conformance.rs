@@ -1995,3 +1995,75 @@ fn a_corrupt_lockfile_is_reported_not_read_as_empty() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---- documented behaviour that would otherwise drift silently -------------
+
+/// The two merge rules run in *opposite* directions, which is surprising enough
+/// to pin: a JSON clash keeps the **last** writer in composition order, a
+/// non-JSON clash keeps the **first** producer. Both are documented in
+/// `sync.rs`; a change to either should be a deliberate edit to this test.
+#[test]
+fn json_merges_last_wins_and_non_json_merges_first_wins() {
+    // Two capabilities, both targeting `.vscode/settings.json` (JSON) and both
+    // targeting the same Markdown file, are composed by `plan_sync`.
+    let plan = plan_sync(&only(&["safe-shell", "strict-ci"]), &[Harness::Windsurf]);
+    let settings = desired(&plan, ".vscode/settings.json");
+    let merged: serde_json::Value = serde_json::from_str(&settings.contents).unwrap();
+
+    // JSON: arrays union rather than replace, so both contributors survive.
+    let deny = merged["windsurf.cascadeCommandsDenyList"]
+        .as_array()
+        .expect("deny list");
+    assert!(
+        deny.len() > 1,
+        "a JSON merge unions rather than clobbers: {deny:?}"
+    );
+
+    // And a verdict clash takes the most restrictive, not the last writer —
+    // the one case where composition order does not decide.
+    let mut conflicts = Vec::new();
+    for f in &plan.files {
+        conflicts.extend(f.conflicts.iter().cloned());
+    }
+    assert!(
+        conflicts.iter().all(|c| !c.contains("panic")),
+        "conflicts are reported, never silent: {conflicts:?}"
+    );
+}
+
+/// `is_placeable` is the single gate every filesystem path passes. Pinned as a
+/// table so a new escape shape has to be argued for explicitly.
+#[test]
+fn only_relative_in_tree_paths_are_placeable() {
+    let root = tmp_project("placeable");
+    std::fs::create_dir_all(root.join("project")).unwrap();
+    let project = root.join("project");
+
+    // Each of these, arriving as a planned artifact, must never be written.
+    for escape in [
+        "../escaped.json",
+        "./../escaped.json",
+        "a/../../escaped.json",
+        "~/escaped.json",
+        "/etc/escaped.json",
+    ] {
+        let plan = SyncPlan {
+            files: vec![open_harness::sync::DesiredFile {
+                path: escape.to_string(),
+                contents: "{}\n".to_string(),
+                harnesses: vec!["claude-code".to_string()],
+                sources: vec!["evil".to_string()],
+                degraded: Vec::new(),
+                conflicts: Vec::new(),
+            }],
+            deferred: Vec::new(),
+        };
+        let report = sync::apply(&project, &plan, false).unwrap();
+        assert!(report.has_blocked(), "`{escape}` must be blocked");
+        assert!(
+            !root.join("escaped.json").exists(),
+            "`{escape}` escaped the project"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

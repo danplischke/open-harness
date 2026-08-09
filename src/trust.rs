@@ -514,7 +514,10 @@ impl TrustStore {
 
     /// Trust a root key (delegation anchor). Returns false if already trusted.
     pub fn add_root(&mut self, public_key: &str, label: &str) -> bool {
-        if self.roots.iter().any(|k| k.public_key == public_key) {
+        // Revocation gates this the same way it gates `add`. A revoked root is
+        // ignored at verification time anyway, so accepting it here only records
+        // a trust relationship that does not exist.
+        if self.roots.iter().any(|k| k.public_key == public_key) || self.is_revoked(public_key) {
             return false;
         }
         self.roots.push(TrustedKey {

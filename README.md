@@ -94,7 +94,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 362 tests, green on Linux/macOS/Windows
+cargo test                            # 377 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -456,7 +456,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
 | `docs/` | mdBook site (concepts, authoring, dependencies, runtimes, plugins, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 362 tests: conformance (82) + sourcing & dependencies (55) + runtimes & provisioning (31) + new kinds (24) + deps vocabulary (21) + selection (21) + plugin import (21) + config/YAML (20) + single-file (19) + trust (20) + JSON→YAML migration (12) + `--locked` (9) + MCP bridge (7) + unit (7) + publishing (6) + authoring (5) + capture (2) |
+| `tests/` | 377 tests: conformance (84) + sourcing & dependencies (55) + runtimes & provisioning (31) + new kinds (24) + config/YAML (24) + deps vocabulary (21) + selection (21) + plugin import (21) + trust (21) + single-file (19) + JSON→YAML migration (12) + `--locked` (9) + MCP bridge (7) + unit (7) + CLI arguments (6) + streamable-HTTP (6) + publishing (6) + authoring (5) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies
