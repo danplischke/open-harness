@@ -120,6 +120,30 @@ pub enum Source {
     Local(LocalSource),
     Git(GitSource),
     Registry(RegistrySource),
+    Plugin(PluginSource),
+}
+
+/// A **harness-native plugin bundle** — a `.claude-plugin` directory — imported
+/// into capabilities rather than read as one. See [`crate::plugin`] for what
+/// travels and what does not.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PluginSource {
+    /// Where the bundle lives: a git URL, or a local path when `rev` is absent.
+    pub url: String,
+    /// Branch / tag / SHA for a git bundle. Absent means `url` is a local path,
+    /// so a plugin checked out beside your profile needs no git at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    /// Subdirectory of the repository holding the bundle. Usually unnecessary —
+    /// a `marketplace.json` already says where each plugin lives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdir: Option<String>,
+    /// Which plugin to take, when the repository is a marketplace publishing
+    /// several. A marketplace with one plugin resolves without this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Select::is_empty")]
+    pub select: Select,
 }
 
 /// Which of a source's capabilities to take.
@@ -899,6 +923,7 @@ fn source_select(source: &Source) -> &Select {
         Source::Local(l) => &l.select,
         Source::Git(g) => &g.select,
         Source::Registry(r) => &r.select,
+        Source::Plugin(p) => &p.select,
     }
 }
 
@@ -1067,6 +1092,9 @@ fn source_namespace(source: &Source) -> Option<String> {
         Source::Local(_) => None,
         Source::Git(g) => namespace_from_git_url(&g.url),
         Source::Registry(r) => Some(r.name.clone()),
+        // A plugin's namespace comes from its own manifest, which `import`
+        // reads — so it is applied there rather than guessed from the URL.
+        Source::Plugin(_) => None,
     }
 }
 
@@ -1132,7 +1160,60 @@ fn resolve_source(
             }))
         }
         Source::Registry(r) => resolve_registry(r, workdir, lock, warnings),
+        Source::Plugin(p) => resolve_plugin(p, workdir, lock, warnings),
     }
+}
+
+/// Resolve a plugin bundle: fetch it (git or a local path), locate the plugin
+/// root, and import it.
+///
+/// Every note the importer produced is surfaced as a warning. That is the
+/// point: a plugin is not uniformly portable, and which parts travelled is
+/// exactly what a user needs told.
+fn resolve_plugin(
+    p: &PluginSource,
+    workdir: &Path,
+    lock: Option<&Lock>,
+    warnings: &mut Vec<String>,
+) -> Result<Option<ResolvedSource>, String> {
+    // A `rev` means git; without one the url is a path, so a plugin checked out
+    // beside the profile imports with no network and no git.
+    let (repo, rev, requested) = match &p.rev {
+        Some(rev) => {
+            let pin = lock.and_then(|lk| lk.pinned_rev(&p.url, rev));
+            let (dir, sha) = git_sync(&p.url, pin.unwrap_or(rev), workdir)?;
+            (dir, Some(sha), Some(rev.clone()))
+        }
+        None => (workdir.join(&p.url), None, None),
+    };
+    let repo = match &p.subdir {
+        Some(s) => repo.join(s),
+        None => repo,
+    };
+
+    let root = crate::plugin::find_plugin_root(&repo, p.name.as_deref())?;
+    let imported = crate::plugin::import(&root)?;
+
+    // The plugin's own name is its published identity, so it becomes the
+    // namespace — better than `<owner>/<repo>`, which is where it happens to be
+    // hosted rather than what it is called.
+    let namespace = imported.manifest.name.clone();
+    let mut caps = imported.capabilities;
+    for cap in &mut caps {
+        cap.adopt_namespace(Some(&namespace));
+    }
+    for note in imported.notes {
+        warnings.push(format!("plugin '{namespace}': {note}"));
+    }
+
+    Ok(Some(ResolvedSource {
+        origin: format!("{} (plugin {namespace})", p.url),
+        kind: "plugin",
+        rev,
+        requested,
+        subdir: p.subdir.clone(),
+        caps,
+    }))
 }
 
 /// Resolve a registry source: load its index, find the named entry, and resolve

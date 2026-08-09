@@ -25,6 +25,10 @@ pub enum KindId {
     Permission,
     Agent,
     Instructions,
+    /// Config only one harness can host, carried verbatim (see
+    /// [`crate::kinds::native`]). Produced by importing a vendor's plugin;
+    /// rarely hand-authored.
+    Native,
 }
 
 impl KindId {
@@ -38,6 +42,7 @@ impl KindId {
             KindId::Permission => "permission",
             KindId::Agent => "agent",
             KindId::Instructions => "instructions",
+            KindId::Native => "native",
         }
     }
 
@@ -51,6 +56,7 @@ impl KindId {
             "permission" => KindId::Permission,
             "agent" => KindId::Agent,
             "instructions" => KindId::Instructions,
+            "native" => KindId::Native,
             _ => return None,
         })
     }
@@ -136,5 +142,6 @@ pub fn kind_impl(id: KindId) -> Box<dyn Kind> {
         KindId::Permission => Box::new(crate::kinds::permission::PermissionKind),
         KindId::Agent => Box::new(crate::kinds::agent::AgentKind),
         KindId::Instructions => Box::new(crate::kinds::instructions::InstructionsKind),
+        KindId::Native => Box::new(crate::kinds::native::NativeKind),
     }
 }

@@ -4,6 +4,7 @@ pub mod agent;
 pub mod command;
 pub mod hook;
 pub mod instructions;
+pub mod native;
 pub mod permission;
 pub mod rule;
 pub mod skill;

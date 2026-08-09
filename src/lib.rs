@@ -18,6 +18,7 @@ pub mod manifest;
 pub mod matrix;
 pub mod mcp;
 pub mod model;
+pub mod plugin;
 pub mod profile;
 pub mod runtime;
 pub mod scaffold;
@@ -41,7 +42,7 @@ pub use model::{
     merge, negotiate, parse_decision, validate_decision, Decision, NativeResponse, Verdict,
     PROTOCOL, PROTOCOL_VERSION,
 };
-pub use profile::{resolve, Lock, Profile, Resolved, Select, Source};
+pub use profile::{resolve, Lock, PluginSource, Profile, Resolved, Select, Source};
 pub use runtime::{find_executable, install_hint, missing_requirements, RunError, RunLimits};
 pub use sync::{
     apply, check, plan_sync, ApplyReport, ChangeAction, DesiredFile, DriftKind, DriftReport,

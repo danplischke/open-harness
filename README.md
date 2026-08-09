@@ -13,7 +13,7 @@ un-standardized middle: an OSS author defines a capability **once**, a developer
 replacing them.
 
 This repository is a complete, working implementation of that design — all eight
-capability kinds across **11 harnesses**, composition + a lockfile, a trust
+portable capability kinds across **11 harnesses**, composition + a lockfile, a trust
 model, Python + Node bindings, and a single `oh` CLI — built to a strict
 **honest-by-design** rule: where a harness can't express a concept, that is
 declared and surfaced (a loud "degraded" note or an "unsupported" reason), never
@@ -90,7 +90,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 279 tests, green on Linux/macOS/Windows
+cargo test                            # 300 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -100,7 +100,8 @@ cargo run -- matrix                   # the honest support grid across 11 harnes
 
 Capabilities declare a `kind`; each plugs into the same `Kind` trait
 (`src/kind.rs`), so adding one needs no change to the dispatcher core. **All eight
-are implemented.**
+portable kinds are implemented**, plus `native` — the deliberately unportable
+carrier that importing a vendor's plugin produces (see below).
 
 The **document kinds** (skill, agent, command, rule, instructions) are authored
 as a **single file** whose YAML frontmatter *is* the manifest — a skill is just a
@@ -266,6 +267,35 @@ it must exist, the resolution must match, nothing is written, and a mismatch
 prints exactly what drifted. See [`docs/src/dependencies.md`](./docs/src/dependencies.md)
 for the full model.
 
+## Importing plugins
+
+Claude Code plugins are a populated ecosystem, and a `plugin` source imports one
+as capabilities:
+
+```yaml
+sources:
+  - plugin:
+      url: https://github.com/thedotmack/claude-mem
+      rev: v13.14.0
+      select: { kinds: [skill] }     # optional — the same select every source takes
+```
+
+Importing is reverse-compilation, so the honesty rule bites hardest here: **a
+plugin is not uniformly portable.** Its `skills/` `commands/` `agents/` are
+already the shapes open-harness defines and fan out to every harness that has the
+concept. Its `.mcp.json` rides the shared MCP standard and travels, with a
+reported caveat that the server command may resolve against that harness's own
+install. Its `hooks/hooks.json` travels *nowhere* — opaque shell against Claude's
+native hook schema, not the `hook@1` contract.
+
+That last one is why there is a **`native`** kind: config only one harness can
+host, carried byte-for-byte there and `Unsupported` **with the reason** on the
+other ten. Dropping it silently would be the easy lie; claiming it compiles would
+be the worse one. Even on its own harness it plans as Degraded, never Clean, and
+it cannot be scaffolded — it is what importing produces, not a template for
+writing unportable config by hand. Importing never *runs* anything from a bundle.
+See [`docs/src/plugins.md`](./docs/src/plugins.md).
+
 ## Runtimes
 
 A capability is any executable, so it can need things the host lacks. A hook
@@ -359,14 +389,15 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 |---|---|
 | `src/event.rs` | Normalized event model: `(phase, subject, tool_class?)` |
 | `src/adapters.rs` | 11 harness adapters: event mapping, deny signal, registration format |
-| `src/kind.rs` + `src/kinds/` | The `Kind` trait + the eight capability kinds |
+| `src/kind.rs` + `src/kinds/` | The `Kind` trait + the nine capability kinds (eight portable + `native`) |
 | `src/tools.rs` + `src/yaml.rs` | Canonical tool vocabulary (shared by permission/skill/agent) + YAML (hand-rolled block emit; read via `yaml-rust2`) |
 | `src/config.rs` | open-harness's own config files: YAML out, YAML-or-JSON in — the boundary against a harness's native formats |
 | `src/dispatch.rs` | Single-entrypoint dispatcher: concurrent fan-out, merge, policy-driven fail-closed |
 | `src/runtime.rs` | Hardened execution: per-capability timeout, output cap, error taxonomy, cross-platform interpreters, `runtime.requires` pre-flight |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
-| `src/profile.rs` | Profiles + sources (local / git / registry), qualified names, selection, opt-in transitive acquisition → `open-harness.lock` |
+| `src/profile.rs` | Profiles + sources (local / git / registry / plugin), qualified names, selection, opt-in transitive acquisition → `open-harness.lock` |
+| `src/plugin.rs` | Importing a `.claude-plugin` bundle: portable kinds as themselves, hooks as `native` |
 | `src/deps.rs` | The dependency vocabulary: a documented semver subset, requirements, relations |
 | `src/trust.rs` | ed25519 signing/verification, trust store, root-of-trust keyrings, revocation, permissions |
 | `src/mcp.rs` | Minimal MCP client (stdio + streamable-HTTP, optional TLS) — the bridge runtime |
@@ -374,9 +405,9 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `src/api.rs` + `src/main.rs` | Stable embeddable API; the `oh` CLI |
 | `bindings/` | Python (uniffi) + Node/TS (napi) bindings |
 | `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
-| `docs/` | mdBook site (concepts, authoring guide, dependencies, runtimes, generated matrix) |
+| `docs/` | mdBook site (concepts, authoring, dependencies, runtimes, plugins, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 279 tests: conformance (70) + sourcing & dependencies (40) + new kinds (24) + deps vocabulary (21) + config/YAML (20) + single-file (19) + selection (21) + trust (15) + runtimes (12) + JSON→YAML migration (12) + `--locked` (9) + MCP bridge (7) + authoring (5) + capture (2) + unit (2) |
+| `tests/` | 300 tests: conformance (70) + sourcing & dependencies (40) + new kinds (24) + deps vocabulary (21) + selection (21) + plugin import (21) + config/YAML (20) + single-file (19) + trust (15) + runtimes (12) + JSON→YAML migration (12) + `--locked` (9) + MCP bridge (7) + authoring (5) + capture (2) + unit (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies

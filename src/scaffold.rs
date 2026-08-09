@@ -44,6 +44,17 @@ impl Lang {
 /// structured permission kind scaffold a `capability.yaml`.
 pub fn scaffold(kind: KindId, lang: Lang, id: &str, dir: &Path) -> Result<Vec<String>, String> {
     validate_id(id)?;
+    // `native` carries one harness's own config verbatim. It is what importing a
+    // vendor's plugin produces, not something to start from — a blank one would
+    // be a template for writing unportable config by hand, which is the opposite
+    // of what this tool is for.
+    if kind == KindId::Native {
+        return Err(
+            "the `native` kind is produced by importing a plugin (`sources: [{plugin: …}]`), \
+             not scaffolded — author a portable kind instead"
+                .to_string(),
+        );
+    }
     let cap_dir = dir.join(id);
 
     let files: Vec<(String, String)> = match kind {
@@ -124,6 +135,9 @@ pub fn scaffold(kind: KindId, lang: Lang, id: &str, dir: &Path) -> Result<Vec<St
                 } }),
             ),
         )],
+        // Refused above; the arm keeps the match exhaustive without pretending
+        // there is a template.
+        KindId::Native => unreachable!("native is refused before this match"),
     };
 
     // Refuse to overwrite an existing capability (the primary file of the kind).
