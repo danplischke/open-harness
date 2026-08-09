@@ -51,7 +51,7 @@ target at all (Aider/Copilot for tool gating), that's reported, not faked.
 
 ```sh
 # Author
-oh init                                                   # write an open-harness.json profile
+oh init                                                   # write an oh.yaml profile
 oh scaffold --kind hook --lang python --id my-guard       # a runnable capability starter (py|node|typescript|bash)
 oh scaffold --kind agent --id db-engineer                 # or: skill | rule | command | tool | permission | instructions
 oh scaffold --project  --id my-cap                        # a typed TypeScript capability as an npm package
@@ -65,10 +65,11 @@ oh matrix                                                 # the (event × harnes
 oh check                                                  # per-capability installability across all harnesses
 oh emit   --harness cursor                                # native registration config (note the fan-out)
 
-# Compose & install
-oh resolve --profile open-harness.json                    # sources → a pinned open-harness.lock
-oh sync    --profile open-harness.json --into ./project   # install + converge (idempotent)
-oh check   --profile open-harness.json --into ./project --ci   # drift detection (fails CI on drift)
+# Compose & install  (the profile is found in the current directory)
+oh add     git+https://github.com/me/my-skill@v1.2.0      # add a source — kind inferred from the spec
+oh resolve                                                # sources → a pinned open-harness.lock
+oh sync    --into ./project                               # install + converge (idempotent)
+oh check   --into ./project --ci                          # drift detection (fails CI on drift)
 oh sync    --into ./project --uninstall                   # clean removal (managed files only)
 
 # Trust
@@ -91,7 +92,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 186 tests, green on Linux/macOS/Windows
+cargo test                            # 192 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -190,17 +191,34 @@ names to their real source, one point of indirection over many repos. A registry
 index may itself be a local path, a `file://` URL, or fetched over `http(s)://`,
 so the catalog can live on a CDN ([distribution](./docs/src/distribution.md)).
 
-```jsonc
-// open-harness.json
-{ "name": "my-setup", "harnesses": ["claude-code", "cursor"],
-  "sources": [
-    { "local": { "path": "capabilities" } },
-    { "git": { "url": "https://github.com/me/my-caps", "rev": "main", "subdir": "capabilities" } },
-    { "git": "git+https://github.com/me/my-skill@v1.2.0" },   // pip-style shorthand
-    { "http": { "url": "https://cdn.example.com/blobs/sha256/9f86…a08.tar", "sha256": "9f86…a08" } },
-    { "registry": { "index": "https://cdn.example.com/registry.json", "name": "acme-guards" } }
-  ] }
+```yaml
+# oh.yaml — a source is just its URL; the kind is inferred
+name: my-setup
+harnesses: [claude-code, cursor]
+sources:
+  - capabilities                                              # a local directory
+  - git+https://github.com/me/my-skill@v1.2.0                 # a repo, pinned to a tag
+  - git+ssh://git@github.com/acme/caps@main#subdirectory=caps # a repo subdirectory
+  - https://cdn.example.com/blobs/sha256/9f86…a08.tar#sha256=9f86…a08
+  - https://cdn.example.com/registry.json#name=acme-guards
 ```
+
+Inference reads the spec: `git+…`, `ssh://`, `git@host:path` and `.git` are
+repositories; `#sha256=` makes a digest-pinned archive; `#name=` selects from a
+registry index; anything else is a path. The two kinds a URL alone cannot
+describe say so — an archive without `#sha256=` and an index without `#name=`
+are **refused with the fix in the message**, never guessed at. The tagged form
+still works whenever you want to be explicit (or to set a version):
+
+```yaml
+sources:
+  - git: { url: https://github.com/me/my-caps, rev: main, subdir: capabilities }
+  - registry: { index: https://cdn.example.com/registry.json, name: acme-guards, version: 1.2.0 }
+```
+
+`oh` looks for `oh.yaml`, `harness.yaml`, `open-harness.yaml`, or the legacy
+`open-harness.json` in the current directory, so `--profile` is only needed to
+point somewhere else. JSON profiles keep working and are written back as JSON.
 
 ### Installing from a git repo
 
@@ -208,9 +226,9 @@ A git source can be written as a single **pip-style spec**, the way a Python
 package is installed from a repo — `[git+]<url>[@<rev>][#subdirectory=<path>]`:
 
 ```sh
-oh add --profile open-harness.json --git git+https://github.com/me/my-skill@v1.2.0
-oh add --profile open-harness.json --git 'git+ssh://git@github.com/acme/caps@main#subdirectory=capabilities'
-oh sync --profile open-harness.json --into .
+oh add git+https://github.com/me/my-skill@v1.2.0
+oh add 'git+ssh://git@github.com/acme/caps@main#subdirectory=capabilities'
+oh sync --into .
 ```
 
 `@<rev>` is any branch, tag, or SHA (default `HEAD`) and is pinned to an exact
@@ -311,7 +329,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `capabilities/` | Real example capabilities (Python guard, Node audit note, MCP bridge, subagent, instructions — all eight kinds) |
 | `docs/` | mdBook site (concepts, authoring guide, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 186 tests: conformance (70) + sourcing (33) + new kinds (24) + single-file (19) + trust (15) + MCP bridge (7) + publishing (6) + authoring (5) + unit (5) + capture (2) |
+| `tests/` | 192 tests: conformance (70) + sourcing (39) + new kinds (24) + single-file (19) + trust (15) + MCP bridge (7) + publishing (6) + authoring (5) + unit (5) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies

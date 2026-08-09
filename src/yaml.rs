@@ -124,6 +124,106 @@ pub fn apply_overrides(pairs: &mut Vec<(String, String)>, extra: &Map<String, Va
     }
 }
 
+/// Render a JSON value as a **block-style YAML document** — the profile format
+/// (`oh.yaml`). Emission stays hand-rolled for the same reason frontmatter does:
+/// the shape is small and fully under our control (maps, sequences, scalars),
+/// while *reading* arbitrary YAML is delegated to `yaml-rust2`.
+pub fn to_yaml_document(v: &Value) -> String {
+    let mut out = String::new();
+    write_block(&mut out, v, 0, false);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Write `v` at `indent`. `inline` means the caller already emitted a prefix on
+/// this line (a `key:` or a `- `), so a container starts on the next line.
+fn write_block(out: &mut String, v: &Value, indent: usize, inline: bool) {
+    let pad = "  ".repeat(indent);
+    match v {
+        Value::Object(m) if !m.is_empty() => {
+            if inline {
+                out.push('\n');
+            }
+            for (k, val) in m {
+                write_entry(out, k, val, indent);
+            }
+        }
+        Value::Array(a) if !a.is_empty() => {
+            if inline {
+                out.push('\n');
+            }
+            for item in a {
+                out.push_str(&pad);
+                out.push_str("- ");
+                if is_container(item) {
+                    // Start the nested container on the following line, indented
+                    // past the dash.
+                    let mut nested = String::new();
+                    write_block(&mut nested, item, indent + 1, false);
+                    out.push_str(nested.trim_start());
+                } else {
+                    out.push_str(&render_value(item));
+                    out.push('\n');
+                }
+            }
+        }
+        // Empty containers and scalars render inline.
+        other => {
+            if inline {
+                out.push(' ');
+            } else {
+                out.push_str(&pad);
+            }
+            out.push_str(&render_value(other));
+            out.push('\n');
+        }
+    }
+}
+
+/// One `key: value` line (with its nested block, if the value is a container).
+fn write_entry(out: &mut String, key: &str, val: &Value, indent: usize) {
+    out.push_str(&"  ".repeat(indent));
+    out.push_str(&scalar(key));
+    out.push(':');
+    if is_container(val) {
+        write_block(out, val, indent + 1, true);
+    } else {
+        out.push(' ');
+        out.push_str(&render_value(val));
+        out.push('\n');
+    }
+}
+
+/// As [`to_yaml_document`], but the top-level mapping emits `first` keys in the
+/// order given, then everything else. `serde_json`'s map is sorted, so without
+/// this a profile would read `harnesses, name, sources`.
+pub fn to_yaml_document_ordered(v: &Value, first: &[&str]) -> String {
+    let Value::Object(m) = v else {
+        return to_yaml_document(v);
+    };
+    let mut out = String::new();
+    for key in first {
+        if let Some(val) = m.get(*key) {
+            write_entry(&mut out, key, val, 0);
+        }
+    }
+    for (k, val) in m {
+        if !first.contains(&k.as_str()) {
+            write_entry(&mut out, k, val, 0);
+        }
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+fn is_container(v: &Value) -> bool {
+    matches!(v, Value::Object(m) if !m.is_empty()) || matches!(v, Value::Array(a) if !a.is_empty())
+}
+
 // ---- reading (frontmatter → JSON) -----------------------------------------
 //
 // The frontmatter block is real YAML, so it is parsed by `yaml-rust2` and

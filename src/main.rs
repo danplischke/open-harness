@@ -55,7 +55,7 @@ fn main() {
         "remove" => cmd_remove(&rest),
         _ => {
             eprintln!(
-                "oh <init|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|pack|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix|version> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git SPEC]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--base-url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nsources:   oh add --profile open-harness.json --git git+https://github.com/me/my-skill@v1.2.0\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\npublish:   oh pack --capabilities capabilities --base-url https://cdn.example.com --out dist\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
+                "oh <init|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|pack|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix|version> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git SPEC]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--base-url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nsources:   oh add <spec>  (git+URL@rev#subdirectory=… · URL.tar#sha256=… · URL.json#name=… · a path)\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\npublish:   oh pack --capabilities capabilities --base-url https://cdn.example.com --out dist\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
             );
             exit(2);
         }
@@ -103,6 +103,8 @@ struct Opts {
     git: Option<String>,
     // publishing (#21)
     base_url: Option<String>,
+    /// Bare arguments (a source spec for `add`, a subcommand for `mcp`).
+    positional: Vec<String>,
 }
 
 fn parse_opts(rest: &[String]) -> Opts {
@@ -142,6 +144,7 @@ fn parse_opts(rest: &[String]) -> Opts {
         local: None,
         git: None,
         base_url: None,
+        positional: Vec::new(),
     };
     let mut i = 0;
     while i < rest.len() {
@@ -300,7 +303,12 @@ fn parse_opts(rest: &[String]) -> Opts {
                 o.explain = true;
                 i += 1;
             }
-            _ => i += 1,
+            other => {
+                if !other.starts_with("--") {
+                    o.positional.push(other.to_string());
+                }
+                i += 1;
+            }
         }
     }
     o
@@ -892,10 +900,7 @@ fn resolve_profile(path: &std::path::Path) -> Resolved {
 
 fn cmd_resolve(rest: &[String]) {
     let o = parse_opts(rest);
-    let Some(profile_path) = o.profile.clone() else {
-        eprintln!("resolve requires --profile <file>");
-        exit(2);
-    };
+    let profile_path = resolve_profile_path(&o);
     let resolved = resolve_profile(&profile_path);
     let workdir = profile_path
         .parent()
@@ -950,7 +955,11 @@ fn cmd_sync(rest: &[String]) {
 
     // Profile mode (#15): resolve sources + harnesses from the profile; else the
     // ad-hoc `--capabilities` / `--harness` mode.
-    let (caps, harnesses) = if let Some(profile_path) = o.profile.clone() {
+    let (caps, harnesses) = if let Some(profile_path) = o
+        .profile
+        .clone()
+        .or_else(|| profile::find_profile(std::path::Path::new(".")))
+    {
         let resolved = resolve_profile(&profile_path);
         if resolved.harnesses.is_empty() {
             eprintln!("profile '{}' targets no harnesses", resolved.profile);
@@ -989,7 +998,11 @@ fn cmd_check(rest: &[String]) {
     // or the ad-hoc `--capabilities` / `--harness` mode — so you can drift-check
     // exactly what you profile-synced.
     if let Some(into) = o.into.clone() {
-        let (caps, harnesses) = if let Some(profile_path) = o.profile.clone() {
+        let (caps, harnesses) = if let Some(profile_path) = o
+            .profile
+            .clone()
+            .or_else(|| profile::find_profile(std::path::Path::new(".")))
+        {
             let resolved = resolve_profile(&profile_path);
             if resolved.harnesses.is_empty() {
                 eprintln!("profile '{}' targets no harnesses", resolved.profile);
@@ -1274,28 +1287,28 @@ fn cmd_version() {
 fn cmd_init(rest: &[String]) {
     let o = parse_opts(rest);
     let dir = o.into.clone().unwrap_or_else(|| PathBuf::from("."));
-    let path = dir.join("open-harness.json");
-    if path.exists() {
-        eprintln!("{} already exists", path.display());
+    let path = o
+        .out
+        .clone()
+        .unwrap_or_else(|| dir.join(profile::DEFAULT_PROFILE_NAME));
+    if let Some(existing) = profile::find_profile(&dir) {
+        eprintln!("{} already exists", existing.display());
         exit(1);
     }
     let harnesses: Vec<String> = match o.harness.as_deref() {
         None | Some("all") => vec!["claude-code".into(), "cursor".into()],
         Some(id) => vec![id.to_string()],
     };
-    let profile = serde_json::json!({
+    let value = serde_json::json!({
         "name": "default",
         "harnesses": harnesses,
-        "sources": [ { "local": { "path": "capabilities" } } ],
+        "sources": [ "capabilities" ],
     });
-    let text = serde_json::to_string_pretty(&profile).unwrap_or_default();
-    if let Err(e) = std::fs::write(&path, format!("{text}\n")) {
-        eprintln!("write {}: {e}", path.display());
-        exit(1);
-    }
+    write_profile_value(&path, &value);
     println!("wrote {}", path.display());
     println!("next: oh scaffold --kind hook --lang python --id my-guard");
-    println!("      oh sync --profile {} --into .", path.display());
+    println!("      oh add git+https://github.com/me/my-skill@v1.0.0");
+    println!("      oh sync --into .");
 }
 
 fn cmd_doctor(rest: &[String]) {
@@ -1380,31 +1393,43 @@ fn which_on_path(program: &str) -> Option<String> {
     None
 }
 
+fn git_value(g: &GitSource) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    m.insert("url".into(), serde_json::json!(g.url));
+    m.insert("rev".into(), serde_json::json!(g.rev));
+    if let Some(sub) = &g.subdir {
+        m.insert("subdir".into(), serde_json::json!(sub));
+    }
+    serde_json::Value::Object(m)
+}
+
 fn cmd_add(rest: &[String]) {
     let o = parse_opts(rest);
-    let Some(pf) = o.profile.clone() else {
-        eprintln!("add requires --profile FILE");
-        exit(2);
-    };
+    let pf = resolve_profile_path(&o);
+    // `oh add <spec>` infers the kind from the spec itself; `--local` / `--git`
+    // stay as explicit overrides for the cases inference cannot settle.
     let source = if let Some(p) = &o.local {
         serde_json::json!({ "local": { "path": p } })
     } else if let Some(u) = &o.git {
-        // Accept a pip-style spec (`git+URL@rev#subdirectory=path`), so a tag or
-        // a subdirectory can be pinned from the command line rather than by
-        // hand-editing the profile afterwards.
         let g = GitSource::parse_spec(u).unwrap_or_else(|e| {
             eprintln!("{e}");
             exit(2);
         });
-        let mut m = serde_json::Map::new();
-        m.insert("url".into(), serde_json::json!(g.url));
-        m.insert("rev".into(), serde_json::json!(g.rev));
-        if let Some(sub) = &g.subdir {
-            m.insert("subdir".into(), serde_json::json!(sub));
-        }
-        serde_json::json!({ "git": m })
+        serde_json::json!({ "git": git_value(&g) })
+    } else if let Some(spec) = o.positional.first() {
+        // The spec is stored as written: a profile that says
+        // `git+https://…@v1` keeps saying that, rather than being expanded into
+        // an object the author did not write.
+        profile::Source::parse_spec(spec).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            exit(2);
+        });
+        serde_json::Value::String(spec.clone())
     } else {
-        eprintln!("add requires --local PATH or --git URL");
+        eprintln!(
+            "add requires a source: `oh add <spec>` (a git URL, an archive URL, \
+             or a path), or --local PATH / --git SPEC to be explicit"
+        );
         exit(2);
     };
     let mut v = read_profile_value(&pf);
@@ -1429,10 +1454,7 @@ fn cmd_add(rest: &[String]) {
 
 fn cmd_remove(rest: &[String]) {
     let o = parse_opts(rest);
-    let Some(pf) = o.profile.clone() else {
-        eprintln!("remove requires --profile FILE");
-        exit(2);
-    };
+    let pf = resolve_profile_path(&o);
     let (kind, target) = match (&o.local, &o.git) {
         (Some(p), _) => ("local", p.clone()),
         (_, Some(u)) => ("git", u.clone()),
@@ -1457,19 +1479,69 @@ fn cmd_remove(rest: &[String]) {
     }
 }
 
-fn read_profile_value(path: &std::path::Path) -> serde_json::Value {
-    match std::fs::read_to_string(path) {
-        Ok(t) => serde_json::from_str(&t).unwrap_or_else(|e| {
-            eprintln!("invalid profile {}: {e}", path.display());
-            exit(1);
-        }),
-        Err(_) => serde_json::json!({ "name": "default", "harnesses": [], "sources": [] }),
+/// The profile to act on: `--profile` when given, else the one this project
+/// keeps (`oh.yaml` and friends). Exits with the fix in the message when there
+/// is none, or when several would be ambiguous.
+fn resolve_profile_path(o: &Opts) -> PathBuf {
+    if let Some(p) = &o.profile {
+        return p.clone();
+    }
+    let dir = PathBuf::from(".");
+    let found = profile::all_profiles(&dir);
+    match found.len() {
+        1 => found.into_iter().next().unwrap(),
+        0 => {
+            eprintln!(
+                "no profile here — expected one of {} in the current directory.\n\
+                 Run `oh init` to create one, or pass --profile FILE.",
+                profile::PROFILE_NAMES.join(", ")
+            );
+            exit(2);
+        }
+        _ => {
+            let names: Vec<String> = found.iter().map(|p| p.display().to_string()).collect();
+            eprintln!(
+                "several profiles here ({}) — keep one, or pick with --profile FILE.",
+                names.join(", ")
+            );
+            exit(2);
+        }
     }
 }
 
+fn is_yaml(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("yaml") | Some("yml")
+    )
+}
+
+fn read_profile_value(path: &std::path::Path) -> serde_json::Value {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return serde_json::json!({ "name": "default", "harnesses": [], "sources": [] });
+    };
+    let parsed = if is_yaml(path) {
+        open_harness::yaml::parse_frontmatter(&text).map(serde_json::Value::Object)
+    } else {
+        serde_json::from_str(&text).map_err(|e| e.to_string())
+    };
+    parsed.unwrap_or_else(|e| {
+        eprintln!("invalid profile {}: {e}", path.display());
+        exit(1);
+    })
+}
+
 fn write_profile_value(path: &std::path::Path, v: &serde_json::Value) {
-    let text = serde_json::to_string_pretty(v).unwrap_or_default();
-    if let Err(e) = std::fs::write(path, format!("{text}\n")) {
+    // A profile is written back in the format it is named for, so editing a
+    // YAML profile never silently turns it into JSON.
+    let text = if is_yaml(path) {
+        // A profile reads better as name → harnesses → sources than in the
+        // map's alphabetical order.
+        open_harness::yaml::to_yaml_document_ordered(v, &["name", "harnesses", "sources"])
+    } else {
+        format!("{}\n", serde_json::to_string_pretty(v).unwrap_or_default())
+    };
+    if let Err(e) = std::fs::write(path, text) {
         eprintln!("write {}: {e}", path.display());
         exit(1);
     }

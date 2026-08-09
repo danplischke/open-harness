@@ -52,17 +52,190 @@ fn default_profile_name() -> String {
     "default".to_string()
 }
 
-/// Where a set of capabilities comes from. Externally tagged, e.g.
+/// Where a set of capabilities comes from.
+///
+/// Written either as **one string** — `"git+https://github.com/me/caps@v1"`,
+/// `"./capabilities"` — whose kind is inferred (see [`Source::parse_spec`]), or
+/// as an explicit tagged object when the inference needs overriding:
 /// `{"local": {"path": "capabilities"}}`,
-/// `{"git": {"url": "...", "rev": "main", "subdir": "capabilities"}}`, or
-/// `{"http": {"url": "https://cdn/…​.tar", "sha256": "…"}}`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// `{"git": {"url": "...", "rev": "main", "subdir": "capabilities"}}`,
+/// `{"http": {"url": "https://cdn/….tar", "sha256": "…"}}`.
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     Local(LocalSource),
     Git(GitSource),
     Http(HttpSource),
     Registry(RegistrySource),
+}
+
+/// The tagged spelling, kept separate so [`Source`]'s own `Deserialize` can also
+/// accept the one-string form.
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SourceRepr {
+    Local(LocalSource),
+    Git(GitSource),
+    Http(HttpSource),
+    Registry(RegistrySource),
+}
+
+impl From<SourceRepr> for Source {
+    fn from(r: SourceRepr) -> Source {
+        match r {
+            SourceRepr::Local(s) => Source::Local(s),
+            SourceRepr::Git(s) => Source::Git(s),
+            SourceRepr::Http(s) => Source::Http(s),
+            SourceRepr::Registry(s) => Source::Registry(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Source {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Dispatched on the shape rather than with `#[serde(untagged)]`: untagged
+        // reports only "data did not match any variant", discarding the tagged
+        // form's own error — so a `http` source missing its `sha256` would lose
+        // the one message that says what to fix.
+        let value = serde_json::Value::deserialize(d)?;
+        match value {
+            serde_json::Value::String(s) => {
+                Source::parse_spec(&s).map_err(serde::de::Error::custom)
+            }
+            other => serde_json::from_value::<SourceRepr>(other)
+                .map(Into::into)
+                .map_err(serde::de::Error::custom),
+        }
+    }
+}
+
+impl Source {
+    /// Infer a source from a single spec string — so a URL can be given as-is,
+    /// without also naming the kind it obviously is.
+    ///
+    /// The rules, in order:
+    ///
+    /// | Spec looks like | Becomes |
+    /// |---|---|
+    /// | `git+<anything>` | git (the prefix is an explicit override) |
+    /// | `ssh://…`, `git://…`, `user@host:path` | git |
+    /// | a path/URL ending `.git` | git |
+    /// | `http(s)://….tar#sha256=<hex>` | a digest-pinned archive |
+    /// | `http(s)://….json#name=<cap>` | a registry index |
+    /// | any other `http(s)://` | git (a forge repo URL) |
+    /// | a `file://` directory, or anything else | local |
+    ///
+    /// Two kinds cannot be inferred from a URL alone, because the URL is missing
+    /// a fact the source requires: an archive needs its `sha256` and a registry
+    /// needs the capability `name` to select. Both are supplied in the fragment
+    /// (pip spells a direct-URL digest `#sha256=` the same way); without it the
+    /// spec is **refused with the fix in the message** rather than guessed at.
+    pub fn parse_spec(spec: &str) -> Result<Source, String> {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return Err("empty source spec".to_string());
+        }
+        // An explicit `git+` prefix always wins — the one way to force a git
+        // source for something that would otherwise look local or ambiguous.
+        if spec.starts_with("git+") {
+            return GitSource::parse_spec(spec).map(Source::Git);
+        }
+
+        let (locator, fragment) = split_fragment(spec);
+        let path_part = locator.rsplit('@').next().unwrap_or(locator);
+
+        if spec.starts_with("ssh://") || spec.starts_with("git://") || is_scp_like(locator) {
+            return GitSource::parse_spec(spec).map(Source::Git);
+        }
+        if strip_rev(locator).trim_end_matches('/').ends_with(".git") {
+            return GitSource::parse_spec(spec).map(Source::Git);
+        }
+
+        if is_remote_url(spec) || locator.starts_with("file://") {
+            if let Some(sha) = fragment_value(fragment, "sha256") {
+                return Ok(Source::Http(HttpSource {
+                    url: locator.to_string(),
+                    sha256: sha,
+                    subdir: fragment_value(fragment, "subdirectory"),
+                }));
+            }
+            if let Some(name) = fragment_value(fragment, "name") {
+                return Ok(Source::Registry(RegistrySource {
+                    name,
+                    version: fragment_value(fragment, "version"),
+                    index: Some(locator.to_string()),
+                }));
+            }
+            if path_part.ends_with(".tar") {
+                return Err(format!(
+                    "'{spec}' looks like a capability archive, which must be pinned: add its \
+                     digest as `#sha256=<hex>` (an unpinned remote artifact cannot be verified)"
+                ));
+            }
+            if path_part.ends_with(".json") {
+                return Err(format!(
+                    "'{spec}' looks like a registry index, which selects one capability by name: \
+                     add `#name=<capability>` (or use the tagged form to pin a version)"
+                ));
+            }
+            // A `file://` directory is used in place, like any other path; a
+            // remote URL that is none of the above is a repository.
+            if let Some(path) = file_url_path(locator)? {
+                return Ok(Source::Local(LocalSource {
+                    path: path.to_string_lossy().into_owned(),
+                }));
+            }
+            return GitSource::parse_spec(spec).map(Source::Git);
+        }
+
+        // Anything left is a local path. Deliberately **not** checked for
+        // existence here: a `local` path is relative to the *profile's* workdir,
+        // not to wherever the process happens to be, so testing it now would ask
+        // the wrong directory — and a profile may legitimately name a directory
+        // that is created later. A missing path is reported at resolve time,
+        // where the workdir is known.
+        Ok(Source::Local(LocalSource {
+            path: locator.to_string(),
+        }))
+    }
+}
+
+/// Split `…#fragment` off a spec.
+fn split_fragment(spec: &str) -> (&str, Option<&str>) {
+    match spec.split_once('#') {
+        Some((l, f)) => (l, Some(f)),
+        None => (spec, None),
+    }
+}
+
+/// Drop a trailing `@rev` (only when it follows the last `/`, so ssh userinfo
+/// survives — same rule as [`GitSource::parse_spec`]).
+fn strip_rev(locator: &str) -> &str {
+    let last_slash = locator.rfind('/');
+    match locator.rfind('@') {
+        Some(at) if last_slash.is_none_or(|s| at > s) => &locator[..at],
+        _ => locator,
+    }
+}
+
+/// `key=value` lookup in a `#a=1&b=2` fragment; a bare fragment has no keys.
+fn fragment_value(fragment: Option<&str>, key: &str) -> Option<String> {
+    let f = fragment?;
+    f.split('&')
+        .find_map(|part| part.strip_prefix(key)?.strip_prefix('=').map(String::from))
+        .filter(|v| !v.is_empty())
+}
+
+/// scp-style `[user@]host:path` — a colon before any slash, and no `://`.
+fn is_scp_like(locator: &str) -> bool {
+    if locator.contains("://") {
+        return false;
+    }
+    match locator.find(':') {
+        // A Windows drive letter (`C:\…`) is a path, not a host.
+        Some(i) => i > 1 && locator[..i].contains('.') || (i > 1 && locator[..i].contains('@')),
+        None => false,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -156,20 +329,26 @@ impl GitSource {
 impl<'de> Deserialize<'de> for GitSource {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Spec(String),
-            Full {
-                url: String,
-                #[serde(default = "default_rev")]
-                rev: String,
-                #[serde(default)]
-                subdir: Option<String>,
-            },
+        struct Full {
+            url: String,
+            #[serde(default = "default_rev")]
+            rev: String,
+            #[serde(default)]
+            subdir: Option<String>,
         }
-        match Repr::deserialize(d)? {
-            Repr::Spec(s) => GitSource::parse_spec(&s).map_err(serde::de::Error::custom),
-            Repr::Full { url, rev, subdir } => Ok(GitSource { url, rev, subdir }),
+        // Shape dispatch, not `untagged` — see the note on `Source`.
+        let value = serde_json::Value::deserialize(d)?;
+        match value {
+            serde_json::Value::String(s) => {
+                GitSource::parse_spec(&s).map_err(serde::de::Error::custom)
+            }
+            other => serde_json::from_value::<Full>(other)
+                .map(|f| GitSource {
+                    url: f.url,
+                    rev: f.rev,
+                    subdir: f.subdir,
+                })
+                .map_err(serde::de::Error::custom),
         }
     }
 }
@@ -296,15 +475,72 @@ impl RegistryIndex {
     }
 }
 
+/// Profile filenames looked for in a directory, most specific first. A project
+/// keeps exactly one; `oh` finds it so no command needs `--profile` spelled out.
+pub const PROFILE_NAMES: &[&str] = &[
+    "oh.yaml",
+    "oh.yml",
+    "harness.yaml",
+    "harness.yml",
+    "open-harness.yaml",
+    "open-harness.yml",
+    "open-harness.json",
+    "oh.json",
+];
+
+/// The profile filename written when a command creates one.
+pub const DEFAULT_PROFILE_NAME: &str = "oh.yaml";
+
+/// Find the profile in `dir`, if there is one. Returns the first match in
+/// [`PROFILE_NAMES`] order.
+pub fn find_profile(dir: &Path) -> Option<PathBuf> {
+    PROFILE_NAMES
+        .iter()
+        .map(|n| dir.join(n))
+        .find(|p| p.is_file())
+}
+
+/// Every profile present in `dir` — used to report an ambiguous project rather
+/// than silently picking one.
+pub fn all_profiles(dir: &Path) -> Vec<PathBuf> {
+    PROFILE_NAMES
+        .iter()
+        .map(|n| dir.join(n))
+        .filter(|p| p.is_file())
+        .collect()
+}
+
+/// Does this path name a YAML profile (by extension)?
+fn is_yaml_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("yaml") | Some("yml")
+    )
+}
+
 impl Profile {
     pub fn from_json(text: &str) -> Result<Profile, String> {
         serde_json::from_str(text).map_err(|e| format!("invalid profile: {e}"))
     }
 
+    /// Parse a YAML profile. JSON is a subset of YAML, so this also accepts a
+    /// JSON document — the extension only decides how a profile is *written*.
+    pub fn from_yaml(text: &str) -> Result<Profile, String> {
+        let map =
+            crate::yaml::parse_frontmatter(text).map_err(|e| format!("invalid profile: {e}"))?;
+        serde_json::from_value(serde_json::Value::Object(map))
+            .map_err(|e| format!("invalid profile: {e}"))
+    }
+
     pub fn load(path: &Path) -> Result<Profile, String> {
         let text =
             std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        Profile::from_json(&text)
+        if is_yaml_path(path) {
+            Profile::from_yaml(&text)
+        } else {
+            Profile::from_json(&text)
+        }
+        .map_err(|e| format!("{}: {e}", path.display()))
     }
 
     fn harness_set(&self) -> Result<Vec<Harness>, String> {

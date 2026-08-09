@@ -789,6 +789,128 @@ fn unknown_harness_is_rejected() {
 // ---- git-backed personal-repo sync (unix-gated fixture) -------------------
 
 #[cfg(unix)]
+// ---- source inference + YAML profiles --------------------------------------
+#[test]
+fn a_source_kind_is_inferred_from_its_spec() {
+    use open_harness::profile::Source;
+
+    let cases = [
+        ("git+https://github.com/acme/caps@v1", "git"),
+        ("ssh://git@github.com/acme/caps", "git"),
+        ("git@github.com:acme/caps.git", "git"),
+        ("https://github.com/acme/caps.git", "git"),
+        // A forge URL with no other signal is a repository.
+        ("https://github.com/acme/caps", "git"),
+        ("https://cdn.example.com/b.tar#sha256=abc123", "http"),
+        (
+            "https://cdn.example.com/registry.json#name=commit-style",
+            "registry",
+        ),
+        ("capabilities", "local"),
+        ("./caps/sub", "local"),
+    ];
+    for (spec, want) in cases {
+        let got = match Source::parse_spec(spec).unwrap_or_else(|e| panic!("{spec}: {e}")) {
+            Source::Git(_) => "git",
+            Source::Http(_) => "http",
+            Source::Registry(_) => "registry",
+            Source::Local(_) => "local",
+        };
+        assert_eq!(got, want, "spec '{spec}' should infer as {want}");
+    }
+}
+
+#[test]
+fn an_unpinnable_spec_is_refused_with_the_fix() {
+    use open_harness::profile::Source;
+
+    // An archive without a digest cannot be verified, and a registry index
+    // without a name selects nothing — say so instead of guessing.
+    let err = Source::parse_spec("https://cdn.example.com/pack.tar").unwrap_err();
+    assert!(err.contains("#sha256="), "names the missing pin: {err}");
+    let err = Source::parse_spec("https://cdn.example.com/registry.json").unwrap_err();
+    assert!(err.contains("#name="), "names the missing selector: {err}");
+}
+
+#[test]
+fn a_local_spec_is_not_resolved_against_the_process_directory() {
+    use open_harness::profile::Source;
+    // A `local` path is relative to the *profile's* workdir, so parsing must not
+    // test it against wherever the process happens to be running.
+    let Source::Local(l) = Source::parse_spec("definitely/not/here").unwrap() else {
+        panic!("a plain path is a local source even when absent");
+    };
+    assert_eq!(l.path, "definitely/not/here");
+}
+
+#[test]
+fn a_yaml_profile_round_trips_through_string_sources() {
+    let wd = tmp("yaml");
+    write(
+        &wd.join("caps/greet/capability.json"),
+        &cap_json(
+            "greet",
+            "1.0.0",
+            "skill",
+            json!({ "skill": { "body": "hi" } }),
+        ),
+    );
+    let text = "\
+name: my-setup
+harnesses:
+  - claude-code
+  - cursor
+sources:
+  - caps
+";
+    let profile = Profile::from_yaml(text).expect("a YAML profile parses");
+    assert_eq!(profile.name, "my-setup");
+    assert_eq!(profile.harnesses, vec!["claude-code", "cursor"]);
+
+    let r = profile::resolve(&profile, &wd, None).unwrap();
+    assert_eq!(r.capabilities.len(), 1, "{:?}", r.warnings);
+    assert_eq!(r.lock.sources[0].kind, "local");
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn a_profile_is_found_without_being_named() {
+    let wd = tmp("find");
+    assert_eq!(profile::find_profile(&wd), None);
+    write(&wd.join("open-harness.json"), "{}");
+    assert_eq!(
+        profile::find_profile(&wd),
+        Some(wd.join("open-harness.json"))
+    );
+    // A YAML profile wins over the legacy JSON name.
+    write(&wd.join("oh.yaml"), "name: x\n");
+    assert_eq!(profile::find_profile(&wd), Some(wd.join("oh.yaml")));
+    assert_eq!(
+        profile::all_profiles(&wd).len(),
+        2,
+        "both are reported, so an ambiguous project can be flagged"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+}
+
+#[test]
+fn yaml_emission_round_trips_a_profile() {
+    let value = json!({
+        "name": "p",
+        "harnesses": ["claude-code"],
+        "sources": ["capabilities", { "git": { "url": "https://h/r", "rev": "v1" } }],
+    });
+    let text =
+        open_harness::yaml::to_yaml_document_ordered(&value, &["name", "harnesses", "sources"]);
+    assert!(
+        text.starts_with("name: p\n"),
+        "a profile reads in written order, not alphabetical: {text}"
+    );
+    let back = Profile::from_yaml(&text).expect("emitted YAML parses back");
+    assert_eq!(back.name, "p");
+    assert_eq!(back.sources.len(), 2);
+}
+
 // ---- pip-style git specs ---------------------------------------------------
 #[test]
 fn git_specs_parse_like_a_pip_requirement() {

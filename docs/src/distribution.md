@@ -30,20 +30,18 @@ These are orthogonal; this note is about the second.
 
 ## Where a registry fits
 
-A profile (`open-harness.json`) is an ordered list of **sources**; resolving it
-composes them, then writes `open-harness.lock` pinning every resolved capability
-and every source's exact revision, so a re-resolve is reproducible.
+A profile (`oh.yaml`) is an ordered list of **sources**; resolving it composes
+them, then writes `open-harness.lock` pinning every resolved capability and every
+source's exact revision, so a re-resolve is reproducible. A source is usually
+just its URL — the kind is inferred from the spec:
 
-```jsonc
-{
-  "name": "my-team",
-  "harnesses": ["claude", "codex", "cursor"],
-  "sources": [
-    { "local":    { "path": "capabilities" } },       // in-repo overrides
-    { "git":      { "url": "https://github.com/a/b", "rev": "main" } },
-    { "registry": { "name": "commit-style", "index": "…" } }  // the catalog
-  ]
-}
+```yaml
+name: my-team
+harnesses: [claude, codex, cursor]
+sources:
+  - capabilities                                  # in-repo overrides
+  - git+https://github.com/a/b@main               # a repo, pinned
+  - https://cdn.example.com/registry.json#name=commit-style   # the catalog
 ```
 
 Sources are **ordered and earlier-wins**: a later duplicate id is a loud
@@ -97,9 +95,10 @@ fetchable sources; local indexes keep their local reach.
 A catalog is not required. A git source installs a repository directly, the way
 a Python package is installed from one:
 
-```jsonc
-{ "git": "git+https://github.com/me/my-skill@v1.2.0" }
-{ "git": "git+ssh://git@github.com/acme/caps@main#subdirectory=capabilities" }
+```yaml
+sources:
+  - git+https://github.com/me/my-skill@v1.2.0
+  - git+ssh://git@github.com/acme/caps@main#subdirectory=capabilities
 ```
 
 `[git+]<url>[@<rev>][#subdirectory=<path>]`. The rev is any branch, tag, or SHA
