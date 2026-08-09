@@ -66,7 +66,20 @@
 //!
 //! Lockfile paths are re-validated on load, not trusted: a lockfile is ordinary
 //! data that is often committed, and an entry pointing outside the project
-//! (`../…`, `~/…`, absolute) is refused and reported rather than removed.
+//! (`../…`, `~/…`, absolute) is refused and reported rather than removed. A
+//! lockfile that is present but unparseable is reported too, never read as an
+//! empty one — that would silently forget every file open-harness manages, so
+//! pruning would stop and `--uninstall` would claim a clean removal having
+//! removed nothing.
+//!
+//! The lockfile is also written when a run **fails** partway. `apply` is not
+//! atomic — there is no transaction across many files in many directories — so
+//! it is instead *honest about what happened*: the first IO error stops the run,
+//! everything already written is recorded, everything not yet reached keeps its
+//! previous entry, and the error is returned afterwards. Bailing out before
+//! writing the lockfile would orphan the files that did land: never pruned,
+//! never removed by `--uninstall`, and invisible to the ownership check that
+//! stops the next run overwriting them.
 
 use crate::adapters::Harness;
 use crate::kind::{kind_impl, Artifact, Installability};
@@ -440,16 +453,43 @@ impl Lockfile {
         // The YAML lockfile wins; a pre-YAML project falls back to the legacy
         // JSON one so its managed paths are still known (and still prunable).
         let mut lock = Lockfile::default();
+        let mut refused = Vec::new();
+        let mut unreadable: Vec<Blocked> = Vec::new();
+        let mut loaded = false;
         for rel in [LOCK_REL, LEGACY_LOCK_REL] {
-            let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
-                continue;
+            let text = match std::fs::read_to_string(root.join(rel)) {
+                Ok(t) => t,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    unreadable.push(Blocked {
+                        path: rel.to_string(),
+                        reason: format!("cannot read the sync lockfile: {e}"),
+                    });
+                    continue;
+                }
             };
-            if let Ok(parsed) = crate::config::from_str(&text, crate::config::Format::Either) {
-                lock = parsed;
-                break;
+            match crate::config::from_str(&text, crate::config::Format::Either) {
+                Ok(parsed) => {
+                    lock = parsed;
+                    loaded = true;
+                    break;
+                }
+                // A lockfile that exists but will not parse is *not* the same as
+                // no lockfile. Treating it as empty silently forgets every file
+                // open-harness manages: pruning stops, and `--uninstall` reports
+                // a clean removal having removed nothing.
+                Err(e) => unreadable.push(Blocked {
+                    path: rel.to_string(),
+                    reason: format!(
+                        "the sync lockfile is present but unparseable, so the files it records \
+                         cannot be identified: {e}"
+                    ),
+                }),
             }
         }
-        let mut refused = Vec::new();
+        if !loaded {
+            refused.append(&mut unreadable);
+        }
         lock.managed.retain(|e| {
             if is_placeable(&e.path) {
                 return true;
@@ -765,8 +805,21 @@ pub fn apply(root: &Path, plan: &SyncPlan, dry_run: bool) -> std::io::Result<App
     let mut new_entries = Vec::new();
     let mut conflicts: Vec<(String, Vec<String>)> = Vec::new();
 
+    // A write that fails partway must still leave a truthful lockfile: files
+    // already on disk but unrecorded would be orphaned — never pruned, never
+    // removed by `--uninstall`, invisible to the ownership check that stops the
+    // next run clobbering them. So the first IO error stops the run and is
+    // returned *after* recording everything that did land.
+    let mut fatal: Option<std::io::Error> = None;
+
     for f in &plan.files {
-        let resolved = resolve_target(root, &f.path, &f.contents, lock.entry(&f.path))?;
+        let resolved = match resolve_target(root, &f.path, &f.contents, lock.entry(&f.path)) {
+            Ok(r) => r,
+            Err(e) => {
+                fatal = Some(e);
+                break;
+            }
+        };
 
         // Merging into a developer's file can resolve clashes of its own; report
         // them next to the ones the capability set produced.
@@ -786,10 +839,20 @@ pub fn apply(root: &Path, plan: &SyncPlan, dry_run: bool) -> std::io::Result<App
             continue;
         };
 
-        let action = classify(root, &f.path, &contents)?;
+        let action = match classify(root, &f.path, &contents) {
+            Ok(a) => a,
+            Err(e) => {
+                fatal = Some(e);
+                break;
+            }
+        };
         if !dry_run && matches!(action, ChangeAction::Create | ChangeAction::Update) {
-            write_file(root, &f.path, &contents)?;
+            if let Err(e) = write_file(root, &f.path, &contents) {
+                fatal = Some(e);
+                break;
+            }
         }
+        // Recorded only once the bytes are actually down.
         new_entries.push(LockEntry {
             path: f.path.clone(),
             // The fingerprint covers what actually lands on disk (the merged
@@ -813,20 +876,27 @@ pub fn apply(root: &Path, plan: &SyncPlan, dry_run: bool) -> std::io::Result<App
         });
     }
 
-    // Prune: previously-managed paths that are no longer desired.
+    // Prune: previously-managed paths that are no longer desired. Skipped once a
+    // write has failed — the run is being abandoned, and removing files while the
+    // desired state is half-written would compound it.
     for entry in &lock.managed {
         if desired.contains(&entry.path) {
             continue;
         }
-        match remove_entry(root, entry, dry_run)? {
-            Removal::Done(action) => changes.push(ApplyChange {
+        if fatal.is_some() {
+            // Not processed, so it stays ours to prune on the next run.
+            new_entries.push(entry.clone());
+            continue;
+        }
+        match remove_entry(root, entry, dry_run) {
+            Ok(Removal::Done(action)) => changes.push(ApplyChange {
                 path: entry.path.clone(),
                 action,
                 harnesses: entry.harnesses.clone(),
                 sources: entry.sources.clone(),
                 shared: entry.shared,
             }),
-            Removal::Refused(reason) => {
+            Ok(Removal::Refused(reason)) => {
                 blocked.push(Blocked {
                     path: entry.path.clone(),
                     reason,
@@ -835,18 +905,43 @@ pub fn apply(root: &Path, plan: &SyncPlan, dry_run: bool) -> std::io::Result<App
                 // later run can retry rather than forgetting the file exists.
                 new_entries.push(entry.clone());
             }
+            Err(e) => {
+                fatal = Some(e);
+                new_entries.push(entry.clone());
+            }
         }
     }
 
     if !dry_run {
+        // Keep any entry this run never reached, so an abandoned run forgets
+        // nothing it had previously written.
+        if fatal.is_some() {
+            for entry in &lock.managed {
+                if !new_entries.iter().any(|e| e.path == entry.path) {
+                    new_entries.push(entry.clone());
+                }
+            }
+        }
         new_entries.sort_by(|a, b| a.path.cmp(&b.path));
-        write_lockfile(
+        new_entries.dedup_by(|a, b| a.path == b.path);
+        let lock_written = write_lockfile(
             root,
             &Lockfile {
                 version: 1,
                 managed: new_entries,
             },
-        )?;
+        );
+        // The original failure is the one worth reporting; a lockfile write that
+        // also fails only matters if nothing else did.
+        match (&fatal, lock_written) {
+            (Some(_), _) => {}
+            (None, Err(e)) => return Err(e),
+            (None, Ok(())) => {}
+        }
+    }
+
+    if let Some(e) = fatal {
+        return Err(e);
     }
 
     changes.sort_by(|a, b| a.path.cmp(&b.path));

@@ -1918,3 +1918,80 @@ fn the_payload_carries_the_real_tool_class() {
         out.ran
     );
 }
+
+/// A write that fails partway must still record what did land. Otherwise those
+/// files are orphaned: never pruned, never removed by `--uninstall`, and
+/// invisible to the ownership check that stops the next run overwriting them.
+#[test]
+fn a_failed_write_still_records_what_landed() {
+    let root = tmp_project("partial");
+    let plan = plan_sync(&caps(), &[Harness::Claude]);
+    assert!(plan.files.len() > 2, "need several files to fail partway");
+
+    // Put a *directory* where the last target file belongs. Every earlier file
+    // writes normally and this one cannot — a real IO failure partway through,
+    // and one that a root-owned test process cannot bypass.
+    let blocked_path = plan.files.last().unwrap().path.clone();
+    std::fs::create_dir_all(root.join(&blocked_path)).unwrap();
+
+    let result = sync::apply(&root, &plan, false);
+    assert!(result.is_err(), "the run must surface the IO failure");
+
+    // Whatever reached disk is recorded, so a later uninstall can take it away.
+    let managed = sync::managed_paths(&root);
+    assert!(
+        !managed.is_empty(),
+        "files were written before the failure; the lockfile must not be empty"
+    );
+    let orphaned: Vec<&String> = plan
+        .files
+        .iter()
+        .map(|f| &f.path)
+        .filter(|p| **p != blocked_path && root.join(p).is_file())
+        .filter(|p| !managed.contains(p))
+        .collect();
+    assert!(
+        orphaned.is_empty(),
+        "written but not recorded, so never prunable: {orphaned:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A lockfile that exists but will not parse is not the same as no lockfile.
+/// Read as empty, it silently forgets every managed file: pruning stops and
+/// `--uninstall` reports a clean removal having removed nothing.
+#[test]
+fn a_corrupt_lockfile_is_reported_not_read_as_empty() {
+    let root = tmp_project("corrupt-lock");
+    sync::apply(
+        &root,
+        &plan_sync(&only(&["commit-style"]), &[Harness::Claude]),
+        false,
+    )
+    .unwrap();
+    let skill = root.join(".claude/skills/commit-style/SKILL.md");
+    assert!(skill.exists());
+
+    std::fs::write(root.join(sync::LOCK_REL), "managed: [ this is not: yaml\n").unwrap();
+
+    let report = sync::uninstall(&root, false).unwrap();
+    assert!(
+        report.has_blocked(),
+        "an unreadable lockfile must be reported"
+    );
+    assert!(
+        report
+            .blocked
+            .iter()
+            .any(|b| b.reason.contains("unparseable")),
+        "with a reason saying so: {:?}",
+        report.blocked
+    );
+    assert!(
+        skill.exists(),
+        "and the managed file must not be silently abandoned as removed"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

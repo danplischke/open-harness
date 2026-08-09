@@ -567,3 +567,73 @@ fn provision_run_and_requires_resolve_a_command_the_same_way() {
     assert!(dir.join("ran.txt").is_file());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- the deadline must bound collection, not just the process --------------
+
+/// A capability that exits promptly but leaves a **grandchild** holding the
+/// inherited stdout pipe must fail on its own deadline, not hang the dispatcher.
+///
+/// The consequence if this is wrong: `read()` on that pipe never reaches EOF, so
+/// joining the reader blocks forever and the agent wedges on a tool call — the
+/// exact failure the timeout exists to prevent, reached through a path the
+/// timeout did not cover (it bounded the child's *exit*, not the collection of
+/// its output).
+#[test]
+#[cfg(unix)]
+fn a_grandchild_holding_the_pipe_cannot_wedge_the_dispatcher() {
+    let dir = std::env::temp_dir().join(format!("oh-stuck-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("fork.sh");
+    std::fs::write(
+        &script,
+        "#!/usr/bin/env bash\nsleep 5 &\necho '{\"decision\":\"allow\"}'\nexit 0\n",
+    )
+    .unwrap();
+
+    let cap = LoadedCapability {
+        manifest: serde_json::from_value(json!({
+            "id": "forker",
+            "timeout_ms": 300,
+            "run": { "command": "fork.sh", "interpreter": "bash" },
+            "events": [{ "phase": "pre", "subject": "tool", "tool_class": "any" }],
+        }))
+        .unwrap(),
+        dir: dir.clone(),
+    };
+
+    let started = std::time::Instant::now();
+    let result = runtime::run_capability(&cap, &blocking_payload(), &RunLimits::default());
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "must give up on its own deadline, took {elapsed:?}"
+    );
+    match result {
+        Err(e) => {
+            assert_eq!(e.class(), "output-stuck", "got {e}");
+            assert!(
+                e.to_string().contains("stdout"),
+                "the reason must name the stream: {e}"
+            );
+        }
+        Ok(d) => panic!("expected a classified failure, got {d:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A stuck stream is still a failure to produce a decision, so the default
+/// policy denies on a blocking event — a guard that cannot be heard from leaves
+/// you unguarded.
+#[test]
+fn a_stuck_stream_fails_closed_on_a_blocking_event() {
+    use open_harness::manifest::FailPolicy;
+    let ev = NormEvent::tool(Phase::Pre, ToolClass::Shell);
+    assert!(ev.blocking());
+    assert!(FailPolicy::Auto.denies(ev.blocking()));
+    assert_eq!(
+        RunError::OutputStuck(300, "stdout".to_string()).class(),
+        "output-stuck"
+    );
+}

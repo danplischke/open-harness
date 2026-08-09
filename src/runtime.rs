@@ -12,12 +12,23 @@
 //! pipe, and the parent polls `try_wait` until the deadline, then kills. Output
 //! is read up to a byte cap; overflow is a first-class error rather than a
 //! truncated-JSON parse failure.
+//!
+//! The deadline bounds **collecting the decision**, not merely the process. A
+//! child exiting does not close a pipe that a process *it* spawned inherited, so
+//! waiting for end-of-file on that pipe can block forever even though the
+//! capability itself is long gone — wedging the agent on a tool call, which is
+//! what the timeout exists to prevent. So the reader threads deliver over
+//! channels the parent waits on with the same deadline, and a stream still held
+//! open at the end of it is its own failure class (`output-stuck`) naming the
+//! stream. Killing the child cannot fix this — the holder is a grandchild, and
+//! process-group kill is still deferred (see `SECURITY.md`).
 
 use crate::manifest::{LoadedCapability, RunSpec};
 use crate::model::{CanonicalPayload, Decision};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 /// Runtime limits applied to every capability, unless a manifest overrides the
@@ -55,6 +66,11 @@ pub enum RunError {
     RuntimeMissing(String),
     /// Killed after exceeding its timeout (ms).
     Timeout(u64),
+    /// The process exited, but a stream stayed open past the deadline so its
+    /// output could never be collected — something it spawned inherited the pipe
+    /// and is still holding it. Distinct from [`RunError::Timeout`]: the
+    /// capability itself finished, and nothing was killed.
+    OutputStuck(u64, String),
     /// Exited non-zero; carries the code and captured (capped) stderr.
     NonZeroExit(i32, String),
     /// stdout was not a valid `hook@1` decision document.
@@ -74,6 +90,7 @@ impl RunError {
             RunError::Spawn(_) => "spawn-error",
             RunError::RuntimeMissing(_) => "runtime-missing",
             RunError::Timeout(_) => "timeout",
+            RunError::OutputStuck(_, _) => "output-stuck",
             RunError::NonZeroExit(_, _) => "non-zero-exit",
             RunError::BadJson(_) => "bad-json",
             RunError::Protocol(_) => "protocol-mismatch",
@@ -89,6 +106,10 @@ impl std::fmt::Display for RunError {
             RunError::Spawn(m) => write!(f, "spawn failed: {m}"),
             RunError::RuntimeMissing(m) => write!(f, "runtime missing: {m}"),
             RunError::Timeout(ms) => write!(f, "timed out after {ms}ms (killed)"),
+            RunError::OutputStuck(ms, stream) => write!(
+                f,
+                "exited, but {stream} was still held open at {ms}ms (a process it spawned inherited the pipe)"
+            ),
             RunError::NonZeroExit(code, err) => {
                 write!(f, "exit {code}")?;
                 if !err.is_empty() {
@@ -157,8 +178,8 @@ pub fn run_capability(
         })
     });
     let cap_bytes = limits.max_output_bytes;
-    let stdout_thread = stdout.map(|h| std::thread::spawn(move || read_capped(h, cap_bytes)));
-    let stderr_thread = stderr.map(|h| std::thread::spawn(move || read_capped(h, cap_bytes)));
+    let stdout_rx = spawn_reader(stdout, cap_bytes);
+    let stderr_rx = spawn_reader(stderr, cap_bytes);
 
     // Poll for exit until the deadline; kill on timeout.
     let timeout_ms = cap.manifest.timeout_ms.unwrap_or(limits.timeout_ms);
@@ -184,16 +205,22 @@ pub fn run_capability(
         // grandchildren can keep the pipes open past the kill, and the runtime
         // must not block on that. Captured output is irrelevant on a timeout.
         drop(stdin_thread);
-        drop(stdout_thread);
-        drop(stderr_thread);
+        drop(stdout_rx);
+        drop(stderr_rx);
         return Err(RunError::Timeout(timeout_ms));
     };
 
-    if let Some(t) = stdin_thread {
-        let _ = t.join();
-    }
-    let (stdout_bytes, stdout_over) = join_reader(stdout_thread).unwrap_or_default();
-    let (stderr_bytes, _stderr_over) = join_reader(stderr_thread).unwrap_or_default();
+    // The writer is detached, never joined: its result is discarded either way,
+    // and a grandchild holding the read end of stdin would block `write_all`
+    // past the deadline — the same hazard the readers guard against below.
+    drop(stdin_thread);
+
+    // The child has exited, but exiting does not close a pipe a *grandchild*
+    // inherited, so the read side can stay open indefinitely. Joining
+    // unconditionally would hang the dispatcher — precisely the wedge this
+    // module's timeout exists to prevent — so collect under the same deadline.
+    let (stdout_bytes, stdout_over) = collect_reader(stdout_rx, deadline, timeout_ms, "stdout")?;
+    let (stderr_bytes, _stderr_over) = collect_reader(stderr_rx, deadline, timeout_ms, "stderr")?;
 
     if !status.success() {
         let code = status.code().unwrap_or(-1);
@@ -213,11 +240,44 @@ pub fn run_capability(
     crate::model::parse_decision(&stdout).map_err(RunError::BadJson)
 }
 
-type Reader = std::thread::JoinHandle<(Vec<u8>, bool)>;
+/// Drain a child pipe on its own thread, delivering `(bytes, overflowed)` once.
+/// A channel rather than a `JoinHandle` so the parent can wait with a deadline —
+/// `JoinHandle::join` has no timed form.
+fn spawn_reader<R: Read + Send + 'static>(
+    handle: Option<R>,
+    cap: usize,
+) -> Option<Receiver<(Vec<u8>, bool)>> {
+    let h = handle?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(read_capped(h, cap));
+    });
+    Some(rx)
+}
 
-/// Join a reader thread, mapping a panic to an empty/overflowed-false result.
-fn join_reader(t: Option<Reader>) -> Option<(Vec<u8>, bool)> {
-    t.map(|h| h.join().unwrap_or_else(|_| (Vec::new(), false)))
+/// Collect a reader's output, but never past `deadline`.
+///
+/// In the ordinary case the thread is already done the moment the child exits
+/// and this returns immediately. It only waits when something still holds the
+/// write end open — a forked grandchild — and then it gives up rather than
+/// blocking forever. A panicked reader disconnects the channel and yields empty
+/// output, matching the previous behavior.
+fn collect_reader(
+    rx: Option<Receiver<(Vec<u8>, bool)>>,
+    deadline: Instant,
+    timeout_ms: u64,
+    stream: &str,
+) -> Result<(Vec<u8>, bool), RunError> {
+    let Some(rx) = rx else {
+        return Ok((Vec::new(), false));
+    };
+    match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(v) => Ok(v),
+        Err(RecvTimeoutError::Disconnected) => Ok((Vec::new(), false)),
+        Err(RecvTimeoutError::Timeout) => {
+            Err(RunError::OutputStuck(timeout_ms, stream.to_string()))
+        }
+    }
 }
 
 // ---- cross-platform interpreter resolution (#4) ---------------------------
