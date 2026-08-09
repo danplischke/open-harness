@@ -5,18 +5,23 @@
 //!
 //! ```text
 //! blobs/sha256/<digest>.tar     # immutable, content-addressed capability archives
-//! index/sha256/<digest>.json    # an immutable snapshot of this exact catalog
-//! registry.json                 # the current catalog — what a profile points at
+//! index/sha256/<digest>.yaml    # an immutable snapshot of this exact catalog
+//! registry.yaml                 # the current catalog — what a profile points at
 //! ```
+//!
+//! The index is **YAML**, like every other config open-harness writes (see
+//! [`crate::config`]) — a catalog is meant to be read by the person deciding
+//! whether to consume it. Consumers still accept a JSON index, so a
+//! `registry.json` published before this remains resolvable.
 //!
 //! Two properties make this safe to put behind a cache:
 //!
-//!   * **Everything but `registry.json` is immutable.** A blob's URL *is* its
+//!   * **Everything but `registry.yaml` is immutable.** A blob's URL *is* its
 //!     sha256, so bytes can never change under a URL and the cache never needs
 //!     invalidating. Index snapshots are content-addressed for the same reason,
 //!     which also makes rollback a copy rather than a rebuild.
 //!   * **Publish order is upload-then-swap.** Blobs and the snapshot go up
-//!     first; `registry.json` is replaced last, so a consumer never reads a
+//!     first; `registry.yaml` is replaced last, so a consumer never reads a
 //!     catalog that names an artifact which has not landed.
 //!
 //! Packing does **not** sign: `oh sign` writes `capability.sig` into the
@@ -88,7 +93,7 @@ pub fn pack_capabilities(caps: &[LoadedCapability]) -> Result<Vec<Packed>, Strin
 
 /// Render the registry index: each capability's name → the digest-pinned archive
 /// that serves it, rooted at `base_url`.
-pub fn index_json(packed: &[Packed], base_url: &str) -> String {
+pub fn index_document(packed: &[Packed], base_url: &str) -> String {
     let base = base_url.trim_end_matches('/');
     let entries: Vec<Value> = packed
         .iter()
@@ -105,20 +110,17 @@ pub fn index_json(packed: &[Packed], base_url: &str) -> String {
             })
         })
         .collect();
-    format!(
-        "{}\n",
-        serde_json::to_string_pretty(&json!({ "capabilities": entries }))
-            .unwrap_or_else(|_| "{}".into())
-    )
+    crate::config::to_yaml(&json!({ "capabilities": entries }))
+        .unwrap_or_else(|_| "capabilities: []\n".into())
 }
 
 /// Write the publishable tree under `out`.
 ///
-/// Blobs and the immutable snapshot are written before `registry.json`, mirroring
+/// Blobs and the immutable snapshot are written before `registry.yaml`, mirroring
 /// the upload order a publisher must use so the catalog never points at an
 /// artifact that has not landed.
 pub fn write_tree(packed: &[Packed], base_url: &str, out: &Path) -> Result<Published, String> {
-    let index = index_json(packed, base_url);
+    let index = index_document(packed, base_url);
     let index_digest = crate::trust::sha256_hex(index.as_bytes());
 
     let mut total_bytes = 0u64;
@@ -128,11 +130,11 @@ pub fn write_tree(packed: &[Packed], base_url: &str, out: &Path) -> Result<Publi
         total_bytes += p.bytes.len() as u64;
     }
 
-    let snapshot_path = out.join(format!("index/sha256/{index_digest}.json"));
+    let snapshot_path = out.join(format!("index/sha256/{index_digest}.yaml"));
     write_file(&snapshot_path, index.as_bytes())?;
 
     // Last, so it is never the first thing a consumer can see.
-    let index_path = out.join("registry.json");
+    let index_path = out.join("registry.yaml");
     write_file(&index_path, index.as_bytes())?;
 
     Ok(Published {

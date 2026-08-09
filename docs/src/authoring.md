@@ -19,8 +19,8 @@ Kinds: `hook`, `skill`, `rule`, `command`, `tool`, `permission`, `agent`,
 The **document kinds** (skill, agent, command, rule, instructions) scaffold as a
 **single file** — `SKILL.md`, `AGENT.md`, `COMMAND.md`, `RULE.md`,
 `INSTRUCTIONS.md` — whose YAML frontmatter *is* the manifest. There is no sidecar
-`capability.json`: you author the artifact itself, and open-harness compiles that
-one file into each harness's dialect. (Hooks and tools keep a `capability.json` —
+`capability.yaml`: you author the artifact itself, and open-harness compiles that
+one file into each harness's dialect. (Hooks and tools keep a `capability.yaml` —
 they have no body and need structured `run` / `server` config.)
 
 ### Hook languages
@@ -60,7 +60,7 @@ through the core **in-process** via the native addon — no separate harness, no
 install step, just `npm test`.
 
 `@open-harness/node` is used for the **types and the dev-time test only** — the
-built capability (`capability.json` + `dist/hook.js`) is plain Node with no
+built capability (`capability.yaml` + `dist/hook.js`) is plain Node with no
 runtime dependency on it. Because the addon isn't published to npm yet, the
 package doesn't list it as a dependency (that would 404 on `npm install`); you
 supply it with `npm link` (`build.sh` in `bindings/node`, then `npm link` there).
@@ -86,10 +86,17 @@ context. The wire protocol is frozen as `hook@1` (see `spec/`).
 
 The manifest declares how to run it and which events it binds:
 
-```jsonc
-{ "id": "my-guard", "kind": "hook", "protocol": "hook@1",
-  "run": { "command": "python3", "args": ["hook.py"] },
-  "events": [ { "phase": "pre", "subject": "tool", "tool_class": "any" } ] }
+```yaml
+id: my-guard
+kind: hook
+protocol: hook@1
+run:
+  command: python3
+  args: [hook.py]
+events:
+  - phase: pre
+    subject: tool
+    tool_class: any
 ```
 
 ### Failure policy & limits
@@ -153,18 +160,23 @@ overrides:
 ---
 ```
 
-## Structured kinds — `capability.json`
+## Structured kinds — `capability.yaml`
 
-Hooks and tools (and, if you prefer, any kind) use a `capability.json` manifest —
+Hooks and tools (and, if you prefer, any kind) use a `capability.yaml` manifest —
 they have no body and need structured config. A permission policy, for example:
 
-```jsonc
-{ "id": "safe-shell", "kind": "permission",
-  "permission": { "default": "ask",
-    "rules": [ { "tool": "bash", "pattern": "git *", "verdict": "allow" } ] } }
+```yaml
+id: safe-shell
+kind: permission
+permission:
+  default: ask
+  rules:
+    - tool: bash
+      pattern: "git *"
+      verdict: allow
 ```
 
-`capability.json` works for every kind and, when both are present in a directory,
+`capability.yaml` works for every kind and, when both are present in a directory,
 wins over a single-file document. `oh check` shows how each capability lands on
 every harness (clean / degraded / blocked); `oh emit --harness <h>` prints the
 native artifacts.
@@ -177,7 +189,7 @@ verify integrity + authorship:
 ```sh
 oh keygen --out author.key
 oh sign   --capability capabilities/my-guard --key author.key
-oh verify --capability capabilities/my-guard --trust trust.json
+oh verify --capability capabilities/my-guard --trust trust.yaml
 ```
 
 Consumers compose your capability into a profile from a local path or a git repo,

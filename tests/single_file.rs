@@ -1,5 +1,5 @@
 //! Single-file capabilities: a document (e.g. `SKILL.md`) whose YAML frontmatter
-//! *is* the manifest — no sidecar `capability.json`. Covers the frontmatter
+//! *is* the manifest — no sidecar `capability.yaml`. Covers the frontmatter
 //! reader, discovery, id/kind inference, precedence, and single-file scaffolding.
 
 use open_harness::adapters::Harness;
@@ -299,7 +299,7 @@ fn single_file_nested_override_is_applied_not_dropped() {
 fn capability_json_wins_when_both_are_present() {
     let dir = tmp("both");
     write(
-        &dir.join("c/capability.json"),
+        &dir.join("c/capability.yaml"),
         r#"{"id":"c","kind":"skill","description":"json wins","skill":{"body":"J"}}"#,
     );
     write(
@@ -326,9 +326,9 @@ fn discovers_capabilities_nested_in_category_directories() {
         &dir.join("commit-style/SKILL.md"),
         "---\ndescription: Commits.\n---\n# X\n",
     );
-    // A nested capability.json, under its own category.
+    // A nested capability.yaml, under its own category.
     write(
-        &dir.join("agents/db/capability.json"),
+        &dir.join("agents/db/capability.yaml"),
         r#"{"id":"db","kind":"agent","agent":{"body":"b"}}"#,
     );
     let ids: Vec<String> = manifest::discover(&dir)
@@ -390,8 +390,8 @@ fn scaffold_skill_is_single_file_and_immediately_discoverable() {
     let files = scaffold::scaffold(KindId::Skill, Lang::Python, "my-skill", &dir).unwrap();
     assert!(files.iter().any(|f| f.ends_with("SKILL.md")));
     assert!(
-        !files.iter().any(|f| f.ends_with("capability.json")),
-        "a document kind must not scaffold a sidecar capability.json"
+        !files.iter().any(|f| f.ends_with("capability.yaml")),
+        "a document kind must not scaffold a sidecar capability.yaml"
     );
     let caps = manifest::discover(&dir).unwrap();
     assert_eq!(caps[0].manifest.id, "my-skill");

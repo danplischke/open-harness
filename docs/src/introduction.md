@@ -17,12 +17,12 @@ It stands *beside* the existing standards — AGENTS.md (instructions), MCP
 ## The `oh` CLI at a glance
 
 ```sh
-oh init                                   # write an oh.yaml profile
+oh init                                   # write an open-harness.yaml profile
 oh scaffold --kind hook --lang python --id my-guard   # a runnable capability starter
 oh doctor                                 # check interpreters + capability health
 oh matrix                                 # the (event × harness) support grid
 oh add git+https://github.com/me/my-skill@v1.2.0      # add a source (kind inferred)
-oh sync --into .                          # install into a project
+oh sync --into .                          # install into a project (profile found here)
 oh check --into . --ci                    # drift detection (fails CI on drift)
 ```
 

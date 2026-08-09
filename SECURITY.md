@@ -32,6 +32,12 @@ sorts the `(path, hash)` pairs, and hashes the list. Any changed byte, added, or
 renamed file changes the digest. It is deterministic and platform-independent
 (forward-slash paths, sorted), so it is stable across machines.
 
+Because the *filename* is part of the digest, migrating a manifest from
+`capability.json` to `capability.yaml` (`oh migrate`) changes the capability's
+digest and therefore **invalidates any existing `capability.sig`** — verification
+returns `Invalid`, exactly as it should for content that no longer matches what
+was signed. This is a one-way door: re-sign with `oh sign` after migrating.
+
 ### Authenticity — ed25519 signatures
 The author signs the digest with an **ed25519** private key. The detached
 `capability.sig` carries `{algorithm, public_key, digest, signature}`. On verify

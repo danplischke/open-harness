@@ -1,12 +1,22 @@
 //! Capability manifest: what an OSS author ships so their capability can be
 //! installed into any harness. Language-agnostic: `run` is just a command line.
+//!
+//! The manifest is a YAML document (`capability.yaml`) loaded through
+//! [`crate::config`], which also still reads a legacy `capability.json`.
 
 use crate::event::{Boundary, NormEvent, Phase, SubjectKind, TaskKind, ToolClass};
 use crate::kind::KindId;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Deserialize)]
+/// The manifest filename without its extension. [`crate::config::find`] probes
+/// `capability.yaml`, `capability.yml`, then `capability.json`.
+pub const MANIFEST_STEM: &str = "capability";
+
+/// The canonical manifest filename, for messages and scaffolding.
+pub const MANIFEST_NAME: &str = "capability.yaml";
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RunSpec {
     /// Interpreter/binary, e.g. `python3`, `node`, `./guard` (a compiled bin) —
     /// or, when `interpreter` is set, the **script** to run through it.
@@ -137,6 +147,69 @@ impl Permissions {
     }
 }
 
+/// What must already exist on the host for a capability's `run` entrypoint to
+/// work — the *runtime* it needs, as opposed to the capabilities it depends on.
+///
+/// open-harness deliberately does not install any of this. A capability's
+/// dependencies are its ecosystem's problem, and there are better answers than a
+/// package manager we would have to write: ship a compiled binary, vendor the
+/// dependencies into the capability (which puts them inside the content digest,
+/// so the author's signature covers them), or declare them the language-native
+/// way and let `uv` / `npm` provision. See `docs/src/runtimes.md`.
+///
+/// What open-harness owes you is to *notice* — before a missing interpreter
+/// turns into a denied tool call.
+///
+/// `deny_unknown_fields` so `require:` or `requires_bin:` is a loud error rather
+/// than a block that silently checks nothing.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Runtime {
+    /// Executables that must be resolvable on `PATH`, e.g. `[uv]` or `[node]`.
+    /// Checked before spawning, and reported by `oh check` / `oh doctor`.
+    #[serde(default)]
+    pub requires: Vec<String>,
+    /// How to make this capability's dependencies ready — `uv sync --script`,
+    /// `npm ci`, or whatever its ecosystem uses.
+    ///
+    /// **Never run by `sync`.** Only `oh install --runtimes` runs it, and only
+    /// when explicitly confirmed. Installing config and executing a package
+    /// manager are different acts and do not share a verb: `pip`/`npm` run
+    /// arbitrary code at install time (build backends, `postinstall`), which is
+    /// a larger hole than the one [`crate::profile::TransitiveTrust`] closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provision: Option<Provision>,
+}
+
+/// A provisioning command. Deliberately not a [`RunSpec`]: there is no
+/// interpreter indirection here, just an executable and its arguments, run in
+/// the capability's own directory.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Provision {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl Provision {
+    /// The command as a human would type it — what `oh install --runtimes`
+    /// shows before running anything.
+    pub fn display(&self) -> String {
+        if self.args.is_empty() {
+            self.command.clone()
+        } else {
+            format!("{} {}", self.command, self.args.join(" "))
+        }
+    }
+}
+
+impl Runtime {
+    pub fn is_empty(&self) -> bool {
+        self.requires.is_empty() && self.provision.is_none()
+    }
+}
+
 /// What the host permits capabilities to do. A violation is advisory by default.
 #[derive(Debug, Clone, Copy)]
 pub struct PermissionPolicy {
@@ -156,6 +229,12 @@ impl Default for PermissionPolicy {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
     pub id: String,
+    /// Explicit namespace, e.g. `acme`. Usually left unset — the resolver
+    /// derives one from the source (a git repo's `<owner>/<repo>`, a registry
+    /// entry's name), and an author only sets this to pin their own. See
+    /// [`LoadedCapability::qualified_name`].
+    #[serde(default)]
+    pub namespace: Option<String>,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -182,14 +261,20 @@ pub struct Manifest {
     /// a resolved capability set is pinned + reproducible. Defaults to `0.0.0`.
     #[serde(default = "default_version")]
     pub version: String,
-    /// Other capability ids this one expects to be composed alongside. The
-    /// resolver warns if a declared dependency is absent from the profile.
+    /// Other capabilities this one relates to — `requires` / `suggests` /
+    /// `conflicts` / `replaces`, each with a version requirement. Accepts a bare
+    /// list of names (any version, `requires`) or a name → requirement map. See
+    /// [`crate::deps`].
     #[serde(default)]
-    pub dependencies: Vec<String>,
+    pub dependencies: crate::deps::Dependencies,
     /// Declared permission manifest (read / exec / network). Surfaced for
     /// consent and checked against the host policy (advisory).
     #[serde(default)]
     pub permissions: Permissions,
+    /// Executables this capability's `run` entrypoint needs on `PATH`. Checked
+    /// before spawning and reported by `oh check` / `oh doctor`; never installed.
+    #[serde(default)]
+    pub runtime: Runtime,
     /// Per-harness overrides: `{"<harness-id>": { "path": …, "tools": […],
     /// "frontmatter": { … } }}`. Lets one canonical capability tune its own
     /// output for a specific target without forking it (adopted by the skill and
@@ -227,11 +312,32 @@ pub struct LoadedCapability {
 }
 
 impl LoadedCapability {
+    /// The capability's **fully-qualified name**: `<namespace>/<id>`, or the
+    /// bare `id` when it has no namespace.
+    ///
+    /// A bare `id` is only unique within one tree. The moment sources are other
+    /// people's repositories, two authors both shipping `mem-search` are
+    /// different capabilities, and "first source wins" would silently pick one.
+    /// The qualified name is what dependencies resolve against and what the lock
+    /// pins; `id` stays the local alias, and is still what the emitted native
+    /// filenames use.
+    pub fn qualified_name(&self) -> String {
+        match &self.manifest.namespace {
+            Some(ns) if !ns.is_empty() => format!("{ns}/{}", self.manifest.id),
+            _ => self.manifest.id.clone(),
+        }
+    }
+
+    /// Adopt `namespace` unless the manifest already declares one — an author's
+    /// explicit namespace outranks whatever the source implies.
+    pub fn adopt_namespace(&mut self, namespace: Option<&str>) {
+        if self.manifest.namespace.is_none() {
+            self.manifest.namespace = namespace.map(|s| s.to_string());
+        }
+    }
+
     pub fn load(manifest_path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(manifest_path)
-            .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
-        let manifest: Manifest = serde_json::from_str(&text)
-            .map_err(|e| format!("parse {}: {e}", manifest_path.display()))?;
+        let manifest: Manifest = crate::config::load(manifest_path)?;
         let dir = manifest_path
             .parent()
             .map(|p| p.to_path_buf())
@@ -295,6 +401,8 @@ impl LoadedCapability {
         // and an agent's `permissions:` (tool→verdict) must reach its config, not
         // be captured as the sandbox and silently loosen `ask` to `allow`.
         for key in [
+            "namespace",
+            "runtime",
             "name",
             "description",
             "version",
@@ -396,9 +504,9 @@ const DOC_FILES: &[(&str, KindId)] = &[
 
 /// Scan `dir` for capabilities, **recursing** through category subdirectories.
 ///
-/// `dir` is a container. Each descendant directory that holds a `capability.json`
+/// `dir` is a container. Each descendant directory that holds a `capability.yaml`
 /// or a single-file document (`SKILL.md`, `AGENT.md`, …) is one capability,
-/// authored either way (when both are present, `capability.json` wins). A
+/// authored either way (when both are present, `capability.yaml` wins). A
 /// directory that *is* a capability is **not** descended into — its
 /// subdirectories are its own assets — so a category tree like
 /// `skills/gcp/cloud-run-basics/SKILL.md` is found while a capability's internals
@@ -413,8 +521,9 @@ pub fn discover(dir: &Path) -> Result<Vec<LoadedCapability>, String> {
 
 /// Like [`discover`], but `dir` may itself **be** a single capability rather than
 /// a container of them — the shape you get when a whole repository is one
-/// capability (`git+https://github.com/me/my-skill`), the way a Python package
-/// is installed straight from a repo.
+/// capability (`git+https://github.com/me/my-skill`), the way a Python package is
+/// installed straight from a repo. Without this, that layout finds nothing, and
+/// finding nothing looks exactly like there being nothing wrong.
 ///
 /// `id_hint` names that root capability when its document carries no explicit
 /// `id`. Normally the id falls back to the directory name, but the directory
@@ -463,23 +572,23 @@ fn scan_capability_or_category(dir: &Path, out: &mut Vec<LoadedCapability>) -> R
     scan_container(dir, out)
 }
 
-/// Load the capability rooted directly at `dir`, if any: a `capability.json`
-/// wins, otherwise the first recognized single-file document.
+/// Load the capability rooted directly at `dir`, if any: a `capability.yaml`
+/// (or `.yml` / legacy `.json`) wins, otherwise the first recognized single-file
+/// document.
 fn load_capability_dir(dir: &Path) -> Result<Option<LoadedCapability>, String> {
     load_capability_dir_named(dir, None)
 }
 
 /// `id_hint` supplies the id for a single-file capability whose document has no
 /// explicit `id` and whose directory name is not meaningful — see
-/// [`discover_named`]. A `capability.json` always carries its own id, so the
-/// hint never applies there.
+/// [`discover_named`]. A manifest file always carries its own id, so the hint
+/// never applies there.
 fn load_capability_dir_named(
     dir: &Path,
     id_hint: Option<&str>,
 ) -> Result<Option<LoadedCapability>, String> {
-    let json = dir.join("capability.json");
-    if json.is_file() {
-        return Ok(Some(LoadedCapability::load(&json)?));
+    if let Some(manifest) = crate::config::find(&dir.join(MANIFEST_STEM)) {
+        return Ok(Some(LoadedCapability::load(&manifest)?));
     }
     for (name, kind) in DOC_FILES {
         let doc = dir.join(name);

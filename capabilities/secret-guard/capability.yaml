@@ -1,0 +1,14 @@
+id: secret-guard
+name: Secret Guard
+description: Denies any tool call whose input appears to contain a hardcoded secret (API key, private key, token). Blocking.
+runtime:
+  requires: [python3]
+run:
+  command: python3
+  args:
+    - guard.py
+events:
+  - phase: pre
+    subject: tool
+    tool_class: any
+    required: true

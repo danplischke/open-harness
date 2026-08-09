@@ -9,6 +9,8 @@ pub mod adapters;
 pub mod api;
 pub mod archive;
 pub mod capture;
+pub mod config;
+pub mod deps;
 pub mod dispatch;
 pub mod event;
 pub mod http;
@@ -18,6 +20,7 @@ pub mod manifest;
 pub mod matrix;
 pub mod mcp;
 pub mod model;
+pub mod plugin;
 pub mod profile;
 pub mod publish;
 pub mod runtime;
@@ -33,16 +36,20 @@ pub mod yaml;
 uniffi::setup_scaffolding!();
 
 pub use adapters::{Harness, Support};
+pub use deps::{Dependencies, Dependency, Relation, Requirement, Version};
 pub use dispatch::{dispatch, dispatch_with_limits, DispatchOutcome};
 pub use event::NormEvent;
 pub use kind::{kind_impl, Artifact, Installability, Kind, KindId, KindPlan};
-pub use manifest::{discover, LoadedCapability};
+pub use manifest::{discover, LoadedCapability, Provision, Runtime};
 pub use model::{
     merge, negotiate, parse_decision, validate_decision, Decision, NativeResponse, Verdict,
     PROTOCOL, PROTOCOL_VERSION,
 };
-pub use profile::{resolve, Lock, Profile, Resolved, Source};
-pub use runtime::{RunError, RunLimits};
+pub use profile::{resolve, Lock, PluginSource, Profile, Resolved, Select, Source};
+pub use runtime::{
+    find_executable, install_hint, missing_requirements, provision, resolve_program,
+    resolve_requirement, RunError, RunLimits,
+};
 pub use sync::{
     apply, check, plan_sync, ApplyReport, ChangeAction, DesiredFile, DriftKind, DriftReport,
     SyncPlan,

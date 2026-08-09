@@ -1,7 +1,9 @@
 //! `oh` — the unified CLI.
 //!
 //! Authoring:  `init` (write a profile) · `scaffold` (a runnable capability
-//!   starter) · `add`/`remove` (edit a profile's sources) · `doctor` (check the
+//!   starter) · `add`/`remove` (edit a profile's sources) · `migrate` (rewrite
+//!   legacy JSON configs as YAML) · `install --runtimes` (run capabilities'
+//!   declared provisioning commands, confirmed) · `doctor` (check the
 //!   environment + capability health).
 //! Runtime:    `run` (a harness's single native hook entrypoint) · `mcp`
 //!   (list/call an MCP server's tools through the shell — the MCP→CLI bridge).
@@ -18,7 +20,7 @@ use open_harness::adapters::{Harness, ALL};
 use open_harness::kind::{kind_impl, Artifact, Installability, KindId};
 use open_harness::manifest::{discover, LoadedCapability, PermissionPolicy};
 use open_harness::mcp::{self, HttpServerSpec, McpServer, ServerSpec};
-use open_harness::profile::{self, GitSource, Lock, Profile, Resolved};
+use open_harness::profile::{self, Lock, Profile, Resolved};
 use open_harness::publish;
 use open_harness::scaffold::{self, Lang};
 use open_harness::sync::{self, ApplyReport, ChangeAction, Deferred, DriftKind, DriftReport};
@@ -50,12 +52,14 @@ fn main() {
         "scaffold" => cmd_scaffold(&rest),
         "capture" => cmd_capture(&rest),
         "init" => cmd_init(&rest),
+        "migrate" => cmd_migrate(&rest),
+        "install" => cmd_install(&rest),
         "doctor" => cmd_doctor(&rest),
         "add" => cmd_add(&rest),
         "remove" => cmd_remove(&rest),
         _ => {
             eprintln!(
-                "oh <init|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|pack|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix|version> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git SPEC]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--base-url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nsources:   oh add <spec>  (git+URL@rev#subdirectory=… · URL.tar#sha256=… · URL.json#name=… · a path)\nauthoring: oh init · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\npublish:   oh pack --capabilities capabilities --base-url https://cdn.example.com --out dist\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
+                "oh <init|migrate|install|scaffold|capture|add|remove|doctor|run|emit|keygen|sign|pack|verify|trust|revoke|keyring|mcp|resolve|sync|check|matrix|version> \\\n  [--harness H] [--event E] [--capabilities DIR] [--profile FILE] [--into DIR]\\\n  [--kind K] [--lang L] [--project] [--id ID] [--local PATH] [--git URL]\\\n  [--key FILE] [--trust FILE] [--label L] [--reason R] [--out FILE] [--require-signed] [--root] [--keyring FILE] [--deny-network] [--deny-exec]\\\n  [--command CMD] [--mcp-arg A]... [--url URL] [--base-url URL] [--header H]... [--tool NAME] [--json ARGS]\\\n  [--dry-run] [--uninstall] [--ci] [--locked] [--runtimes] [--yes] [--markdown] [--timeout-ms N] [--max-output-kb N] [--explain]\n\nauthoring: oh init · oh migrate (JSON configs → YAML) · oh install --runtimes · oh scaffold --kind hook --lang python --id my-guard · oh scaffold --project --id my-cap · oh doctor\npublish:   oh pack --capabilities capabilities --base-url https://cdn.example.com --out dist\nmcp:       oh mcp <list|call> (--id ID | --command CMD [--mcp-arg A]... | --url URL [--header 'K: V']...) [--tool NAME] [--json '<args>']"
             );
             exit(2);
         }
@@ -71,6 +75,10 @@ struct Opts {
     dry_run: bool,
     uninstall: bool,
     ci: bool,
+    /// Treat the lockfile as a contract: never rewrite it, fail if it is stale.
+    locked: bool,
+    /// Confirm an action that executes code (`install --runtimes`).
+    yes: bool,
     explain: bool,
     timeout_ms: u64,
     max_output_bytes: u64,
@@ -101,10 +109,10 @@ struct Opts {
     scaffold_project: bool,
     local: Option<String>,
     git: Option<String>,
-    // publishing (#21)
-    base_url: Option<String>,
     /// Bare arguments (a source spec for `add`, a subcommand for `mcp`).
     positional: Vec<String>,
+    // publishing (#21)
+    base_url: Option<String>,
 }
 
 fn parse_opts(rest: &[String]) -> Opts {
@@ -117,6 +125,8 @@ fn parse_opts(rest: &[String]) -> Opts {
         dry_run: false,
         uninstall: false,
         ci: false,
+        locked: false,
+        yes: false,
         explain: false,
         timeout_ms: 0,
         max_output_bytes: 0,
@@ -143,8 +153,8 @@ fn parse_opts(rest: &[String]) -> Opts {
         scaffold_project: false,
         local: None,
         git: None,
-        base_url: None,
         positional: Vec::new(),
+        base_url: None,
     };
     let mut i = 0;
     while i < rest.len() {
@@ -293,6 +303,14 @@ fn parse_opts(rest: &[String]) -> Opts {
             }
             "--uninstall" => {
                 o.uninstall = true;
+                i += 1;
+            }
+            "--locked" => {
+                o.locked = true;
+                i += 1;
+            }
+            "--yes" | "-y" => {
+                o.yes = true;
                 i += 1;
             }
             "--ci" => {
@@ -576,12 +594,12 @@ fn cmd_pack(rest: &[String]) {
         );
     }
     println!();
-    println!("publish by uploading blobs/ and index/ first, then registry.json last —");
+    println!("publish by uploading blobs/ and index/ first, then registry.yaml last —");
     println!("so the catalog never names an artifact that has not landed:");
     println!("  aws s3 sync {}/blobs s3://BUCKET/blobs", out.display());
     println!("  aws s3 sync {}/index s3://BUCKET/index", out.display());
     println!(
-        "  aws s3 cp   {}/registry.json s3://BUCKET/registry.json",
+        "  aws s3 cp   {}/registry.yaml s3://BUCKET/registry.yaml",
         out.display()
     );
 }
@@ -622,7 +640,7 @@ fn cmd_verify(rest: &[String]) {
     let store = load_trust(&o);
     let v = trust::verify(&dir, &store);
     println!("{}: {}", dir.display(), v.status());
-    if let Ok(cap) = LoadedCapability::load(&dir.join("capability.json")) {
+    if let Ok(cap) = load_manifest_in(&dir) {
         if !cap.manifest.permissions.is_empty() {
             println!("  permissions: {}", cap.manifest.permissions.summary());
         }
@@ -637,7 +655,7 @@ fn cmd_trust(rest: &[String]) {
     let trust_path = o
         .trust
         .clone()
-        .unwrap_or_else(|| PathBuf::from("trust.json"));
+        .unwrap_or_else(|| default_store_path("trust"));
     let mut store = TrustStore::load(&trust_path).unwrap_or_else(|e| {
         eprintln!("{e}");
         exit(1);
@@ -766,7 +784,7 @@ fn cmd_keyring(rest: &[String]) {
     let out = o
         .out
         .clone()
-        .unwrap_or_else(|| PathBuf::from("keyring.json"));
+        .unwrap_or_else(|| default_store_path("keyring"));
     keyring.write(&out).unwrap_or_else(|e| {
         eprintln!("{e}");
         exit(1);
@@ -792,7 +810,7 @@ fn cmd_revoke(rest: &[String]) {
     let trust_path = o
         .trust
         .clone()
-        .unwrap_or_else(|| PathBuf::from("trust.json"));
+        .unwrap_or_else(|| default_store_path("trust"));
     let mut store = TrustStore::load(&trust_path).unwrap_or_else(|e| {
         eprintln!("{e}");
         exit(1);
@@ -809,6 +827,15 @@ fn cmd_revoke(rest: &[String]) {
     } else {
         println!("already revoked: {fp}");
     }
+}
+
+/// The default path for a trust store / keyring the user didn't name: the YAML
+/// spelling, unless a legacy `<stem>.json` is already sitting there — writing a
+/// fresh `trust.yaml` next to a `trust.json` full of pinned keys would silently
+/// drop every one of them.
+fn default_store_path(stem: &str) -> PathBuf {
+    open_harness::config::find(std::path::Path::new(stem))
+        .unwrap_or_else(|| PathBuf::from(format!("{stem}.yaml")))
 }
 
 fn load_trust(o: &Opts) -> TrustStore {
@@ -874,7 +901,12 @@ fn enforce_trust(caps: &[LoadedCapability], o: &Opts) {
 /// Resolve a profile file: load it (and any lockfile next to it), resolve every
 /// source, rewrite the lockfile, and print the composed set + warnings. The
 /// profile file's directory is the workdir (roots relative paths + the git cache).
-fn resolve_profile(path: &std::path::Path) -> Resolved {
+///
+/// Under `--locked` the lockfile becomes a contract instead of an output: it
+/// must exist, the resolution must match it exactly, and nothing is written.
+/// That is what makes a lock worth having in CI — a resolve that quietly
+/// rewrites the lock it was supposed to honor verifies nothing.
+fn resolve_profile_opts(path: &std::path::Path, locked: bool) -> Resolved {
     let profile = Profile::load(path).unwrap_or_else(|e| {
         eprintln!("{e}");
         exit(2);
@@ -883,12 +915,44 @@ fn resolve_profile(path: &std::path::Path) -> Resolved {
     let lock_path = workdir.join(profile::LOCK_NAME);
     let existing = std::fs::read_to_string(&lock_path)
         .ok()
-        .and_then(|t| Lock::from_json(&t).ok());
+        .and_then(|t| Lock::from_text(&t).ok());
+
+    if locked && existing.is_none() {
+        eprintln!(
+            "--locked requires an existing {}; run `oh resolve --profile {}` first",
+            lock_path.display(),
+            path.display()
+        );
+        exit(1);
+    }
 
     let resolved = profile::resolve(&profile, workdir, existing.as_ref()).unwrap_or_else(|e| {
         eprintln!("resolve failed: {e}");
         exit(1);
     });
+
+    if locked {
+        let recorded = existing.expect("checked above");
+        if resolved.lock != recorded {
+            eprintln!(
+                "lockfile is stale — {} does not match the profile as resolved:",
+                lock_path.display()
+            );
+            for line in lock_drift(&recorded, &resolved.lock) {
+                eprintln!("  {line}");
+            }
+            eprintln!(
+                "\nre-run `oh resolve --profile {}` and commit the result",
+                path.display()
+            );
+            exit(1);
+        }
+        for w in &resolved.warnings {
+            eprintln!("warning: {w}");
+        }
+        return resolved;
+    }
+
     if let Err(e) = resolved.lock.write(&lock_path) {
         eprintln!("could not write {}: {e}", lock_path.display());
     }
@@ -901,7 +965,7 @@ fn resolve_profile(path: &std::path::Path) -> Resolved {
 fn cmd_resolve(rest: &[String]) {
     let o = parse_opts(rest);
     let profile_path = resolve_profile_path(&o);
-    let resolved = resolve_profile(&profile_path);
+    let resolved = resolve_profile_opts(&profile_path, o.locked);
     let workdir = profile_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
@@ -960,7 +1024,7 @@ fn cmd_sync(rest: &[String]) {
         .clone()
         .or_else(|| profile::find_profile(std::path::Path::new(".")))
     {
-        let resolved = resolve_profile(&profile_path);
+        let resolved = resolve_profile_opts(&profile_path, o.locked);
         if resolved.harnesses.is_empty() {
             eprintln!("profile '{}' targets no harnesses", resolved.profile);
             exit(1);
@@ -1003,7 +1067,7 @@ fn cmd_check(rest: &[String]) {
             .clone()
             .or_else(|| profile::find_profile(std::path::Path::new(".")))
         {
-            let resolved = resolve_profile(&profile_path);
+            let resolved = resolve_profile_opts(&profile_path, o.locked);
             if resolved.harnesses.is_empty() {
                 eprintln!("profile '{}' targets no harnesses", resolved.profile);
                 exit(1);
@@ -1042,6 +1106,20 @@ fn cmd_check(rest: &[String]) {
             cap.manifest.name,
             cap.manifest.kind.as_str()
         );
+        // Installability is a per-harness question ("can this kind be written
+        // there"); the runtime is a per-*host* one ("will it actually run").
+        // Both have to be answered, or a capability that denies every tool call
+        // reads as "installable — clean" on all eleven harnesses.
+        if !cap.manifest.runtime.requires.is_empty() {
+            match open_harness::runtime::missing_requirements(&cap.manifest.runtime) {
+                None => println!(
+                    "  {:<12} ready — {}",
+                    "runtime",
+                    cap.manifest.runtime.requires.join(", ")
+                ),
+                Some(gap) => println!("  {:<12} MISSING — {gap}", "runtime"),
+            }
+        }
         let k = kind_impl(cap.manifest.kind);
         for h in ALL {
             let plan = k.plan(cap, h);
@@ -1287,11 +1365,11 @@ fn cmd_version() {
 fn cmd_init(rest: &[String]) {
     let o = parse_opts(rest);
     let dir = o.into.clone().unwrap_or_else(|| PathBuf::from("."));
-    let path = o
-        .out
-        .clone()
-        .unwrap_or_else(|| dir.join(profile::DEFAULT_PROFILE_NAME));
-    if let Some(existing) = profile::find_profile(&dir) {
+    let path = dir.join(profile::PROFILE_NAME);
+    // Refuse if a profile already exists in *any* accepted spelling or name, so
+    // `init` never quietly shadows an `open-harness.json` — or an `oh.yaml` —
+    // that is still being read.
+    if let Some(existing) = profile::all_profiles(&dir).first() {
         eprintln!("{} already exists", existing.display());
         exit(1);
     }
@@ -1299,16 +1377,220 @@ fn cmd_init(rest: &[String]) {
         None | Some("all") => vec!["claude-code".into(), "cursor".into()],
         Some(id) => vec![id.to_string()],
     };
-    let value = serde_json::json!({
+    let profile = serde_json::json!({
         "name": "default",
         "harnesses": harnesses,
         "sources": [ "capabilities" ],
     });
-    write_profile_value(&path, &value);
+    if let Err(e) = open_harness::config::write(&path, &profile) {
+        eprintln!("{e}");
+        exit(1);
+    }
     println!("wrote {}", path.display());
     println!("next: oh scaffold --kind hook --lang python --id my-guard");
-    println!("      oh add git+https://github.com/me/my-skill@v1.0.0");
-    println!("      oh sync --into .");
+    println!("      oh sync --profile {} --into .", path.display());
+}
+
+/// Config filenames `oh migrate` rewrites from JSON to YAML. Everything else is
+/// left alone — a harness's own `.json` config is that harness's format, not
+/// ours, and rewriting it would produce a file the harness cannot read.
+const MIGRATABLE: &[&str] = &[
+    "capability.json",
+    "open-harness.json",
+    "open-harness.lock",
+    "sync.lock.json",
+    "trust.json",
+    "keyring.json",
+    "capability.sig",
+];
+
+fn cmd_migrate(rest: &[String]) {
+    let o = parse_opts(rest);
+    let root = o.into.clone().unwrap_or_else(|| PathBuf::from("."));
+    let mut found = Vec::new();
+    collect_migratable(&root, &mut found);
+    found.sort();
+
+    if found.is_empty() {
+        println!("no JSON config files to migrate under {}", root.display());
+        return;
+    }
+    let mut migrated = 0usize;
+    for path in &found {
+        if o.dry_run {
+            println!(
+                "  would migrate  {} → {}",
+                path.display(),
+                open_harness::config::migrated_path(path).display()
+            );
+            migrated += 1;
+            continue;
+        }
+        match open_harness::config::migrate_file(path) {
+            // `None` means it parsed as something other than JSON — already
+            // migrated, so a re-run is a no-op rather than a churned file.
+            Ok(None) => {}
+            Ok(Some(target)) => {
+                println!("  migrated  {} → {}", path.display(), target.display());
+                migrated += 1;
+            }
+            Err(e) => {
+                eprintln!("  failed    {}: {e}", path.display());
+                exit(1);
+            }
+        }
+    }
+    println!(
+        "\n{migrated} file(s) {}",
+        if o.dry_run {
+            "would migrate"
+        } else {
+            "migrated"
+        }
+    );
+    if migrated > 0 && !o.dry_run {
+        println!(
+            "note: a capability's content digest changes with its manifest filename, \
+             so any existing `capability.sig` must be re-signed (`oh sign`)."
+        );
+    }
+}
+
+/// Walk `dir` collecting migratable config files. Hidden directories are skipped
+/// except `.open-harness`, which holds the sync lockfile; `.git` and friends are
+/// none of our business.
+fn collect_migratable(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if ft.is_dir() {
+            if !name.starts_with('.') || name == ".open-harness" {
+                collect_migratable(&entry.path(), out);
+            }
+        } else if ft.is_file() && MIGRATABLE.contains(&name.as_str()) {
+            out.push(entry.path());
+        }
+    }
+}
+
+/// `oh install --runtimes` — run capabilities' declared provisioning commands.
+///
+/// The only place in open-harness that executes something a capability author
+/// chose but the wire protocol did not define. Three gates stand in front of it,
+/// all deliberate:
+///
+///  1. **It is a separate verb.** `sync` writes config and never provisions;
+///     executing a package manager is a different act.
+///  2. **It shows before it runs.** Without `--yes` it prints the exact commands
+///     and stops. `pip`/`npm` execute arbitrary code at install time, so the
+///     blast radius should be visible before it happens, not after.
+///  3. **`--deny-network` refuses outright**, because provisioning is
+///     network-touching by nature and the flag would otherwise be a lie.
+///
+/// `--require-signed` additionally restricts it to capabilities whose signature
+/// verifies against the trust store — the same gate transitive acquisition uses,
+/// for the same reason.
+fn cmd_install(rest: &[String]) {
+    let o = parse_opts(rest);
+    if !rest.iter().any(|a| a == "--runtimes") {
+        eprintln!("oh install --runtimes [--capabilities DIR | --profile FILE] [--yes]");
+        exit(2);
+    }
+    if o.deny_network {
+        eprintln!(
+            "--deny-network refuses runtime provisioning: fetching dependencies needs the \
+             network, so running it under this flag would be dishonest"
+        );
+        exit(1);
+    }
+
+    let caps = match o.profile.clone() {
+        Some(p) => resolve_profile_opts(&p, o.locked).capabilities,
+        None => load_caps(&o),
+    };
+    let store = load_trust(&o);
+
+    let mut queued = Vec::new();
+    for cap in &caps {
+        let Some(spec) = cap.manifest.runtime.provision.as_ref() else {
+            continue;
+        };
+        if o.require_signed {
+            let v = trust::verify(&cap.dir, &store);
+            if !v.passes(true) {
+                eprintln!(
+                    "  skipped   {} — {} (--require-signed)",
+                    cap.manifest.id,
+                    v.status()
+                );
+                continue;
+            }
+        }
+        queued.push((cap, spec));
+    }
+
+    if queued.is_empty() {
+        println!("no capabilities declare `runtime.provision`.");
+        return;
+    }
+
+    println!(
+        "{} capability(ies) declare a provisioning command:\n",
+        queued.len()
+    );
+    for (cap, spec) in &queued {
+        let state = match open_harness::runtime::missing_requirements(&cap.manifest.runtime) {
+            None => "ready".to_string(),
+            Some(gap) => format!("missing {gap}"),
+        };
+        println!("  {:<20} {}", cap.manifest.id, spec.display());
+        println!("  {:<20}   in {} · {state}", "", cap.dir.display());
+    }
+
+    if !o.yes {
+        println!(
+            "\nThese commands run with your privileges and may execute code from the \
+             package registries they contact.\nRe-run with --yes to proceed."
+        );
+        return;
+    }
+
+    println!("\nprovisioning:");
+    let mut failed = 0;
+    for (cap, _) in &queued {
+        let Some(outcome) = open_harness::runtime::provision(cap) else {
+            continue;
+        };
+        let mark = if outcome.success && outcome.requirements_met {
+            "✓"
+        } else {
+            failed += 1;
+            "✗"
+        };
+        println!("  {mark} {:<20} {}", outcome.capability, outcome.command);
+        // A provisioner that exits 0 without satisfying the declared
+        // requirement has not done its job, and saying "✓" there would be the
+        // same silent lie this project refuses everywhere else.
+        if outcome.success && !outcome.requirements_met {
+            println!(
+                "      exited 0 but `runtime.requires` is still unsatisfied — \
+                 the command ran, the dependency is not there"
+            );
+        }
+        if !outcome.output.is_empty() && !outcome.success {
+            for line in outcome.output.lines().take(5) {
+                println!("      {line}");
+            }
+        }
+    }
+    if failed > 0 {
+        eprintln!("\n{failed} provisioning command(s) did not succeed");
+        exit(1);
+    }
+    println!("\nall provisioned.");
 }
 
 fn cmd_doctor(rest: &[String]) {
@@ -1322,7 +1604,7 @@ fn cmd_doctor(rest: &[String]) {
         ("sh", "bash capabilities + MCP bridge wrappers"),
         ("git", "git sources (personal-repo sync)"),
     ] {
-        let found = which_on_path(name);
+        let found = open_harness::runtime::find_executable(name);
         println!(
             "  {:<8} {}",
             name,
@@ -1330,7 +1612,10 @@ fn cmd_doctor(rest: &[String]) {
                 Some(p) => format!("✓ {p}"),
                 None => {
                     missing += 1;
-                    format!("✗ not found — needed for {why}")
+                    let hint = open_harness::runtime::install_hint(name)
+                        .map(|h| format!(" · install: {h}"))
+                        .unwrap_or_default();
+                    format!("✗ not found — needed for {why}{hint}")
                 }
             }
         );
@@ -1341,19 +1626,32 @@ fn cmd_doctor(rest: &[String]) {
         Ok(caps) if caps.is_empty() => println!("  (none found)"),
         Ok(caps) => {
             for cap in &caps {
-                // A capability is "healthy" if it plans on at least one harness.
+                // A capability is "healthy" if it plans on at least one harness
+                // *and* the runtime its entrypoint needs is actually present.
+                // Reporting only the first would call a capability that denies
+                // every tool call "✓".
                 let installable = ALL.iter().any(|&h| {
                     matches!(
                         kind_impl(cap.manifest.kind).plan(cap, h).installability,
                         Installability::Clean | Installability::Degraded(_)
                     )
                 });
+                let runtime_gap =
+                    open_harness::runtime::missing_requirements(&cap.manifest.runtime);
                 println!(
                     "  {} {:<16} [{}]",
-                    if installable { "✓" } else { "✗" },
+                    if installable && runtime_gap.is_none() {
+                        "✓"
+                    } else {
+                        "✗"
+                    },
                     cap.manifest.id,
                     cap.manifest.kind.as_str()
                 );
+                if let Some(gap) = runtime_gap {
+                    println!("      runtime missing: {gap}");
+                    missing += 1;
+                }
             }
         }
         Err(e) => {
@@ -1369,31 +1667,37 @@ fn cmd_doctor(rest: &[String]) {
     println!("\nall good.");
 }
 
-/// Minimal PATH lookup for `doctor` (honors PATHEXT on Windows).
-fn which_on_path(program: &str) -> Option<String> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let direct = dir.join(program);
-        if direct.is_file() {
-            return Some(direct.to_string_lossy().into_owned());
+/// The profile to act on: `--profile` when given, else the one this project
+/// keeps. Exits with the fix in the message when there is none, or when several
+/// would be ambiguous.
+fn resolve_profile_path(o: &Opts) -> PathBuf {
+    if let Some(p) = &o.profile {
+        return p.clone();
+    }
+    let found = profile::all_profiles(std::path::Path::new("."));
+    match found.len() {
+        1 => found.into_iter().next().unwrap(),
+        0 => {
+            eprintln!(
+                "no profile here — expected {} (or oh.yaml / harness.yaml) in the current \
+                 directory.\nRun `oh init` to create one, or pass --profile FILE.",
+                profile::PROFILE_NAME
+            );
+            exit(2);
         }
-        if cfg!(windows) {
-            for ext in std::env::var("PATHEXT")
-                .unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
-                .split(';')
-                .filter(|e| !e.is_empty())
-            {
-                let cand = dir.join(format!("{program}{ext}"));
-                if cand.is_file() {
-                    return Some(cand.to_string_lossy().into_owned());
-                }
-            }
+        _ => {
+            let names: Vec<String> = found.iter().map(|p| p.display().to_string()).collect();
+            eprintln!(
+                "several profiles here ({}) — keep one, or pick with --profile FILE.",
+                names.join(", ")
+            );
+            exit(2);
         }
     }
-    None
 }
 
-fn git_value(g: &GitSource) -> serde_json::Value {
+/// A git source as a mapping, for the explicit `--git` form.
+fn git_value(g: &profile::GitSource) -> serde_json::Value {
     let mut m = serde_json::Map::new();
     m.insert("url".into(), serde_json::json!(g.url));
     m.insert("rev".into(), serde_json::json!(g.rev));
@@ -1407,19 +1711,19 @@ fn cmd_add(rest: &[String]) {
     let o = parse_opts(rest);
     let pf = resolve_profile_path(&o);
     // `oh add <spec>` infers the kind from the spec itself; `--local` / `--git`
-    // stay as explicit overrides for the cases inference cannot settle.
+    // stay as explicit overrides for what inference cannot settle.
     let source = if let Some(p) = &o.local {
         serde_json::json!({ "local": { "path": p } })
     } else if let Some(u) = &o.git {
-        let g = GitSource::parse_spec(u).unwrap_or_else(|e| {
+        let g = profile::GitSource::parse_spec(u).unwrap_or_else(|e| {
             eprintln!("{e}");
             exit(2);
         });
         serde_json::json!({ "git": git_value(&g) })
     } else if let Some(spec) = o.positional.first() {
-        // The spec is stored as written: a profile that says
-        // `git+https://…@v1` keeps saying that, rather than being expanded into
-        // an object the author did not write.
+        // Validated now so a typo fails here rather than at the next resolve,
+        // but stored as written: a profile that says `git+https://…@v1` keeps
+        // saying that, rather than being expanded into a mapping nobody wrote.
         profile::Source::parse_spec(spec).unwrap_or_else(|e| {
             eprintln!("{e}");
             exit(2);
@@ -1479,70 +1783,76 @@ fn cmd_remove(rest: &[String]) {
     }
 }
 
-/// The profile to act on: `--profile` when given, else the one this project
-/// keeps (`oh.yaml` and friends). Exits with the fix in the message when there
-/// is none, or when several would be ambiguous.
-fn resolve_profile_path(o: &Opts) -> PathBuf {
-    if let Some(p) = &o.profile {
-        return p.clone();
+/// A human-readable summary of how a recorded lock differs from a fresh
+/// resolution — which capabilities appeared, vanished, or moved. Enough to see
+/// *what* went stale without diffing the file by hand.
+fn lock_drift(recorded: &Lock, fresh: &Lock) -> Vec<String> {
+    use std::collections::BTreeMap;
+
+    fn index(lock: &Lock) -> BTreeMap<String, (String, String)> {
+        lock.sources
+            .iter()
+            .flat_map(|s| &s.capabilities)
+            .map(|c| (c.name.clone(), (c.version.clone(), c.digest.clone())))
+            .collect()
     }
-    let dir = PathBuf::from(".");
-    let found = profile::all_profiles(&dir);
-    match found.len() {
-        1 => found.into_iter().next().unwrap(),
-        0 => {
-            eprintln!(
-                "no profile here — expected one of {} in the current directory.\n\
-                 Run `oh init` to create one, or pass --profile FILE.",
-                profile::PROFILE_NAMES.join(", ")
-            );
-            exit(2);
-        }
-        _ => {
-            let names: Vec<String> = found.iter().map(|p| p.display().to_string()).collect();
-            eprintln!(
-                "several profiles here ({}) — keep one, or pick with --profile FILE.",
-                names.join(", ")
-            );
-            exit(2);
+    let (old, new) = (index(recorded), index(fresh));
+    let mut out = Vec::new();
+
+    for (name, (version, digest)) in &new {
+        match old.get(name) {
+            None => out.push(format!("+ {name} {version} (not in the lock)")),
+            Some((old_version, _)) if old_version != version => {
+                out.push(format!("~ {name} {old_version} → {version}"))
+            }
+            Some((_, old_digest)) if old_digest != digest => {
+                out.push(format!("~ {name} {version} — content changed"))
+            }
+            Some(_) => {}
         }
     }
+    for name in old.keys().filter(|n| !new.contains_key(*n)) {
+        out.push(format!("- {name} (locked, but no source provides it)"));
+    }
+
+    // Sources move independently of the capabilities they carry.
+    for (a, b) in recorded.sources.iter().zip(&fresh.sources) {
+        if a.origin == b.origin && a.rev != b.rev {
+            out.push(format!(
+                "~ {} @ {} → {}",
+                a.origin,
+                a.rev.as_deref().unwrap_or("-"),
+                b.rev.as_deref().unwrap_or("-")
+            ));
+        }
+    }
+    if out.is_empty() {
+        out.push("(source list or ordering changed)".to_string());
+    }
+    out
 }
 
-fn is_yaml(path: &std::path::Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some("yaml") | Some("yml")
-    )
+/// Load the capability manifest in `dir`, whichever spelling it uses.
+fn load_manifest_in(dir: &std::path::Path) -> Result<LoadedCapability, String> {
+    let path = open_harness::config::find(&dir.join(open_harness::manifest::MANIFEST_STEM))
+        .ok_or_else(|| format!("no capability manifest in {}", dir.display()))?;
+    LoadedCapability::load(&path)
 }
 
 fn read_profile_value(path: &std::path::Path) -> serde_json::Value {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return serde_json::json!({ "name": "default", "harnesses": [], "sources": [] });
-    };
-    let parsed = if is_yaml(path) {
-        open_harness::yaml::parse_frontmatter(&text).map(serde_json::Value::Object)
-    } else {
-        serde_json::from_str(&text).map_err(|e| e.to_string())
-    };
-    parsed.unwrap_or_else(|e| {
-        eprintln!("invalid profile {}: {e}", path.display());
-        exit(1);
-    })
+    match std::fs::read_to_string(path) {
+        Ok(t) => open_harness::config::parse(&t, open_harness::config::Format::of(path))
+            .unwrap_or_else(|e| {
+                eprintln!("invalid profile {}: {e}", path.display());
+                exit(1);
+            }),
+        Err(_) => serde_json::json!({ "name": "default", "harnesses": [], "sources": [] }),
+    }
 }
 
 fn write_profile_value(path: &std::path::Path, v: &serde_json::Value) {
-    // A profile is written back in the format it is named for, so editing a
-    // YAML profile never silently turns it into JSON.
-    let text = if is_yaml(path) {
-        // A profile reads better as name → harnesses → sources than in the
-        // map's alphabetical order.
-        open_harness::yaml::to_yaml_document_ordered(v, &["name", "harnesses", "sources"])
-    } else {
-        format!("{}\n", serde_json::to_string_pretty(v).unwrap_or_default())
-    };
-    if let Err(e) = std::fs::write(path, text) {
-        eprintln!("write {}: {e}", path.display());
+    if let Err(e) = open_harness::config::write(path, v) {
+        eprintln!("{e}");
         exit(1);
     }
 }

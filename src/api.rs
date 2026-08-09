@@ -119,7 +119,8 @@ pub fn kinds() -> Vec<String> {
     .collect()
 }
 
-/// Plan a capability (given as its `capability.json` text) for one harness.
+/// Plan a capability (given as its manifest text — JSON, the FFI boundary's
+/// wire format) for one harness.
 /// `dir` is the directory used to resolve relative `body_file` paths.
 pub fn plan(manifest_json: &str, dir: &str, harness: &str) -> Result<Plan, ApiError> {
     let cap = load(manifest_json, dir)?;
@@ -215,17 +216,20 @@ pub struct VerifyResult {
     pub permissions: String,
 }
 
-/// Verify a capability directory against an optional trust store (JSON string).
+/// Verify a capability directory against an optional trust store. The store is
+/// passed as text; YAML and JSON are both accepted, so a host can hand over the
+/// contents of a `trust.yaml` or a legacy `trust.json` unchanged.
 pub fn verify(dir: &str, trust_json: Option<&str>) -> Result<VerifyResult, ApiError> {
     let store = match trust_json {
         Some(t) if !t.trim().is_empty() => {
-            crate::trust::TrustStore::from_json(t).map_err(ApiError::Json)?
+            crate::trust::TrustStore::from_text(t).map_err(ApiError::Json)?
         }
         _ => crate::trust::TrustStore::default(),
     };
     let path = std::path::Path::new(dir);
     let v = crate::trust::verify(path, &store);
-    let permissions = crate::manifest::LoadedCapability::load(&path.join("capability.json"))
+    let permissions = crate::config::find(&path.join(crate::manifest::MANIFEST_STEM))
+        .and_then(|p| crate::manifest::LoadedCapability::load(&p).ok())
         .map(|c| {
             if c.manifest.permissions.is_empty() {
                 String::new()

@@ -8,7 +8,8 @@
 //! get a valid manifest + body skeleton that plans cleanly.
 
 use crate::kind::KindId;
-use serde_json::json;
+use crate::manifest::MANIFEST_NAME;
+use serde_json::{json, Value};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,10 +40,21 @@ impl Lang {
 ///
 /// Document kinds (skill / agent / command / rule / instructions) scaffold as a
 /// **single file** whose frontmatter is the manifest — the idiomatic authoring
-/// format, no sidecar `capability.json`. Executable kinds (hook, tool) and the
-/// structured permission kind scaffold a `capability.json`.
+/// format, no sidecar manifest. Executable kinds (hook, tool) and the
+/// structured permission kind scaffold a `capability.yaml`.
 pub fn scaffold(kind: KindId, lang: Lang, id: &str, dir: &Path) -> Result<Vec<String>, String> {
     validate_id(id)?;
+    // `native` carries one harness's own config verbatim. It is what importing a
+    // vendor's plugin produces, not something to start from — a blank one would
+    // be a template for writing unportable config by hand, which is the opposite
+    // of what this tool is for.
+    if kind == KindId::Native {
+        return Err(
+            "the `native` kind is produced by importing a plugin (`sources: [{plugin: …}]`), \
+             not scaffolded — author a portable kind instead"
+                .to_string(),
+        );
+    }
     let cap_dir = dir.join(id);
 
     let files: Vec<(String, String)> = match kind {
@@ -98,21 +110,34 @@ pub fn scaffold(kind: KindId, lang: Lang, id: &str, dir: &Path) -> Result<Vec<St
             ),
         )],
         KindId::Tool => vec![(
-            "capability.json".into(),
-            manifest(
+            MANIFEST_NAME.into(),
+            manifest_yaml(
                 id,
                 "tool",
-                r#""tool": { "provider": "exec", "delivery": "cli", "exec": { "command": "TODO-your-cli" }, "usage": "TODO-your-cli <args>" }"#,
+                "TODO: describe this tool.",
+                json!({ "tool": {
+                    "provider": "exec",
+                    "delivery": "cli",
+                    "exec": { "command": "TODO-your-cli" },
+                    "usage": "TODO-your-cli <args>",
+                } }),
             ),
         )],
         KindId::Permission => vec![(
-            "capability.json".into(),
-            manifest(
+            MANIFEST_NAME.into(),
+            manifest_yaml(
                 id,
                 "permission",
-                r#""permission": { "default": "ask", "rules": [ { "tool": "bash", "pattern": "git *", "verdict": "allow" } ] }"#,
+                "TODO: describe this permission.",
+                json!({ "permission": {
+                    "default": "ask",
+                    "rules": [ { "tool": "bash", "pattern": "git *", "verdict": "allow" } ],
+                } }),
             ),
         )],
+        // Refused above; the arm keeps the match exhaustive without pretending
+        // there is a template.
+        KindId::Native => unreachable!("native is refused before this match"),
     };
 
     // Refuse to overwrite an existing capability (the primary file of the kind).
@@ -138,15 +163,12 @@ fn doc(front: &[&str], body: &str) -> String {
 /// Scaffold a TypeScript capability as an **npm package** into `dir/<id>/`:
 /// `package.json` + `tsconfig.json` + a typed `src/hook.ts` + a `test.mjs` that
 /// runs the capability through the core in-process via `@open-harness/node`, plus
-/// `capability.json` and a README. Dev loop: `npm run build && npm test`.
+/// `capability.yaml` and a README. Dev loop: `npm run build && npm test`.
 pub fn scaffold_ts_project(id: &str, dir: &Path) -> Result<Vec<String>, String> {
     validate_id(id)?;
     let cap_dir = dir.join(id);
-    if cap_dir.join("capability.json").exists() {
-        return Err(format!(
-            "{} already exists",
-            cap_dir.join("capability.json").display()
-        ));
+    if let Some(existing) = crate::config::find(&cap_dir.join(crate::manifest::MANIFEST_STEM)) {
+        return Err(format!("{} already exists", existing.display()));
     }
     let title = title(id);
 
@@ -193,7 +215,10 @@ pub fn scaffold_ts_project(id: &str, dir: &Path) -> Result<Vec<String>, String> 
     let files = vec![
         ("package.json".to_string(), pretty(&package)),
         ("tsconfig.json".to_string(), pretty(&tsconfig)),
-        ("capability.json".to_string(), pretty(&capability)),
+        (
+            MANIFEST_NAME.to_string(),
+            crate::yaml::to_document(&capability),
+        ),
         ("src/hook.ts".to_string(), TS_CAPABILITY.to_string()),
         ("test.mjs".to_string(), TS_TEST.replace("__ID__", id)),
         (
@@ -241,44 +266,43 @@ fn pretty(v: &serde_json::Value) -> String {
 
 /// The manifest + runnable starter for a hook, per language.
 fn hook_files(lang: Lang, id: &str) -> Vec<(String, String)> {
-    let (script_name, run, starter) = match lang {
-        Lang::Python => (
-            "hook.py",
-            r#""run": { "command": "python3", "args": ["hook.py"] }"#,
-            PY_HOOK,
-        ),
-        Lang::Node => (
-            "hook.mjs",
-            r#""run": { "command": "node", "args": ["hook.mjs"] }"#,
-            NODE_HOOK,
-        ),
-        Lang::TypeScript => (
-            "hook.ts",
-            r#""run": { "command": "node", "args": ["hook.ts"] }"#,
-            TS_TYPED_HOOK,
-        ),
-        Lang::Bash => (
-            "hook.sh",
-            r#""run": { "command": "sh", "args": ["hook.sh"] }"#,
-            BASH_HOOK,
-        ),
+    let (script_name, command, starter) = match lang {
+        Lang::Python => ("hook.py", "python3", PY_HOOK),
+        Lang::Node => ("hook.mjs", "node", NODE_HOOK),
+        Lang::TypeScript => ("hook.ts", "node", TS_TYPED_HOOK),
+        Lang::Bash => ("hook.sh", "sh", BASH_HOOK),
     };
-    let manifest = format!(
-        "{{\n  \"id\": \"{id}\",\n  \"name\": \"{title}\",\n  \"description\": \"TODO: describe what this hook guards.\",\n  \"kind\": \"hook\",\n  \"protocol\": \"hook@1\",\n  {run},\n  \"events\": [\n    {{ \"phase\": \"pre\", \"subject\": \"tool\", \"tool_class\": \"any\" }}\n  ]\n}}\n",
-        title = title(id),
+    let manifest = manifest_yaml(
+        id,
+        "hook",
+        "TODO: describe what this hook guards.",
+        json!({
+            "protocol": "hook@1",
+            "run": { "command": command, "args": [script_name] },
+            "events": [ { "phase": "pre", "subject": "tool", "tool_class": "any" } ],
+        }),
     );
     vec![
-        ("capability.json".into(), manifest),
+        (MANIFEST_NAME.into(), manifest),
         (script_name.into(), starter.to_string()),
     ]
 }
 
-/// A generative-kind manifest with a kind config block spliced in.
-fn manifest(id: &str, kind: &str, config_block: &str) -> String {
-    format!(
-        "{{\n  \"id\": \"{id}\",\n  \"name\": \"{title}\",\n  \"description\": \"TODO: describe this {kind}.\",\n  \"kind\": \"{kind}\",\n  {config_block}\n}}\n",
-        title = title(id),
-    )
+/// A capability manifest as a YAML document: the common header plus whatever
+/// kind-specific keys `extra` carries, in that order.
+fn manifest_yaml(id: &str, kind: &str, description: &str, extra: Value) -> String {
+    let mut doc = json!({
+        "id": id,
+        "name": title(id),
+        "description": description,
+        "kind": kind,
+    });
+    if let (Some(target), Value::Object(extra)) = (doc.as_object_mut(), extra) {
+        for (k, v) in extra {
+            target.insert(k, v);
+        }
+    }
+    crate::yaml::to_document(&doc)
 }
 
 fn title(id: &str) -> String {
@@ -474,7 +498,7 @@ Edit `src/hook.ts` — the `// TODO` is where you inspect the tool and decide.
 
 ## Install into a project
 
-The built capability is a normal open-harness capability (`capability.json` +
+The built capability is a normal open-harness capability (`capability.yaml` +
 `dist/hook.js`). Compose it into a profile and install with the `oh` CLI:
 
 ```sh

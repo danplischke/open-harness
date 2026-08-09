@@ -2,7 +2,7 @@
 
 This is a **design note** for distributing *capabilities* — the skills, hooks,
 rules, commands, tools, and agents an author writes — through a central,
-CDN-hosted registry (for concreteness: a JSON index and content-addressed blobs
+CDN-hosted registry (for concreteness: an index file and content-addressed blobs
 on S3 behind a CloudFront distribution).
 
 It is deliberately framed as an *extension of an existing seam*, not a new
@@ -30,10 +30,10 @@ These are orthogonal; this note is about the second.
 
 ## Where a registry fits
 
-A profile (`oh.yaml`) is an ordered list of **sources**; resolving it composes
-them, then writes `open-harness.lock` pinning every resolved capability and every
-source's exact revision, so a re-resolve is reproducible. A source is usually
-just its URL — the kind is inferred from the spec:
+A profile (`open-harness.yaml`) is an ordered list of **sources**; resolving it
+composes them, then writes `open-harness.lock` pinning every resolved capability
+and every source's exact revision, so a re-resolve is reproducible. A source is
+usually just its URL — the kind is inferred from the spec:
 
 ```yaml
 name: my-team
@@ -41,8 +41,12 @@ harnesses: [claude, codex, cursor]
 sources:
   - capabilities                                  # in-repo overrides
   - git+https://github.com/a/b@main               # a repo, pinned
-  - https://cdn.example.com/registry.json#name=commit-style   # the catalog
+  - https://cdn.example.com/registry.yaml#name=commit-style   # the catalog
 ```
+
+The mapping form (`- git: { url: …, rev: main }`) stays available for anything a
+spec string cannot carry — `select:`, a registry `version:` — and for saying the
+kind outright.
 
 Sources are **ordered and earlier-wins**: a later duplicate id is a loud
 shadow warning, never a silent override. A CDN registry is simply *one more
@@ -55,8 +59,9 @@ resolver.
 
 | Piece | Where | What it gives you |
 |---|---|---|
+| `Source::parse_spec` | `profile.rs` | A source written as one string, with its kind inferred from the spec. |
 | `Source::Git` + pip-style specs | `profile.rs` | `git+<url>@<rev>#subdirectory=<path>` — install straight from a repo, no catalog needed. |
-| `Source::Registry { name, version, index }` | `profile.rs` | A **central JSON index** mapping capability names → their real source. |
+| `Source::Registry { name, version, index }` | `profile.rs` | A **central index** (YAML, or legacy JSON) mapping capability names → their real source. |
 | `RegistryIndex` / `RegistryEntry` | `profile.rs` | The index schema (below). |
 | Index from a **URL** | `profile.rs` | `index` accepts an `http(s)://` URL, a `file://` URL, or a workdir-relative path. |
 | `Source::Http { url, sha256 }` | `profile.rs` | A digest-pinned **archive leaf**: the capability bytes themselves, fetched from the CDN. |
@@ -73,11 +78,14 @@ archive's *signature* on the way in.
 
 ### Hosting the index
 
-```jsonc
-{ "registry": { "index": "https://cdn.example.com/registry.json", "name": "commit-style" } }
-{ "registry": { "index": "file:///srv/catalog/registry.json",     "name": "commit-style" } }
-{ "registry": { "index": "registry.json",                         "name": "commit-style" } }
+```yaml
+- registry: { index: "https://cdn.example.com/registry.yaml", name: commit-style }
+- registry: { index: "file:///srv/catalog/registry.yaml",     name: commit-style }
+- registry: { index: "registry.yaml",                         name: commit-style }
 ```
+
+The index format follows the URL's extension, so a catalog published as
+`registry.json` before the move to YAML keeps resolving unchanged.
 
 A fetch failure is a **loud warning**, never a silent skip, and `https://`
 without the `http-tls` feature is refused with a pointer to `file://`, a local
@@ -118,37 +126,29 @@ sources, and a profile can mix them.
 The index is the catalog: names → where each capability actually lives. Today
 each entry points at a `local` or `git` leaf source:
 
-```json
-{
-  "capabilities": [
-    {
-      "name": "commit-style",
-      "version": "1.2.0",
-      "source": { "git": { "url": "https://github.com/a/b", "subdir": "capabilities/commit-style" } }
-    }
-  ]
-}
+```yaml
+capabilities:
+  - name: commit-style
+    version: 1.2.0
+    source:
+      git:
+        url: https://github.com/a/b
+        subdir: capabilities/commit-style
 ```
 
 For a CDN-native registry, an entry instead points at a content-addressed
 artifact:
 
-```json
-{
-  "capabilities": [
-    {
-      "name": "commit-style",
-      "version": "1.2.0",
-      "source": {
-        "http": {
-          "url": "https://cdn.example.com/blobs/sha256/9f86d081…a08.tar",
-          "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
-        }
-      },
-      "signer": "ed25519:3b6a27bc…"   // optional: author key fingerprint (not yet verified)
-    }
-  ]
-}
+```yaml
+capabilities:
+  - name: commit-style
+    version: 1.2.0
+    source:
+      http:
+        url: https://cdn.example.com/blobs/sha256/9f86d081…a08.tar
+        sha256: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+    # optional: author key fingerprint (not yet verified)
+    signer: "ed25519:3b6a27bc…"
 ```
 
 Two rules keep the format durable:
@@ -159,14 +159,14 @@ Two rules keep the format durable:
   the same to the resolver. Model *a verifiable fetchable index*, not *a
   CloudFront registry*.
 - **Keep the resolver's contract `name → metadata`,** never "download the whole
-  world to resolve one name." One JSON file listing every capability@version is
+  world to resolve one name." One index file listing every capability@version is
   genuinely fine at hundreds of entries; that contract is what lets it later
-  shard by name-prefix (or move to per-name `/<name>/index.json`) without a
+  shard by name-prefix (or move to per-name `/<name>/index.yaml`) without a
   format break.
 
 ## CDN layout
 
-The single operational trap is a **mutable `registry.json` at a fixed URL**: it
+The single operational trap is a **mutable `registry.yaml` at a fixed URL**: it
 fights the CDN. Short TTLs defeat caching; long TTLs plus an invalidation on
 every publish cost money, propagate slowly, and still let a consumer read a
 stale index.
@@ -178,24 +178,24 @@ tree `oh pack` emits:
 s3://oh-registry/                       (origin behind CloudFront)
   blobs/sha256/<digest>.tar             # immutable, content-addressed
                                         #   Cache-Control: public, max-age=31536000, immutable
-  index/sha256/<digest>.json            # immutable snapshot of one exact catalog
-  registry.json                         # the current catalog — the only mutable object
+  index/sha256/<digest>.yaml            # immutable snapshot of one exact catalog
+  registry.yaml                         # the current catalog — the only mutable object
 ```
 
 - **Blobs are content-addressed and cached forever.** The URL *is* the sha256,
   so a byte can never change under a URL; the cache never has to be invalidated.
 - **Index snapshots are content-addressed too,** so publishing never edits an
   existing one and rollback is a copy rather than a rebuild.
-- **Only `registry.json` is mutable** — one object, short TTL.
+- **Only `registry.yaml` is mutable** — one object, short TTL.
 
 **Publish ordering makes it atomic:** upload the blobs, then the snapshot, then
-replace `registry.json` *last* (an S3 `PUT` swaps an object atomically). A
+replace `registry.yaml` *last* (an S3 `PUT` swaps an object atomically). A
 consumer therefore never reads a catalog naming a blob that has not landed.
 `oh pack` writes the tree in that same order and prints the matching upload
 commands.
 
-> An earlier draft of this note proposed making `registry.json` a *tiny pointer*
-> (`{"latest": "index/2.json"}`) so the mutable object stayed a few bytes. That
+> An earlier draft of this note proposed making `registry.yaml` a *tiny pointer*
+> (`latest: index/2.yaml`) so the mutable object stayed a few bytes. That
 > is deliberately **not** what shipped: it costs every consumer an extra round
 > trip and needs pointer-following in the resolver, to shrink an object that is
 > already small at the scale this format targets. Content-addressing the
@@ -214,11 +214,11 @@ oh pack --capabilities capabilities \
 
 `pack` walks the capability directory, packs each capability into a
 deterministic archive, names it by its sha256, and writes `dist/` in the layout
-above with a ready-to-consume `registry.json`. Point a profile at that file and
+above with a ready-to-consume `registry.yaml`. Point a profile at that file and
 the catalog resolves:
 
-```jsonc
-{ "registry": { "index": "https://cdn.example.com/registry.json", "name": "commit-style" } }
+```yaml
+- registry: { index: "https://cdn.example.com/registry.yaml", name: commit-style }
 ```
 
 **Determinism is the load-bearing property.** Because an archive is named by its
@@ -249,7 +249,7 @@ End to end:
    tarball. The index snapshot itself can be signed too, so a consumer who has
    pinned a **root** key verifies the whole catalog's provenance in one step
    (root-of-trust `Keyring`).
-2. **Resolve.** `oh resolve --trust trust.json [--require-signed]` fetches the
+2. **Resolve.** `oh resolve --trust trust.yaml [--require-signed]` fetches the
    pointer → index → blobs, and for each blob verifies **both** that its sha256
    equals the content-address URL **and** that its signature checks against the
    `TrustStore`. Verification is five-valued and non-negotiable on the reject
@@ -362,7 +362,7 @@ unpacked size against a decompression-style bomb. The digest is verified
 
 **Decisions to make deliberately:**
 
-- **Mutable-pointer scheme and TTL** — e.g. `registry.json → index/<n>.json`
+- **Mutable-pointer scheme and TTL** — e.g. `registry.yaml → index/<n>.yaml`
   with a short TTL, and whether the pointer is signed.
 - **Default posture for remote sources.** Recommendation: treat an unsigned or
   untrusted **remote** artifact more strictly than a local one — either imply

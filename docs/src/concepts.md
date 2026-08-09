@@ -5,7 +5,7 @@
 - **L1 — Capability spec.** A capability is a directory declaring a `kind`. The
   document kinds (skill, agent, command, rule, instructions) are authored as a
   **single file** whose YAML frontmatter is the manifest (`SKILL.md`, `AGENT.md`,
-  …); hooks and tools use a `capability.json`. Either form works for any kind; the
+  …); hooks and tools use a `capability.yaml`. Either form works for any kind; the
   set of kinds is open.
 - **L2 — Runtime contract.** Language-agnostic execution: a **hook** is any
   executable that reads a canonical payload as JSON on stdin and writes a
@@ -13,8 +13,18 @@
 - **L3 — Adapters.** Per-harness mapping of the normalized model to each
   harness's native surface: event mapping, decode/encode, registration, and the
   capability matrix.
-- **L4 — Composition.** Profiles + sources (local / git), a resolved lockfile,
+- **L4 — Composition.** Profiles + sources (local / git / registry), qualified
+  names, a versioned [dependency graph](./dependencies.md), a resolved lockfile,
   `sync` (install + drift), and trust/signing.
+
+## Configuration format
+
+Everything open-harness itself defines is **YAML**: the capability manifest
+(`capability.yaml`), the profile (`open-harness.yaml`), both lockfiles, the
+registry index, and the trust store. A **harness's** config stays in that
+harness's own format — `.claude/settings.json`, `opencode.json`, `.mcp.json`,
+Codex/Gemini TOML — as does the frozen `hook@1` wire protocol, which is JSON on
+stdin and stdout. Legacy JSON config is still read; `oh migrate` rewrites it.
 
 ## The normalized event model
 

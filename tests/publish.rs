@@ -32,12 +32,12 @@ fn write(path: &Path, contents: &str) {
 fn caps_dir(root: &Path, id: &str, version: &str, body: &str) -> PathBuf {
     let dir = root.join("capabilities");
     write(
-        &dir.join(id).join("capability.json"),
-        &json!({
+        &dir.join(id).join("capability.yaml"),
+        &open_harness::config::to_yaml(&json!({
             "id": id, "name": id, "description": "x", "version": version,
             "kind": "skill", "skill": { "body": body },
-        })
-        .to_string(),
+        }))
+        .unwrap(),
     );
     dir
 }
@@ -90,8 +90,11 @@ fn the_index_pins_every_archive_by_digest() {
     let loaded = discover(&caps).unwrap();
     let packed = publish::pack_capabilities(&loaded).unwrap();
 
+    // Parsed back through the *config* loader, so this asserts the emitted
+    // index is readable by exactly the code that consumes one.
+    let rendered = publish::index_document(&packed, "https://cdn.example.com/");
     let index: Value =
-        serde_json::from_str(&publish::index_json(&packed, "https://cdn.example.com/")).unwrap();
+        open_harness::config::parse(&rendered, open_harness::config::Format::Yaml).unwrap();
     let entry = &index["capabilities"][0];
     assert_eq!(entry["name"], "greeter");
     assert_eq!(entry["version"], "2.1.0");
@@ -127,7 +130,7 @@ fn the_published_tree_is_content_addressed() {
         packed[0].digest,
         "the stored bytes hash to the name they are stored under"
     );
-    assert!(report.index_path.is_file(), "registry.json is written");
+    assert!(report.index_path.is_file(), "registry.yaml is written");
     assert!(
         report.snapshot_path.is_file(),
         "an immutable snapshot is written alongside"
@@ -190,11 +193,11 @@ fn a_published_catalog_resolves_back_through_a_registry_source() {
     publish::write_tree(&packed, &file_url(&cdn), &cdn).unwrap();
 
     let consumer = tmp("consumer");
-    let profile = profile::Profile::from_json(
+    let profile = profile::Profile::from_text(
         &json!({
             "name": "p", "harnesses": ["claude-code"],
             "sources": [{ "registry": {
-                "index": file_url(&cdn.join("registry.json")), "name": "greeter" } }],
+                "index": file_url(&cdn.join("registry.yaml")), "name": "greeter" } }],
         })
         .to_string(),
     )

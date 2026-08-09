@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-/// The detached signature file written next to `capability.json`.
+/// The detached signature file written next to the capability manifest.
 pub const SIG_NAME: &str = "capability.sig";
 
 // ---- content digest -------------------------------------------------------
@@ -130,15 +130,11 @@ impl Keyfile {
     }
 
     pub fn load(path: &Path) -> Result<Keyfile, String> {
-        let text =
-            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        serde_json::from_str(&text).map_err(|e| format!("invalid key file: {e}"))
+        crate::config::load(path).map_err(|e| format!("invalid key file: {e}"))
     }
 
     pub fn write(&self, path: &Path) -> Result<(), String> {
-        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(path, format!("{text}\n"))
-            .map_err(|e| format!("write {}: {e}", path.display()))
+        crate::config::write(path, self)
     }
 }
 
@@ -165,13 +161,11 @@ pub struct Signature {
 impl Signature {
     pub fn load(dir: &Path) -> Option<Signature> {
         let text = std::fs::read_to_string(dir.join(SIG_NAME)).ok()?;
-        serde_json::from_str(&text).ok()
+        crate::config::from_str(&text, crate::config::Format::Either).ok()
     }
 
     pub fn write(&self, dir: &Path) -> Result<(), String> {
-        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(dir.join(SIG_NAME), format!("{text}\n"))
-            .map_err(|e| format!("write {SIG_NAME}: {e}"))
+        crate::config::write(&dir.join(SIG_NAME), self)
     }
 }
 
@@ -355,15 +349,11 @@ pub fn sign_keyring(keys: Vec<TrustedKey>, root: &Keyfile) -> Result<Keyring, St
 
 impl Keyring {
     pub fn load(path: &Path) -> Result<Keyring, String> {
-        let text =
-            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        serde_json::from_str(&text).map_err(|e| format!("invalid keyring: {e}"))
+        crate::config::load(path).map_err(|e| format!("invalid keyring: {e}"))
     }
 
     pub fn write(&self, path: &Path) -> Result<(), String> {
-        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(path, format!("{text}\n"))
-            .map_err(|e| format!("write {}: {e}", path.display()))
+        crate::config::write(path, self)
     }
 
     /// Verify the root's signature over the vouched keys.
@@ -404,22 +394,23 @@ pub struct TrustStore {
 }
 
 impl TrustStore {
-    pub fn from_json(text: &str) -> Result<TrustStore, String> {
-        serde_json::from_str(text).map_err(|e| format!("invalid trust store: {e}"))
+    /// Parse a trust store from YAML (or legacy JSON) text.
+    pub fn from_text(text: &str) -> Result<TrustStore, String> {
+        crate::config::from_str(text, crate::config::Format::Either)
+            .map_err(|e| format!("invalid trust store: {e}"))
     }
 
     pub fn load(path: &Path) -> Result<TrustStore, String> {
         match std::fs::read_to_string(path) {
-            Ok(t) => serde_json::from_str(&t).map_err(|e| format!("invalid trust store: {e}")),
+            Ok(t) => TrustStore::from_text(&t),
+            // An absent store is an empty one — trust-on-first-use starts here.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TrustStore::default()),
             Err(e) => Err(format!("read {}: {e}", path.display())),
         }
     }
 
     pub fn write(&self, path: &Path) -> Result<(), String> {
-        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(path, format!("{text}\n"))
-            .map_err(|e| format!("write {}: {e}", path.display()))
+        crate::config::write(path, self)
     }
 
     pub fn label_for(&self, public_key: &str) -> Option<String> {

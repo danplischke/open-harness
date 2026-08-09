@@ -25,8 +25,8 @@ fn write(path: &Path, contents: &str) {
 /// A capability dir with a manifest (declaring permissions) and an asset file.
 fn make_cap(dir: &Path) {
     write(
-        &dir.join("capability.json"),
-        r#"{ "id": "web", "kind": "tool", "permissions": { "network": ["*"], "exec": ["curl"] } }"#,
+        &dir.join("capability.yaml"),
+        "id: web\nkind: tool\npermissions:\n  network: [\"*\"]\n  exec: [curl]\n",
     );
     write(&dir.join("body.md"), "capability asset contents");
 }
@@ -224,7 +224,7 @@ fn revocation_overrides_a_stale_trusted_entry() {
 
     // A store where the key is BOTH trusted and revoked (a stale trusted entry).
     // Revocation is consulted first, so it must win.
-    let store = trust::TrustStore::from_json(&format!(
+    let store = trust::TrustStore::from_text(&format!(
         r#"{{ "keys": [{{"public_key":"{pk}","label":"alice"}}],
               "revoked": [{{"public_key":"{pk}","reason":"leaked"}}] }}"#,
         pk = key.public_key

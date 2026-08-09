@@ -1,15 +1,24 @@
-//! YAML frontmatter: emit (hand-rolled) and read (via `yaml-rust2`).
+//! YAML: emit (hand-rolled) and read (via `yaml-rust2`).
 //!
-//! The generative kinds *emit* YAML frontmatter (`---\nkey: value\n---`). Emission
-//! is hand-rolled: it quotes exactly the values that need it and renders arbitrary
-//! JSON values (from per-harness `overrides`) as YAML nodes — a small, fully
-//! controlled output surface.
+//! Two surfaces share this module. The generative kinds *emit* YAML frontmatter
+//! (`---\nkey: value\n---`), and open-harness's own config files (the capability
+//! manifest, the profile, the lockfiles, the trust store) are *whole YAML
+//! documents* — see [`crate::config`]. Both are emitted here.
 //!
-//! *Reading* single-file frontmatter is the inverse, and YAML input is a genuinely
-//! complex spec (single/double quotes and their escapes, block vs flow nesting,
-//! anchors, multi-line scalars). We hand-roll the *simple* wire formats (JSON-RPC,
-//! HTTP, hex) but not this — the reader delegates to `yaml-rust2`, a pure-Rust
-//! YAML 1.2 parser, and converts its output to `serde_json::Value`.
+//! Emission is hand-rolled and stays that way deliberately. The output side is a
+//! closed value set — the six `serde_json::Value` variants, no anchors, no tags,
+//! no multi-document streams — so it is a *simple, fully-specified* format of the
+//! same sort as the JSON-RPC and HTTP writers. The one genuinely fiddly part,
+//! deciding when a scalar must be quoted to survive a round-trip, lives in
+//! [`needs_quoting`] and is tested against the traps (YAML 1.1 `yes`/`no`/`on`/
+//! `off`, number and null lookalikes, indicators, control characters).
+//!
+//! *Reading* is the inverse and is genuinely complex (single/double quotes and
+//! their escapes, block vs flow nesting, anchors, multi-line scalars). We
+//! hand-roll the *simple* wire formats (JSON-RPC, HTTP, hex) but not this — the
+//! reader delegates to `yaml-rust2`, a pure-Rust YAML 1.2 parser, and converts
+//! its output to `serde_json::Value` so every `serde` derive in the crate works
+//! against YAML input unchanged.
 
 use serde_json::{Map, Value};
 
@@ -124,104 +133,110 @@ pub fn apply_overrides(pairs: &mut Vec<(String, String)>, extra: &Map<String, Va
     }
 }
 
-/// Render a JSON value as a **block-style YAML document** — the profile format
-/// (`oh.yaml`). Emission stays hand-rolled for the same reason frontmatter does:
-/// the shape is small and fully under our control (maps, sequences, scalars),
-/// while *reading* arbitrary YAML is delegated to `yaml-rust2`.
-pub fn to_yaml_document(v: &Value) -> String {
-    let mut out = String::new();
-    write_block(&mut out, v, 0, false);
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out
-}
+// ---- emitting whole documents (block style) -------------------------------
+//
+// `render_value` above is *flow* style (`{a: 1}`) — right for a frontmatter
+// value, unreadable for a config file. `to_document` emits block style, which is
+// what open-harness's own config files use.
 
-/// Write `v` at `indent`. `inline` means the caller already emitted a prefix on
-/// this line (a `key:` or a `- `), so a container starts on the next line.
-fn write_block(out: &mut String, v: &Value, indent: usize, inline: bool) {
-    let pad = "  ".repeat(indent);
+/// Render a value as a complete block-style YAML document, newline-terminated.
+///
+/// Mappings and sequences nest by indentation; empty collections and scalars are
+/// inline. Keys keep their insertion order (`serde_json/preserve_order`), so the
+/// output is deterministic and an author's ordering survives a round-trip.
+pub fn to_document(v: &Value) -> String {
+    let mut out = String::new();
     match v {
-        Value::Object(m) if !m.is_empty() => {
-            if inline {
-                out.push('\n');
-            }
-            for (k, val) in m {
-                write_entry(out, k, val, indent);
-            }
-        }
-        Value::Array(a) if !a.is_empty() => {
-            if inline {
-                out.push('\n');
-            }
-            for item in a {
-                out.push_str(&pad);
-                out.push_str("- ");
-                if is_container(item) {
-                    // Start the nested container on the following line, indented
-                    // past the dash.
-                    let mut nested = String::new();
-                    write_block(&mut nested, item, indent + 1, false);
-                    out.push_str(nested.trim_start());
-                } else {
-                    out.push_str(&render_value(item));
-                    out.push('\n');
-                }
-            }
-        }
-        // Empty containers and scalars render inline.
+        Value::Object(o) if !o.is_empty() => emit_map(o, 0, &mut out),
+        Value::Array(a) if !a.is_empty() => emit_seq(a, 0, &mut out),
+        // An empty or scalar document is a single line (`{}`, `[]`, `null`, …).
         other => {
-            if inline {
-                out.push(' ');
-            } else {
-                out.push_str(&pad);
-            }
-            out.push_str(&render_value(other));
+            out.push_str(&inline(other));
             out.push('\n');
         }
     }
-}
-
-/// One `key: value` line (with its nested block, if the value is a container).
-fn write_entry(out: &mut String, key: &str, val: &Value, indent: usize) {
-    out.push_str(&"  ".repeat(indent));
-    out.push_str(&scalar(key));
-    out.push(':');
-    if is_container(val) {
-        write_block(out, val, indent + 1, true);
-    } else {
-        out.push(' ');
-        out.push_str(&render_value(val));
-        out.push('\n');
-    }
-}
-
-/// As [`to_yaml_document`], but the top-level mapping emits `first` keys in the
-/// order given, then everything else. `serde_json`'s map is sorted, so without
-/// this a profile would read `harnesses, name, sources`.
-pub fn to_yaml_document_ordered(v: &Value, first: &[&str]) -> String {
-    let Value::Object(m) = v else {
-        return to_yaml_document(v);
-    };
-    let mut out = String::new();
-    for key in first {
-        if let Some(val) = m.get(*key) {
-            write_entry(&mut out, key, val, 0);
-        }
-    }
-    for (k, val) in m {
-        if !first.contains(&k.as_str()) {
-            write_entry(&mut out, k, val, 0);
-        }
-    }
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
     out
 }
 
-fn is_container(v: &Value) -> bool {
-    matches!(v, Value::Object(m) if !m.is_empty()) || matches!(v, Value::Array(a) if !a.is_empty())
+/// Render a value that fits on one line. Only ever called for scalars and empty
+/// collections — [`fits_inline`] is the guard.
+fn inline(v: &Value) -> String {
+    match v {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => scalar(s),
+        Value::Array(_) => "[]".to_string(),
+        Value::Object(_) => "{}".to_string(),
+    }
+}
+
+/// Can this value sit on the same line as its key/dash? Scalars always can;
+/// collections only when empty (a non-empty one opens an indented block).
+fn fits_inline(v: &Value) -> bool {
+    match v {
+        Value::Array(a) => a.is_empty(),
+        Value::Object(o) => o.is_empty(),
+        _ => true,
+    }
+}
+
+fn indent(out: &mut String, level: usize) {
+    for _ in 0..level {
+        out.push_str("  ");
+    }
+}
+
+fn emit_map(o: &Map<String, Value>, level: usize, out: &mut String) {
+    for (k, v) in o {
+        indent(out, level);
+        emit_entry(k, v, level, out);
+    }
+}
+
+/// `key: value` — inline when it fits, otherwise an indented block beneath.
+fn emit_entry(k: &str, v: &Value, level: usize, out: &mut String) {
+    out.push_str(&scalar(k));
+    out.push(':');
+    if fits_inline(v) {
+        out.push(' ');
+        out.push_str(&inline(v));
+        out.push('\n');
+        return;
+    }
+    out.push('\n');
+    match v {
+        Value::Object(o) => emit_map(o, level + 1, out),
+        Value::Array(a) => emit_seq(a, level + 1, out),
+        _ => unreachable!("fits_inline covers every scalar"),
+    }
+}
+
+fn emit_seq(a: &[Value], level: usize, out: &mut String) {
+    for v in a {
+        indent(out, level);
+        out.push_str("- ");
+        match v {
+            // A mapping item continues on the dash line (`- key: value`), with
+            // its remaining keys aligned under that first key.
+            Value::Object(o) if !o.is_empty() => {
+                for (i, (k, val)) in o.iter().enumerate() {
+                    if i > 0 {
+                        indent(out, level + 1);
+                    }
+                    emit_entry(k, val, level + 1, out);
+                }
+            }
+            Value::Array(inner) if !inner.is_empty() => {
+                out.push('\n');
+                emit_seq(inner, level + 1, out);
+            }
+            other => {
+                out.push_str(&inline(other));
+                out.push('\n');
+            }
+        }
+    }
 }
 
 // ---- reading (frontmatter → JSON) -----------------------------------------
@@ -256,6 +271,27 @@ pub fn parse_document(text: &str) -> Result<(Map<String, Value>, String), String
     };
     let fm = parse_frontmatter(fm_text)?;
     Ok((fm, body.trim_start_matches(['\n', '\r']).to_string()))
+}
+
+/// Parse a whole YAML document into a [`Value`], for config files read through
+/// [`crate::config`]. An empty document is an empty mapping, so a blank config
+/// deserializes as "all defaults" rather than failing.
+///
+/// A multi-document stream (`---` separated) is refused: every open-harness
+/// config file is exactly one document, and silently taking the first would
+/// discard the rest.
+pub fn parse_value(text: &str) -> Result<Value, String> {
+    let docs = YamlLoader::load_from_str(text).map_err(|e| format!("invalid YAML: {e}"))?;
+    if docs.len() > 1 {
+        return Err(format!(
+            "expected a single YAML document, found {} (remove the extra `---` separators)",
+            docs.len()
+        ));
+    }
+    match docs.into_iter().next() {
+        None | Some(Yaml::Null) | Some(Yaml::BadValue) => Ok(Value::Object(Map::new())),
+        Some(doc) => yaml_to_value(doc),
+    }
 }
 
 /// Parse a YAML frontmatter block into a JSON object.
@@ -293,8 +329,10 @@ fn yaml_to_value(y: Yaml) -> Result<Value, String> {
             Value::Array(out)
         }
         Yaml::Hash(h) => {
-            // `yaml-rust2`'s Hash preserves insertion order, so frontmatter key
-            // order is stable (deterministic re-emit).
+            // `yaml-rust2`'s Hash preserves insertion order, and `Map` does too
+            // (serde_json's `preserve_order`), so author key order survives into
+            // the value and back out through `to_document` — a faithful
+            // round-trip, not an alphabetized one.
             let mut out = Map::new();
             for (k, v) in h {
                 out.insert(yaml_key(k)?, yaml_to_value(v)?);

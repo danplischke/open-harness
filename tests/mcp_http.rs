@@ -221,14 +221,20 @@ fn server_from_capability_reads_an_http_transport() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&cap_dir).unwrap();
     std::fs::write(
-        cap_dir.join("capability.json"),
-        r#"{
-  "id": "remote-tool", "name": "Remote tool", "description": "an http MCP server",
-  "kind": "tool",
-  "tool": { "provider": "mcp", "delivery": "cli",
-    "server": { "transport": "http", "url": "http://127.0.0.1:9/mcp",
-                "headers": { "X-Team": "research" } } }
-}"#,
+        cap_dir.join("capability.yaml"),
+        r#"id: remote-tool
+name: Remote tool
+description: an http MCP server
+kind: tool
+tool:
+  provider: mcp
+  delivery: cli
+  server:
+    transport: http
+    url: http://127.0.0.1:9/mcp
+    headers:
+      X-Team: research
+"#,
     )
     .unwrap();
 

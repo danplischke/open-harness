@@ -1,0 +1,22 @@
+id: safe-shell
+name: Safe shell policy
+description: Allow common read-only git/build commands; block destructive ones and secrets.
+kind: permission
+permission:
+  default: ask
+  rules:
+    - tool: bash
+      pattern: git *
+      verdict: allow
+    - tool: bash
+      pattern: cargo *
+      verdict: allow
+    - tool: bash
+      pattern: rm *
+      verdict: deny
+    - tool: read
+      pattern: ./.env
+      verdict: deny
+    - tool: edit
+      pattern: src/**
+      verdict: allow
