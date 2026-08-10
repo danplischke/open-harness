@@ -7,6 +7,7 @@
 use crate::event::{Boundary, NormEvent, Phase, SubjectKind, TaskKind, ToolClass};
 use crate::kind::KindId;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// The manifest filename without its extension. [`crate::config::find`] probes
@@ -275,10 +276,12 @@ pub struct Manifest {
     /// before spawning and reported by `oh check` / `oh doctor`; never installed.
     #[serde(default)]
     pub runtime: Runtime,
-    /// Per-harness overrides: `{"<harness-id>": { "path": …, "tools": […],
-    /// "frontmatter": { … } }}`. Lets one canonical capability tune its own
-    /// output for a specific target without forking it (adopted by the skill and
-    /// agent kinds). See [`LoadedCapability::harness_override`].
+    /// Per-harness overrides: `{"<harness-id>": { … }}`. Lets one canonical
+    /// capability tune its own output for a specific target without forking it
+    /// (adopted by the skill and agent kinds).
+    ///
+    /// `path`, `tools` and `frontmatter` are structural; every other key in the
+    /// block is frontmatter. See [`LoadedCapability::harness_override`].
     #[serde(default)]
     pub overrides: std::collections::BTreeMap<String, serde_json::Value>,
     /// Kind-specific configuration (e.g. the `skill` block). Each kind parses
@@ -301,6 +304,68 @@ pub struct HarnessOverride {
     pub tools: Option<Vec<String>>,
     /// Extra/replacement frontmatter keys merged into the rendered block.
     pub frontmatter: serde_json::Map<String, serde_json::Value>,
+    /// Anything the resolution had to point out — a key that looks like a
+    /// misspelling of a reserved one, say. Surfaced through the kind's plan.
+    pub notes: Vec<String>,
+}
+
+/// The three keys an override block gives a structural meaning. Everything else
+/// in the block is frontmatter.
+const OVERRIDE_KEYS: [&str; 3] = ["path", "tools", "frontmatter"];
+
+/// The reserved override key `key` is probably a misspelling of, if any.
+///
+/// Deliberately tight (one edit, and never an exact match of another reserved
+/// key) so a real frontmatter key is not accused of being a typo.
+fn near_miss(key: &str) -> Option<&'static str> {
+    OVERRIDE_KEYS
+        .iter()
+        .find(|reserved| edit_distance(key, reserved) == 1)
+        .copied()
+}
+
+/// Optimal string alignment distance — Levenshtein plus an adjacent
+/// **transposition** at cost 1.
+///
+/// The transposition is the point: `paht` is how `path` actually gets mistyped,
+/// and plain Levenshtein scores that 2, which is indistinguishable from an
+/// unrelated key. (`crate::help` has a sibling of this for command names; if a
+/// third caller appears it is worth extracting.)
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut d = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for (i, row) in d.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for (j, cell) in d[0].iter_mut().enumerate() {
+        *cell = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut best = (d[i - 1][j] + 1)
+                .min(d[i][j - 1] + 1)
+                .min(d[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = best.min(d[i - 2][j - 2] + 1);
+            }
+            d[i][j] = best;
+        }
+    }
+    d[a.len()][b.len()]
+}
+
+/// A JSON value's type, for an error message that says what was found.
+fn type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "a list",
+        Value::Object(_) => "a mapping",
+    }
 }
 
 /// A manifest plus the directory it was loaded from (the cwd used when the
@@ -461,34 +526,97 @@ impl LoadedCapability {
     /// The resolved per-harness override for `harness_id` (see
     /// [`Manifest::overrides`]). Returns the default (no overrides) when absent
     /// or malformed — an override is a convenience, never load-bearing.
-    pub fn harness_override(&self, harness_id: &str) -> HarnessOverride {
-        let Some(obj) = self
-            .manifest
-            .overrides
-            .get(harness_id)
-            .and_then(|v| v.as_object())
-        else {
-            return HarnessOverride::default();
+    pub fn harness_override(&self, harness_id: &str) -> Result<HarnessOverride, String> {
+        let Some(value) = self.manifest.overrides.get(harness_id) else {
+            return Ok(HarnessOverride::default());
         };
-        let path = obj
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let tools = obj.get("tools").and_then(|v| v.as_array()).map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        });
-        let frontmatter = obj
-            .get("frontmatter")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default();
-        HarnessOverride {
-            path,
-            tools,
-            frontmatter,
+        let Some(obj) = value.as_object() else {
+            return Err(format!(
+                "`overrides.{harness_id}` must be a mapping, got {}",
+                type_name(value)
+            ));
+        };
+
+        let mut out = HarnessOverride::default();
+        for (key, v) in obj {
+            match key.as_str() {
+                "path" => match v.as_str() {
+                    Some(s) => out.path = Some(s.to_string()),
+                    // Silently ignoring this relocated nothing while reporting
+                    // success — the file lands where the kind chose and the
+                    // author is never told their override did nothing.
+                    None => {
+                        return Err(format!(
+                            "`overrides.{harness_id}.path` must be a string, got {}",
+                            type_name(v)
+                        ))
+                    }
+                },
+                "tools" => match v {
+                    Value::Array(a) => {
+                        out.tools = Some(
+                            a.iter()
+                                .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                                .collect(),
+                        )
+                    }
+                    // The native scalar spelling (`"Read Grep Bash(git diff:*)"`)
+                    // is what these tokens look like in a harness's own file, and
+                    // it is accepted everywhere else a tool list is read.
+                    Value::String(s) => out.tools = Some(crate::tools::split_tool_string(s)),
+                    _ => {
+                        return Err(format!(
+                            "`overrides.{harness_id}.tools` must be a list or a string, got {}",
+                            type_name(v)
+                        ))
+                    }
+                },
+                "frontmatter" => match v.as_object() {
+                    Some(m) => {
+                        // Merged after the loop so an explicit block wins over a
+                        // flat key of the same name.
+                        for (k, val) in m {
+                            out.frontmatter.insert(k.clone(), val.clone());
+                        }
+                    }
+                    None => {
+                        return Err(format!(
+                            "`overrides.{harness_id}.frontmatter` must be a mapping, got {}",
+                            type_name(v)
+                        ))
+                    }
+                },
+                // Anything else is frontmatter. This is the form authors
+                // actually write — `overrides: {opencode: {mode: primary}}` —
+                // and requiring the `frontmatter:` nesting meant those keys were
+                // dropped with no warning and the capability still reported
+                // "installable — clean". The nested form is now sugar for saying
+                // the same thing explicitly, not a requirement.
+                other => {
+                    if !out.frontmatter.contains_key(other) {
+                        out.frontmatter.insert(other.to_string(), v.clone());
+                    }
+                    // A near-miss of a reserved key is worth saying out loud: it
+                    // will be emitted as frontmatter, which is *probably* not
+                    // what `paht:` meant. It is only a note, never an error —
+                    // `paths:` is a real frontmatter key on Cline and Claude
+                    // rules, so refusing it would break a legitimate override.
+                    if let Some(meant) = near_miss(other) {
+                        out.notes.push(format!(
+                            "`overrides.{harness_id}.{other}` was emitted as frontmatter; if you \
+                             meant the `{meant}` override, spell it exactly"
+                        ));
+                    }
+                }
+            }
         }
+        // The explicit block wins on conflict — re-apply it over the flat keys.
+        if let Some(m) = obj.get("frontmatter").and_then(|v| v.as_object()) {
+            for (k, val) in m {
+                out.frontmatter.insert(k.clone(), val.clone());
+            }
+        }
+        Ok(out)
     }
 }
 

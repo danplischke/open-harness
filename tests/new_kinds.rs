@@ -426,3 +426,155 @@ fn skill_antigravity_and_codex_converge_on_one_shared_file() {
         "identical content is not a conflict"
     );
 }
+
+// ---- per-harness override blocks ------------------------------------------
+//
+// `HarnessOverride` reads three structural keys — `path`, `tools`,
+// `frontmatter`. Everything else in the block used to be dropped without a
+// word, while `oh check` still called the capability "installable — clean".
+// That is the failure mode this project has now fixed three times in different
+// clothes (`unwrap_or_default` voiding a config block, `Permissions` absorbing
+// a wrong-shaped value): the run continues, having quietly done less than was
+// asked. Authors write override keys flat, so flat is what the reader now
+// accepts.
+
+fn override_plan(mut m: Value, block: Value, h: Harness) -> open_harness::kind::KindPlan {
+    m["overrides"] = block;
+    let c = cap(m);
+    kind_impl(c.manifest.kind).plan(&c, h)
+}
+
+/// The reported bug: an OpenCode agent whose `mode` and `permission` never
+/// reached the emitted file.
+#[test]
+fn a_flat_override_block_is_applied_not_dropped() {
+    let (_, contents) = file(
+        &cap({
+            let mut m = agent_manifest();
+            m["overrides"] = json!({
+                "opencode": { "mode": "primary", "permission": { "edit": "allow" } }
+            });
+            m
+        }),
+        Harness::OpenCode,
+    );
+    assert!(
+        contents.contains("mode: primary"),
+        "a flat override key must reach the file:\n{contents}"
+    );
+    assert!(contents.contains("permission:"), "{contents}");
+    assert!(contents.contains("edit: allow"), "{contents}");
+}
+
+#[test]
+fn a_flat_override_works_on_skills_too() {
+    let m = json!({
+        "id": "s", "name": "S", "description": "d", "kind": "skill",
+        "skill": { "body": "b" },
+        "overrides": { "claude-code": { "user-invocable": true } }
+    });
+    let (_, contents) = file(&cap(m), Harness::Claude);
+    assert!(contents.contains("user-invocable: true"), "{contents}");
+}
+
+/// The nested form keeps working — it is now sugar for saying the same thing,
+/// not the only spelling that works.
+#[test]
+fn the_nested_frontmatter_form_still_works_and_wins_on_conflict() {
+    let plan = override_plan(
+        agent_manifest(),
+        json!({ "opencode": { "mode": "flat", "frontmatter": { "mode": "nested" } } }),
+        Harness::OpenCode,
+    );
+    let Some(Artifact::File { contents, .. }) = plan.artifacts.into_iter().next() else {
+        panic!("expected a file")
+    };
+    assert!(contents.contains("mode: nested"), "{contents}");
+    assert!(!contents.contains("mode: flat"), "{contents}");
+}
+
+/// A reserved key with the wrong shape relocated nothing while reporting
+/// success. It is now a blocked plan carrying what was found.
+#[test]
+fn a_reserved_override_key_with_the_wrong_shape_is_a_loud_error() {
+    for (block, expected) in [
+        (
+            json!({"opencode": {"path": ["a", "b"]}}),
+            "must be a string",
+        ),
+        (
+            json!({"opencode": {"tools": {"a": 1}}}),
+            "must be a list or a string",
+        ),
+        (
+            json!({"opencode": {"frontmatter": "nope"}}),
+            "must be a mapping",
+        ),
+        (json!({"opencode": "nope"}), "must be a mapping"),
+    ] {
+        let plan = override_plan(agent_manifest(), block.clone(), Harness::OpenCode);
+        match plan.installability {
+            Installability::Unsupported(reason) => assert!(
+                reason.contains(expected),
+                "expected `{expected}` in: {reason}"
+            ),
+            other => panic!("{block} should be blocked, got {other:?}"),
+        }
+    }
+}
+
+/// `tools` in a harness's own scalar spelling is what an author copying from a
+/// native file will write, and it is accepted everywhere else a tool list is
+/// read.
+#[test]
+fn a_tools_override_accepts_the_native_scalar_spelling() {
+    let plan = override_plan(
+        agent_manifest(),
+        json!({ "claude-code": { "tools": "Read Grep Bash(git diff:*)" } }),
+        Harness::Claude,
+    );
+    let Some(Artifact::File { contents, .. }) = plan.artifacts.into_iter().next() else {
+        panic!("expected a file")
+    };
+    assert!(
+        contents.contains("tools: [Read, Grep, Bash(git diff:*)]"),
+        "the parenthesized spec must survive the split:\n{contents}"
+    );
+}
+
+/// Treating unknown keys as frontmatter means a *typo* of a reserved key lands
+/// as frontmatter too. That is recoverable and visible, where the old behaviour
+/// was neither — but it is worth saying out loud. A note, never an error:
+/// `paths` is a real frontmatter key on some harnesses, so refusing it would
+/// break a legitimate override.
+#[test]
+fn a_near_miss_of_a_reserved_override_key_is_reported() {
+    let plan = override_plan(
+        agent_manifest(),
+        json!({ "opencode": { "paht": ".opencode/agents/p.md", "tolos": ["read"] } }),
+        Harness::OpenCode,
+    );
+    let notes = plan.notes.join("\n");
+    assert!(
+        notes.contains("overrides.opencode.paht`") && notes.contains("the `path` override"),
+        "a transposition must be caught — plain Levenshtein scores it 2:\n{notes}"
+    );
+    assert!(
+        notes.contains("overrides.opencode.tolos`") && notes.contains("the `tools` override"),
+        "{notes}"
+    );
+}
+
+#[test]
+fn an_ordinary_frontmatter_key_is_not_accused_of_being_a_typo() {
+    let plan = override_plan(
+        agent_manifest(),
+        json!({ "opencode": { "mode": "primary", "temperature": 0.2 } }),
+        Harness::OpenCode,
+    );
+    assert!(
+        plan.notes.is_empty(),
+        "no note should fire for ordinary keys: {:?}",
+        plan.notes
+    );
+}

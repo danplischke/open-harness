@@ -160,6 +160,28 @@ overrides:
 ---
 ```
 
+Three keys are **structural** — `path` relocates the output, `tools` replaces the
+tool list (a YAML list, or the native scalar spelling `"Read Grep Bash(git
+diff:*)"`), and `frontmatter` is an explicit block of keys to merge. Giving any
+of them the wrong shape is a hard error naming what was found, not a silently
+ignored line.
+
+**Everything else in the block is frontmatter**, so the flat form is what you
+should write:
+
+```yaml
+overrides:
+  opencode:
+    mode: primary
+    permission: { edit: allow, bash: ask }
+```
+
+The nested `frontmatter:` spelling says the same thing explicitly and wins on a
+key collision; reach for it when a key of yours would otherwise collide with
+`path` or `tools`. A key that is *one edit away* from a structural name — `paht`,
+`tolos` — is still treated as frontmatter, but the plan carries a note saying so,
+since that is more likely a typo than an intention.
+
 ## Structured kinds — `capability.yaml`
 
 Hooks and tools (and, if you prefer, any kind) use a `capability.yaml` manifest —

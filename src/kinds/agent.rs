@@ -133,7 +133,9 @@ impl Kind for AgentKind {
             }
         };
 
-        apply_overrides(cap, harness, &mut r);
+        if let Err(e) = apply_overrides(cap, harness, &mut r) {
+            return KindPlan::unsupported(e);
+        }
 
         let mut notes = r.notes;
         if let Installability::Degraded(reason) = &r.installability {
@@ -346,10 +348,15 @@ fn render_antigravity(id: &str, desc: &str, cfg: &AgentConfig, body: &str) -> Re
 /// Apply the capability's per-harness override to a rendered agent: replace the
 /// path and merge extra frontmatter. A `tools` override replaces the tool list
 /// verbatim (native tokens), so it only lands cleanly on the list-style targets.
-fn apply_overrides(cap: &LoadedCapability, harness: Harness, r: &mut Rendered) {
-    let ov = cap.harness_override(harness.id());
+fn apply_overrides(
+    cap: &LoadedCapability,
+    harness: Harness,
+    r: &mut Rendered,
+) -> Result<(), String> {
+    let ov = cap.harness_override(harness.id())?;
+    r.notes.extend(ov.notes.iter().cloned());
     if ov.path.is_none() && ov.tools.is_none() && ov.frontmatter.is_empty() {
-        return;
+        return Ok(());
     }
     // Re-derive the frontmatter/body split so overrides merge structurally.
     let (mut pairs, body) = split_frontmatter(&r.contents);
@@ -375,6 +382,7 @@ fn apply_overrides(cap: &LoadedCapability, harness: Harness, r: &mut Rendered) {
     if let Some(p) = ov.path {
         r.path = p;
     }
+    Ok(())
 }
 
 fn upsert(pairs: &mut Vec<(String, String)>, key: &str, value: &str) {
