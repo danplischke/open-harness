@@ -25,9 +25,21 @@ fn stdout(out: &std::process::Output) -> String {
 /// The command names `main` actually dispatches, read out of the source. This
 /// is the gate's whole point: the list cannot be maintained by hand next to the
 /// thing it is supposed to check.
+/// `src/main.rs` with line endings normalized.
+///
+/// These gates match on multi-line source patterns, and git checks the repo out
+/// with CRLF on Windows — so an anchor like `"\n    o\n}"` finds nothing there
+/// and the gate panics instead of checking anything. Normalizing once is the
+/// difference between a gate that runs everywhere and one that is dead weight
+/// on a third of CI.
+fn main_rs() -> String {
+    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+        .expect("read main.rs")
+        .replace("\r\n", "\n")
+}
+
 fn dispatched_commands() -> Vec<String> {
-    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
-        .expect("read main.rs");
+    let src = main_rs();
     let body = src
         .split_once("    match cmd {")
         .expect("main's dispatch match")
@@ -103,8 +115,7 @@ fn every_documented_command_is_dispatched() {
 /// help tells you to type something that exits 2.
 #[test]
 fn every_documented_flag_is_one_the_parser_accepts() {
-    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
-        .expect("read main.rs");
+    let src = main_rs();
     let parser = src
         .split_once("fn parse_opts")
         .expect("parse_opts")
@@ -285,25 +296,49 @@ fn an_unknown_shell_is_refused_rather_than_guessed() {
     assert_eq!(out.status.code(), Some(2));
 }
 
-/// A generated script that a shell cannot parse is worse than none. bash is the
-/// one we can check for free on every CI runner.
+/// Syntax-check a file with `bash -n`. `None` when this machine's `bash` could
+/// not be used at all, as distinct from `Some(false)` for "bash read it and
+/// said no".
+fn bash_accepts(path: &std::path::Path) -> Option<(bool, String)> {
+    let out = std::process::Command::new("bash")
+        .arg("-n")
+        .arg(path)
+        .output()
+        .ok()?;
+    Some((
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    ))
+}
+
+/// A generated script that a shell cannot parse is worse than none.
+///
+/// The verdict is only trusted after a known-good script gets a pass from the
+/// same binary. On a Windows runner `bash` resolves to something that spawns
+/// happily and then fails on everything — the WSL stub, or a Git Bash that
+/// cannot open a `D:\...` path — so a bare "it spawned" check reads that as
+/// "your script is broken". Probing first tells the two apart, and keeps the
+/// real check running wherever bash actually works.
 #[test]
 fn the_bash_completion_script_parses() {
-    let script = stdout(&oh(&["completions", "bash"]));
-    let path = std::env::temp_dir().join(format!("oh-completions-{}.bash", std::process::id()));
-    std::fs::write(&path, &script).unwrap();
-    let check = std::process::Command::new("bash")
-        .arg("-n")
-        .arg(&path)
-        .output();
-    let _ = std::fs::remove_file(&path);
-    match check {
-        Ok(o) => assert!(
-            o.status.success(),
-            "bash rejected the generated script: {}",
-            String::from_utf8_lossy(&o.stderr)
-        ),
-        // Windows runners have no bash; the generation test above still applies.
-        Err(_) => eprintln!("no bash available; skipped the syntax check"),
+    let dir = std::env::temp_dir();
+    let probe = dir.join(format!("oh-bash-probe-{}.bash", std::process::id()));
+    std::fs::write(&probe, "echo hello\n").unwrap();
+    let usable = bash_accepts(&probe);
+    let _ = std::fs::remove_file(&probe);
+    match usable {
+        Some((true, _)) => {}
+        _ => {
+            eprintln!("no usable bash on this machine; skipped the syntax check");
+            return;
+        }
     }
+
+    let script = stdout(&oh(&["completions", "bash"]));
+    let path = dir.join(format!("oh-completions-{}.bash", std::process::id()));
+    std::fs::write(&path, &script).unwrap();
+    let check = bash_accepts(&path);
+    let _ = std::fs::remove_file(&path);
+    let (ok, stderr) = check.expect("bash worked for the probe a moment ago");
+    assert!(ok, "bash rejected the generated script: {stderr}");
 }
