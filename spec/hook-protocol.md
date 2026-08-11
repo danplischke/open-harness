@@ -17,12 +17,15 @@ and [`schemas/decision.schema.json`](./schemas/decision.schema.json).
 The version token is `hook@MAJOR[.MINOR]`. Compatibility is by **major** number:
 
 - The dispatcher advertises its version in `CanonicalPayload.protocol`
-  (`open-harness/hook@1`).
+  (`open-harness/hook@1.1`).
 - A capability MAY declare the version it speaks via `protocol` in its manifest
   (e.g. `"protocol": "hook@1"`). If it does, the dispatcher refuses to run it
   when the **major** versions differ, and fails closed on blocking events. A
   capability that omits `protocol` is assumed compatible.
 - **Minor** bumps are backward compatible: they only *add* optional fields.
+  `hook@1.1` added the optional `session` field; a capability declaring `hook@1`
+  still runs unchanged, and one that needs `session` can require `hook@1.1` to
+  tell "this dispatcher does not send it" apart from "this harness has none".
 
 ## Forward compatibility (both directions)
 
@@ -43,8 +46,30 @@ The version token is `hook@MAJOR[.MINOR]`. Compatibility is by **major** number:
 | `blocking` | bool | yes | whether a `deny` will actually be honored here |
 | `tool` | object | no | `{ name, input }` — present for tool events |
 | `prompt` | string | no | present for prompt events |
-| `cwd` | string | no | working directory, when the harness supplies it |
+| `session` | string | no | the harness session/conversation this event belongs to (below) |
+| `cwd` | string | no | the working directory the event happened in (below) |
 | `raw` | any | yes | the original native payload (escape hatch) |
+
+### `session` and `cwd`
+
+Both exist for the same reason: a capability that keeps **per-session or
+per-project state** has to be able to locate that state from the canonical
+payload, or it falls back to `raw` and becomes harness-specific — the exact thing
+this contract exists to prevent.
+
+`session` is the harness's own session or conversation identifier. The dispatcher
+reads `session_id` (Claude Code; Codex mirrors it) and `conversation_id`
+(Cursor). It is **absent** where the harness sends no identity, which is honest
+rather than convenient: a fabricated key would silently merge two sessions'
+state. A capability that requires one should check for it and degrade — that is
+what `pre.session.start`/`post.session.end` correlation depends on.
+
+`cwd` is the harness-supplied working directory when the native payload carries
+one, and otherwise the **dispatcher's own** working directory, which is where the
+harness invoked the hook. For every harness that spawns the hook as a process
+that is the project root. It remains optional because an in-process shim host
+(OpenCode, Pi) may be running elsewhere, and a confidently wrong project root is
+worse than an absent one for anything keyed by project.
 
 `event` is a flat coordinate — **not** a single opaque name, because some
 harnesses split "before a tool runs" into per-tool-class events:

@@ -450,10 +450,32 @@ impl Harness {
             .or_else(|| native.get("user_prompt"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // Session identity, under the two spellings that appear in the payloads
+        // we have: `session_id` (Claude Code, and Codex which mirrors it) and
+        // `conversation_id` (Cursor — see tests/fixtures/cursor/). Read by name
+        // rather than per-harness so an adapter we cannot verify still surfaces
+        // an identity it happens to send; absent stays `None` rather than being
+        // invented.
+        let session = native
+            .get("session_id")
+            .or_else(|| native.get("conversation_id"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        // Falling back to the dispatcher's cwd: the harness invoked us from the
+        // project, so this is the project root everywhere the hook is a spawned
+        // process. It is still `Option` because an in-process shim host can be
+        // elsewhere, and a confidently wrong project root is worse than none.
         let cwd = native
             .get("cwd")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            });
         CanonicalPayload {
             protocol: PROTOCOL,
             harness: self.id().to_string(),
@@ -461,6 +483,7 @@ impl Harness {
             blocking: ev.blocking(),
             tool,
             prompt,
+            session,
             cwd,
             raw: native.clone(),
         }

@@ -384,6 +384,7 @@ interface CanonicalPayload {
   blocking: boolean;
   tool?: ToolInfo;
   prompt?: string;
+  session?: string;
   cwd?: string;
 }
 type Verdict = "allow" | "deny" | "modify";
