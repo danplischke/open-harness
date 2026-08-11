@@ -284,26 +284,33 @@ fn the_matrix_reports_provenance_alongside_support() {
 }
 
 /// `oh emit` output gets pasted into a real config; that is precisely where an
-/// unverified mapping needs to say so.
+/// unverified mapping needs to say so — **on stderr**.
+///
+/// stdout is the artifact. `oh emit > hooks.json` has to produce the config and
+/// nothing else, or every consumer has to learn to strip our commentary, and
+/// someone will paste it into a real file before they learn.
 #[test]
-fn emit_warns_that_a_doc_only_adapter_is_unverified() {
+fn emit_warns_on_stderr_and_keeps_stdout_to_the_artifact() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_oh"))
         .args(["emit", "--harness", "windsurf"])
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")))
         .output()
         .expect("run oh emit");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("no recorded payload") && err.contains("windsurf"),
+        "emit should flag windsurf as unverified on stderr:\n{err}"
+    );
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.contains("no recorded payload") && text.contains("windsurf"),
-        "emit should flag windsurf as unverified:\n{text}"
+        !text.contains("no recorded payload"),
+        "the diagnostic must not be in the emitted artifact:\n{text}"
     );
-    // Comment-prefixed, so pasting the output into a config stays safe.
-    for line in text.lines().take_while(|l| !l.trim().is_empty()) {
-        assert!(
-            line.starts_with('#'),
-            "the note must be commented out: {line}"
-        );
-    }
+    assert!(
+        text.starts_with("# open-harness registration"),
+        "stdout should begin with the artifact itself, got:\n{}",
+        text.lines().next().unwrap_or("")
+    );
 }
 
 /// ...and a fixture-backed adapter must not be dragged into that warning.

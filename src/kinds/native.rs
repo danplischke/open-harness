@@ -35,7 +35,12 @@ use serde::Deserialize;
 
 pub struct NativeKind;
 
+/// `deny_unknown_fields` so a misspelled key is a loud error rather than a
+/// silently defaulted one. A mistyped `activation`/`argument_hint`/`verdict`
+/// does not just lose a setting — it substitutes the *default*, which for a
+/// glob-scoped rule means applying it to every file instead of a few.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NativeConfig {
     /// The one harness that can host this. Anything else is Unsupported.
     #[serde(default)]

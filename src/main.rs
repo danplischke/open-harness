@@ -551,18 +551,20 @@ fn cmd_run(rest: &[String]) {
 /// real harness. Reporting the first without the second is the same silent
 /// overstatement the honest-degradation rule exists to prevent, so every
 /// command that hands you something to run says which targets are unproven.
-fn print_provenance_note(harnesses: &[Harness], prefix: &str) {
+/// It goes to **stderr**: stdout is the artifact. `oh emit > hooks.json` has to
+/// produce the config and nothing else, or every consumer has to learn to strip
+/// our commentary — and someone will paste it into a real file first.
+fn print_provenance_note(harnesses: &[Harness]) {
     let unverified = open_harness::matrix::unverified(harnesses);
     if unverified.is_empty() {
         return;
     }
-    println!(
-        "{prefix}NOTE: {} adapter(s) are encoded from documentation with no recorded payload: {}.",
+    eprintln!(
+        "note: {} adapter(s) are encoded from documentation with no recorded payload: {}.",
         unverified.len(),
         unverified.join(", ")
     );
-    println!("{prefix}They are unverified against a live install — see `oh matrix --provenance`.");
-    println!();
+    eprintln!("      They are unverified against a live install — see `oh matrix --provenance`.");
 }
 
 fn cmd_emit(rest: &[String]) {
@@ -575,8 +577,8 @@ fn cmd_emit(rest: &[String]) {
     let harnesses = select_harnesses(&o);
     // This output gets pasted into a real harness's config, which is exactly
     // where it matters whether the mapping was verified against that harness or
-    // read off its documentation. Emitted as comments so pasting stays safe.
-    print_provenance_note(&harnesses, "# ");
+    // read off its documentation.
+    print_provenance_note(&harnesses);
     for cap in &caps {
         for h in &harnesses {
             let plan = kind_impl(cap.manifest.kind).plan(cap, *h);
@@ -1327,7 +1329,7 @@ fn cmd_check(rest: &[String]) {
     // "installable — clean" is a claim about the *adapter*, so it inherits that
     // adapter's provenance. Saying so here is the difference between "this will
     // work" and "this is what we believe the harness reads".
-    print_provenance_note(&ALL, "");
+    print_provenance_note(&ALL);
 }
 
 // ---- sync / check reporting ----------------------------------------------

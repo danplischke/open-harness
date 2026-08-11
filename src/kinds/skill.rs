@@ -141,7 +141,10 @@ impl Kind for SkillKind {
 
         // Per-harness overrides: a tools override replaces `allowed-tools`
         // verbatim; frontmatter overrides merge; a path override relocates.
-        let ov = cap.harness_override(harness.id());
+        let ov = match cap.harness_override(harness.id()) {
+            Ok(o) => o,
+            Err(e) => return KindPlan::unsupported(e),
+        };
         if let Some(t) = &ov.tools {
             match pairs.iter_mut().find(|(k, _)| k == "allowed-tools") {
                 Some(slot) => slot.1 = t.join(", "),
@@ -158,7 +161,7 @@ impl Kind for SkillKind {
         KindPlan {
             installability: Installability::Clean,
             artifacts: vec![Artifact::File { path, contents }],
-            notes: Vec::new(),
+            notes: ov.notes,
         }
     }
 }
