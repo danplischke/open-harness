@@ -312,3 +312,82 @@ fn a_body_file_is_not_named_like_a_single_file_capability() {
         );
     }
 }
+
+/// The matrix rows are derived from the event space, not listed.
+///
+/// They used to be a hand-picked slice, so an event the adapters fully
+/// supported could be absent from the published grid without tripping the CI
+/// drift gate — that gate only ever compared the rendered table against the
+/// same fixed list. `post.session.end` was exactly that: bindable, installable
+/// on four harnesses, and missing from the grid. Under-reporting real support
+/// is the honest-degradation rule pointing the wrong way.
+#[test]
+fn every_event_a_harness_can_host_has_a_matrix_row() {
+    let rows = matrix::representative_events();
+    let missing: Vec<String> = matrix::all_events()
+        .into_iter()
+        .filter(|ev| {
+            ALL.iter()
+                .any(|h| !matches!(h.support(ev), open_harness::adapters::Support::Unsupported(_)))
+        })
+        .filter(|ev| !rows.contains(ev))
+        .map(|ev| ev.id())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these events are supported by at least one harness but absent from the grid: {missing:?}"
+    );
+    // The specific regression.
+    assert!(
+        rows.iter().any(|e| e.id() == "post.session.end"),
+        "post.session.end must be a row: {:?}",
+        rows.iter().map(|e| e.id()).collect::<Vec<_>>()
+    );
+}
+
+/// ...and the converse: a row no harness can host is a statement about the
+/// event model, not about the harnesses, and does not belong in a support grid.
+#[test]
+fn the_matrix_has_no_row_that_every_harness_refuses() {
+    for ev in matrix::representative_events() {
+        assert!(
+            ALL.iter()
+                .any(|h| !matches!(h.support(&ev), open_harness::adapters::Support::Unsupported(_))),
+            "`{}` is a row but no harness hosts it",
+            ev.id()
+        );
+    }
+}
+
+/// A harness caveat has to be about the capability in front of you. Codex's is
+/// about which *tool* calls reach `PreToolUse`; attached to a session-teardown
+/// capability it says something true about the harness and false about the
+/// binding.
+#[test]
+fn a_tool_only_platform_note_does_not_leak_onto_other_events() {
+    use open_harness::event::{Boundary, NormEvent, Phase, SubjectKind};
+    let session_end = NormEvent {
+        phase: Phase::Post,
+        subject: SubjectKind::Session,
+        tool_class: None,
+        boundary: Some(Boundary::End),
+        task_kind: None,
+    };
+    let tool = NormEvent::tool(Phase::Pre, open_harness::event::ToolClass::Any);
+
+    assert!(
+        Harness::Codex.platform_note(&[session_end]).is_none(),
+        "the PreToolUse caveat must not attach to a session binding"
+    );
+    assert!(
+        Harness::Codex
+            .platform_note(&[tool])
+            .is_some_and(|n| n.contains("PreToolUse")),
+        "it must still attach where it applies"
+    );
+    // A whole-harness limit applies to every binding, tool or not.
+    assert!(
+        Harness::Cline.platform_note(&[session_end]).is_some(),
+        "Cline's platform limit is a property of the harness, not the event"
+    );
+}

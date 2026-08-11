@@ -6,14 +6,40 @@
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | `pre.tool.any` | native | native | native | fanout×3 | fanout×4 | native | native | native | — | — | — |
 | `pre.tool.shell` | native | native | native | native | native | native | native | native | — | — | — |
-| `post.tool.any` | native | native | native | — | — | native | native | native | — | — | — |
+| `pre.tool.file_read` | native | native | native | native | native | native | native | native | — | — | — |
+| `pre.tool.file_write` | native | native | native | — | native | native | native | native | — | — | — |
+| `pre.tool.file_edit` | native | native | native | — | — | native | native | native | — | — | — |
+| `pre.tool.mcp` | native | native | native | native | native | native | native | native | — | — | — |
+| `pre.tool.web` | native | native | native | — | — | native | native | native | — | — | — |
 | `pre.model` | — | — | native | — | — | — | — | — | — | — | — |
 | `pre.prompt` | native | native | native | — | native | native | native | — | — | — | — |
 | `pre.session.start` | native | native | native | native | — | — | native | — | — | — | — |
+| `pre.session.end` | native | native | native | — | — | — | native | — | — | — | — |
 | `pre.subagent.start` | native | native | — | — | — | — | — | — | — | — | — |
+| `pre.subagent.end` | native | native | — | — | — | — | — | — | — | — | — |
 | `pre.task.start` | — | — | — | — | — | native | — | — | — | — | — |
+| `pre.task.resume` | — | — | — | — | — | native | — | — | — | — | — |
+| `pre.task.cancel` | — | — | — | — | — | native | — | — | — | — | — |
+| `post.tool.any` | native | native | native | — | — | native | native | native | — | — | — |
+| `post.tool.shell` | native | native | native | — | native | native | native | native | — | — | — |
+| `post.tool.file_read` | native | native | native | — | — | native | native | native | — | — | — |
+| `post.tool.file_write` | native | native | native | native | — | native | native | native | — | — | — |
+| `post.tool.file_edit` | native | native | native | native | — | native | native | native | — | — | — |
+| `post.tool.mcp` | native | native | native | — | — | native | native | native | — | — | — |
+| `post.tool.web` | native | native | native | — | — | native | native | native | — | — | — |
+| `post.model` | — | — | native | — | — | — | — | — | — | — | — |
+| `post.prompt` | — | — | — | — | native | — | native | — | — | — | — |
+| `post.session.start` | native | native | native | native | — | — | native | — | — | — | — |
+| `post.session.end` | native | native | native | — | — | — | native | — | — | — | — |
+| `post.subagent.start` | native | native | — | — | — | — | — | — | — | — | — |
+| `post.subagent.end` | native | native | — | — | — | — | — | — | — | — | — |
+| `post.task.start` | — | — | — | — | — | native | — | — | — | — | — |
+| `post.task.resume` | — | — | — | — | — | native | — | — | — | — | — |
+| `post.task.cancel` | — | — | — | — | — | native | — | — | — | — | — |
 
 Legend: `native` = 1:1 · `fanout×N` = one normalized event registers on N native events · `—` = no target.
+
+The rows are every event at least one harness can host, derived from the adapters rather than hand-picked — so an event the adapters support cannot be missing from this grid. Session and subagent events are keyed by their **boundary**, so both phases resolve to the same native event: `pre.session.end` and `post.session.end` are one target, not two.
 
 ## Adapter provenance
 
