@@ -327,8 +327,12 @@ fn every_event_a_harness_can_host_has_a_matrix_row() {
     let missing: Vec<String> = matrix::all_events()
         .into_iter()
         .filter(|ev| {
-            ALL.iter()
-                .any(|h| !matches!(h.support(ev), open_harness::adapters::Support::Unsupported(_)))
+            ALL.iter().any(|h| {
+                !matches!(
+                    h.support(ev),
+                    open_harness::adapters::Support::Unsupported(_)
+                )
+            })
         })
         .filter(|ev| !rows.contains(ev))
         .map(|ev| ev.id())
@@ -351,8 +355,10 @@ fn every_event_a_harness_can_host_has_a_matrix_row() {
 fn the_matrix_has_no_row_that_every_harness_refuses() {
     for ev in matrix::representative_events() {
         assert!(
-            ALL.iter()
-                .any(|h| !matches!(h.support(&ev), open_harness::adapters::Support::Unsupported(_))),
+            ALL.iter().any(|h| !matches!(
+                h.support(&ev),
+                open_harness::adapters::Support::Unsupported(_)
+            )),
             "`{}` is a row but no harness hosts it",
             ev.id()
         );

@@ -181,6 +181,7 @@ struct Opts {
     keyring: Option<PathBuf>,
     deny_network: bool,
     deny_exec: bool,
+    deny_write: bool,
     // MCP→CLI bridge (#19, #20)
     id: Option<String>,
     mcp_command: Option<String>,
@@ -230,6 +231,7 @@ fn parse_opts(rest: &[String]) -> Opts {
         keyring: None,
         deny_network: false,
         deny_exec: false,
+        deny_write: false,
         id: None,
         mcp_command: None,
         mcp_args: Vec::new(),
@@ -306,6 +308,10 @@ fn parse_opts(rest: &[String]) -> Opts {
             }
             "--deny-exec" => {
                 o.deny_exec = true;
+                i += 1;
+            }
+            "--deny-write" => {
+                o.deny_write = true;
                 i += 1;
             }
             "--id" => {
@@ -1029,7 +1035,7 @@ fn load_trust(o: &Opts) -> TrustStore {
 
 /// Whether the user opted into trust/permission checking on this invocation.
 fn trust_requested(o: &Opts) -> bool {
-    o.trust.is_some() || o.require_signed || o.deny_network || o.deny_exec
+    o.trust.is_some() || o.require_signed || o.deny_network || o.deny_exec || o.deny_write
 }
 
 /// Verify a composed set, surface permission manifests, and gate. Only called
@@ -1039,6 +1045,7 @@ fn enforce_trust(caps: &[LoadedCapability], o: &Opts) {
     let policy = PermissionPolicy {
         allow_network: !o.deny_network,
         allow_exec: !o.deny_exec,
+        allow_write: !o.deny_write,
     };
     println!(
         "trust check ({}):",
@@ -2155,7 +2162,9 @@ fn cmd_matrix(rest: &[String]) {
     println!("\nlegend: native = 1:1 · fanout×N = one normalized event registers on N native events · — = no target");
     println!("rows are every event at least one harness can host, derived from the adapters.");
     println!("session/subagent events are keyed by their boundary, so both phases resolve to the");
-    println!("same native event — `pre.session.end` and `post.session.end` are one target, not two.");
+    println!(
+        "same native event — `pre.session.end` and `post.session.end` are one target, not two."
+    );
     println!();
     print!("{}", open_harness::matrix::provenance_text());
 }

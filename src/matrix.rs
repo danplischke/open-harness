@@ -74,7 +74,10 @@ pub fn all_events() -> Vec<NormEvent> {
 pub fn representative_events() -> Vec<NormEvent> {
     all_events()
         .into_iter()
-        .filter(|ev| ALL.iter().any(|h| !matches!(h.support(ev), Support::Unsupported(_))))
+        .filter(|ev| {
+            ALL.iter()
+                .any(|h| !matches!(h.support(ev), Support::Unsupported(_)))
+        })
         .collect()
 }
 

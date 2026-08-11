@@ -572,6 +572,12 @@ pub fn permission_violations(perms: &Permissions, policy: &PermissionPolicy) -> 
             perms.network_summary()
         ));
     }
+    if !policy.allow_write && perms.requests_write() {
+        v.push(format!(
+            "requests write {:?} but policy denies write",
+            perms.write
+        ));
+    }
     if !policy.allow_exec && !perms.exec.is_empty() {
         v.push(format!(
             "requests exec {:?} but policy denies exec",

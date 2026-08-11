@@ -114,6 +114,20 @@ pub struct Permissions {
     /// Path globs the capability expects to read.
     #[serde(default)]
     pub read: Vec<String>,
+    /// Path globs the capability expects to **write**.
+    ///
+    /// Anything that persists state writes to disk — a memory store's SQLite
+    /// file, a phase gate's JSON, a transcript recorder's JSONL — and without
+    /// this scope a manifest showed a truthful read/exec/network picture with no
+    /// hint that the thing also touches your filesystem. For a project that
+    /// makes trust a headline, silent write access was the conspicuous hole in
+    /// the vocabulary, and no amount of sandboxing could close it: enforcement
+    /// needs something to enforce.
+    ///
+    /// Declarative, like its siblings — see SECURITY.md for what is enforced
+    /// versus surfaced.
+    #[serde(default)]
+    pub write: Vec<String>,
     /// Commands/binaries the capability expects to execute.
     #[serde(default)]
     pub exec: Vec<String>,
@@ -124,7 +138,13 @@ pub struct Permissions {
 
 impl Permissions {
     pub fn is_empty(&self) -> bool {
-        self.read.is_empty() && self.exec.is_empty() && self.network.is_empty()
+        self.read.is_empty()
+            && self.write.is_empty()
+            && self.exec.is_empty()
+            && self.network.is_empty()
+    }
+    pub fn requests_write(&self) -> bool {
+        !self.write.is_empty()
     }
     pub fn requests_network(&self) -> bool {
         !self.network.is_empty()
@@ -140,8 +160,9 @@ impl Permissions {
     }
     pub fn summary(&self) -> String {
         format!(
-            "read={:?} exec={:?} network={}",
+            "read={:?} write={:?} exec={:?} network={}",
             self.read,
+            self.write,
             self.exec,
             self.network_summary()
         )
@@ -216,6 +237,7 @@ impl Runtime {
 pub struct PermissionPolicy {
     pub allow_network: bool,
     pub allow_exec: bool,
+    pub allow_write: bool,
 }
 
 impl Default for PermissionPolicy {
@@ -223,6 +245,7 @@ impl Default for PermissionPolicy {
         PermissionPolicy {
             allow_network: true,
             allow_exec: true,
+            allow_write: true,
         }
     }
 }
