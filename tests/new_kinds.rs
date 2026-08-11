@@ -578,3 +578,108 @@ fn an_ordinary_frontmatter_key_is_not_accused_of_being_a_typo() {
         plan.notes
     );
 }
+
+// ---- misspelled kind-config keys ------------------------------------------
+//
+// The override sweep turned up the same silent-absorption shape one level down.
+// `RuleConfig`, `CommandConfig`, `PermissionConfig`, `InstructionsConfig` and
+// `NativeConfig` had neither a `deny_unknown_fields` guard nor a flatten
+// catch-all, so a mistyped key was dropped and its field took the *default*.
+//
+// For a rule that is not merely lossy, it inverts the setting: `activaton: glob`
+// left `activation` at `always`, so a rule scoped to `src/**/*.rs` was emitted
+// as applying to every file — a silent widening, reported "installable — clean".
+//
+// (`SkillConfig` and `AgentConfig` keep their `#[serde(flatten)]` passthrough:
+// unknown frontmatter there is a documented feature, not a typo.)
+
+#[test]
+fn a_misspelled_rule_key_does_not_silently_widen_the_rule() {
+    let m = json!({
+        "id": "r", "name": "R", "description": "d", "kind": "rule",
+        "rule": { "activaton": "glob", "globs": ["src/**/*.rs"], "body": "b" }
+    });
+    let plan = kind_impl(KindId::Rule).plan(&cap(m), Harness::Cursor);
+    match plan.installability {
+        Installability::Unsupported(reason) => {
+            assert!(
+                reason.contains("activaton"),
+                "the reason must name it: {reason}"
+            )
+        }
+        other => panic!("a misspelled `activation` must be refused, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_misspelled_key_is_refused_in_every_unguarded_kind_config() {
+    for (kind, block) in [
+        (
+            KindId::Command,
+            json!({"command": {"argument_hnt": "x", "body": "b"}}),
+        ),
+        (
+            KindId::Permission,
+            json!({"permission": {"defualt": "deny"}}),
+        ),
+        (KindId::Instructions, json!({"instructions": {"bdy": "x"}})),
+        (
+            KindId::Native,
+            json!({"native": {"harness": "claude-code", "artifact": []}}),
+        ),
+    ] {
+        let mut m = json!({
+            "id": "x", "name": "X", "description": "d", "kind": kind.as_str()
+        });
+        for (k, v) in block.as_object().unwrap() {
+            m[k] = v.clone();
+        }
+        let plan = kind_impl(kind).plan(&cap(m), Harness::Claude);
+        assert!(
+            matches!(plan.installability, Installability::Unsupported(_)),
+            "a misspelled key in a `{}` block must be refused, got {:?}",
+            kind.as_str(),
+            plan.installability
+        );
+    }
+}
+
+/// The guard must not fire on the keys the corpus and `oh import` actually
+/// write — a loud error on valid input is worse than the bug it replaced.
+#[test]
+fn the_guard_accepts_every_key_the_kinds_document() {
+    let ok = [
+        json!({"id":"r","name":"R","description":"d","kind":"rule",
+               "rule":{"activation":"glob","globs":["a"],"body":"b"}}),
+        json!({"id":"c","name":"C","description":"d","kind":"command",
+               "command":{"argument_hint":"[x]","model":"m","agent":"a","body":"b"}}),
+        json!({"id":"i","name":"I","description":"d","kind":"instructions",
+               "instructions":{"body":"b"}}),
+        json!({"id":"p","name":"P","description":"d","kind":"permission",
+               "permission":{"default":"ask","rules":[{"tool":"bash","pattern":"git *","verdict":"allow"}]}}),
+    ];
+    for m in ok {
+        let c = cap(m.clone());
+        let plan = kind_impl(c.manifest.kind).plan(&c, Harness::Claude);
+        assert!(
+            !matches!(plan.installability, Installability::Unsupported(_)),
+            "valid config was refused: {m}\n{:?}",
+            plan.installability
+        );
+    }
+}
+
+/// `argument-hint` is the hyphenated spelling authors write and `oh import`
+/// emits; `deny_unknown_fields` must not break a serde alias.
+#[test]
+fn the_guard_still_honours_the_hyphenated_alias() {
+    let m = json!({
+        "id": "c", "name": "C", "description": "d", "kind": "command",
+        "command": { "argument-hint": "[pr-number]", "body": "Review {{args}}." }
+    });
+    let (_, contents) = file(&cap(m), Harness::Claude);
+    assert!(
+        contents.contains("argument-hint: [pr-number]"),
+        "{contents}"
+    );
+}

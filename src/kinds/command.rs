@@ -27,7 +27,12 @@ use serde::Deserialize;
 
 pub struct CommandKind;
 
+/// `deny_unknown_fields` so a misspelled key is a loud error rather than a
+/// silently defaulted one. A mistyped `activation`/`argument_hint`/`verdict`
+/// does not just lose a setting — it substitutes the *default*, which for a
+/// glob-scoped rule means applying it to every file instead of a few.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CommandConfig {
     #[serde(default, alias = "argument-hint")]
     argument_hint: Option<String>,
