@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Full protocol id embedded in every payload. See `spec/hook-protocol.md`.
-pub const PROTOCOL: &str = "open-harness/hook@1";
+pub const PROTOCOL: &str = "open-harness/hook@1.1";
 /// Short version token a capability manifest may declare via `protocol`.
-pub const PROTOCOL_VERSION: &str = "hook@1";
+pub const PROTOCOL_VERSION: &str = "hook@1.1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolInfo {
@@ -34,6 +34,29 @@ pub struct CanonicalPayload {
     pub tool: Option<ToolInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// The harness session (or conversation) this event belongs to, where the
+    /// native payload exposes one.
+    ///
+    /// Without it a capability that keeps per-session state has no key to group
+    /// by: a transcript recorder cannot tie tool calls together, and a
+    /// `post.session.end` capability cannot tell *which* session ended, so it
+    /// cannot correlate with what it recorded at `pre.session.start`. The only
+    /// alternative was reading `raw`, which writes the capability against one
+    /// harness and forfeits the portability the contract exists to provide.
+    ///
+    /// `None` where the harness genuinely sends no identity — honest
+    /// degradation, so a capability can decide whether it can proceed rather
+    /// than being handed a fabricated key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// The working directory the event happened in.
+    ///
+    /// Populated from the native payload where the harness supplies one, and
+    /// otherwise from the dispatcher's own working directory — which is where
+    /// the harness invoked the hook, so it is the project root for every
+    /// shell-invoked harness. It stays `Option` because an in-process shim host
+    /// (OpenCode, Pi) can be running somewhere else entirely, and a wrong root
+    /// is worse than an absent one for anything keyed by project.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     pub raw: serde_json::Value,

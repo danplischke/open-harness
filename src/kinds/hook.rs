@@ -65,8 +65,11 @@ impl Kind for HookKind {
             }
         };
 
+        // Scoped to the events this capability actually binds — see
+        // `Harness::platform_note`.
+        let bound: Vec<_> = cap.manifest.events.iter().map(|b| b.event()).collect();
         let notes = harness
-            .platform_note()
+            .platform_note(&bound)
             .map(|n| vec![n.to_string()])
             .unwrap_or_default();
 

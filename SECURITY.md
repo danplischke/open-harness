@@ -80,12 +80,24 @@ trust-on-first-use consent step. `oh sync --require-signed` refuses anything not
 A capability declares what it expects to touch:
 
 ```jsonc
-"permissions": { "read": ["src/**"], "exec": ["git"], "network": ["*"] }
+"permissions": {
+  "read":    ["src/**"],
+  "write":   [".open-harness/state/**"],   // where it persists anything
+  "exec":    ["git"],
+  "network": ["*"]
+}
 ```
 
 `oh verify` / `oh sync` **surface** this for consent, and check it against a host
-policy (`--deny-network`, `--deny-exec`). Violations are advisory warnings by
-default and **hard failures under `--require-signed`**.
+policy (`--deny-network`, `--deny-exec`, `--deny-write`). Violations are advisory
+warnings by default and **hard failures under `--require-signed`**.
+
+`write` exists because anything that persists state — a memory store's SQLite
+file, a phase gate's JSON, a transcript recorder's JSONL — touches your disk, and
+a manifest without the scope showed a truthful `read`/`exec`/`network` picture
+with no hint of it. The vocabulary being incomplete is not a sandboxing problem:
+no amount of enforcement can confine writes if no capability can express which
+writes are legitimate.
 
 ## Threats & mitigations
 

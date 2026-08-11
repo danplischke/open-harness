@@ -23,6 +23,7 @@
       }
     },
     "prompt": { "type": "string" },
+    "session": { "type": "string", "minLength": 1 },
     "cwd": { "type": "string" },
     "raw": {}
   },

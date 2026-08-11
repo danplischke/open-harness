@@ -117,6 +117,10 @@ const F_DENY_EXEC: Flag = Flag {
     spec: "--deny-exec",
     help: "refuse capabilities that declare exec access",
 };
+const F_DENY_WRITE: Flag = Flag {
+    spec: "--deny-write",
+    help: "refuse capabilities that declare filesystem writes",
+};
 
 /// Every subcommand `main` dispatches, in overview order within each group.
 pub const COMMANDS: &[Command] = &[
@@ -348,6 +352,7 @@ pub const COMMANDS: &[Command] = &[
             F_REQUIRE_SIGNED,
             F_DENY_NETWORK,
             F_DENY_EXEC,
+            F_DENY_WRITE,
         ],
         examples: &[Example {
             line: "oh resolve --locked",
@@ -382,6 +387,7 @@ pub const COMMANDS: &[Command] = &[
             F_REQUIRE_SIGNED,
             F_DENY_NETWORK,
             F_DENY_EXEC,
+            F_DENY_WRITE,
         ],
         examples: &[
             Example {

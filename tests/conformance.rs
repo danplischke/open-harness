@@ -760,7 +760,9 @@ fn api_lists_harnesses_and_kinds() {
             && ks.contains(&"agent".to_string())
             && ks.contains(&"instructions".to_string())
     );
-    assert_eq!(api::protocol_version(), "hook@1");
+    // hook@1.1 — the minor bump that added the optional `session` field. Major
+    // is what compatibility keys off, so `hook@1` capabilities are unaffected.
+    assert_eq!(api::protocol_version(), "hook@1.1");
 }
 
 #[test]
@@ -2066,4 +2068,84 @@ fn only_relative_in_tree_paths_are_placeable() {
         );
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---- session identity + a locatable project root (#28) --------------------
+
+/// A capability that keeps per-session state needs a key to group by. Without
+/// one, a transcript recorder cannot tie a session's tool calls together, and a
+/// `post.session.end` capability cannot tell which session ended — so it cannot
+/// correlate with what it saw at `pre.session.start`. The only way to get it was
+/// `raw`, which writes the capability against one harness.
+#[test]
+fn the_payload_carries_the_harness_session_identity() {
+    let ev = NormEvent::tool(Phase::Pre, ToolClass::Shell);
+
+    // Claude Code's spelling.
+    let p = Harness::Claude.decode(
+        &json!({"session_id": "abc-123", "tool_name": "Bash", "tool_input": {}}),
+        &ev,
+    );
+    assert_eq!(p.session.as_deref(), Some("abc-123"));
+
+    // Cursor's — as recorded in tests/fixtures/cursor/.
+    let p = Harness::Cursor.decode(
+        &json!({"conversation_id": "668320d2", "command": "ls"}),
+        &ev,
+    );
+    assert_eq!(p.session.as_deref(), Some("668320d2"));
+}
+
+/// Absent is absent. A fabricated key would silently merge two sessions' state,
+/// which is worse than a capability being told it cannot do its job here.
+#[test]
+fn a_harness_that_sends_no_session_reports_none_rather_than_inventing_one() {
+    let ev = NormEvent::tool(Phase::Pre, ToolClass::Shell);
+    let p = Harness::Gemini.decode(&json!({"tool_name": "run_shell_command"}), &ev);
+    assert_eq!(p.session, None);
+    // ...and an empty string is not an identity either.
+    let p = Harness::Claude.decode(&json!({"session_id": "", "tool_name": "Bash"}), &ev);
+    assert_eq!(p.session, None);
+}
+
+/// The native value always wins; the dispatcher's cwd is only the fallback, so
+/// per-project state has somewhere to live even when the harness is silent.
+#[test]
+fn cwd_prefers_the_harness_and_falls_back_to_the_dispatcher() {
+    let ev = NormEvent::tool(Phase::Pre, ToolClass::Shell);
+
+    let p = Harness::Claude.decode(&json!({"cwd": "/Users/me/project"}), &ev);
+    assert_eq!(p.cwd.as_deref(), Some("/Users/me/project"));
+
+    let p = Harness::Claude.decode(&json!({"tool_name": "Bash"}), &ev);
+    let here = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        p.cwd.as_deref(),
+        Some(here.as_str()),
+        "a silent harness should still leave the capability a project root"
+    );
+}
+
+/// `session` is an *added optional* field, which the protocol's own rule makes a
+/// minor bump — so a capability declaring the old version keeps running.
+#[test]
+fn the_session_field_is_a_backward_compatible_minor_bump() {
+    assert!(negotiate(Some("hook@1")).is_ok(), "hook@1 must still run");
+    assert!(negotiate(Some("hook@1.1")).is_ok());
+    assert!(
+        negotiate(Some("hook@2")).is_err(),
+        "a major mismatch is still refused"
+    );
+    // The wire string a capability sees.
+    let p = Harness::Claude.decode(&json!({}), &NormEvent::tool(Phase::Pre, ToolClass::Any));
+    assert_eq!(p.protocol, "open-harness/hook@1.1");
+    // ...and it is omitted, not null, when there is nothing to report.
+    let wire = serde_json::to_value(&p).unwrap();
+    assert!(
+        wire.get("session").is_none(),
+        "an absent session must not serialize as null: {wire}"
+    );
 }

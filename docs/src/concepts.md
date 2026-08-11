@@ -92,5 +92,5 @@ content-addressed by a `sha256` digest and signed with an **ed25519** key; the
 `oh verify` verdict is `Trusted` / `Untrusted` / `Revoked` / `Invalid` (tampered
 — always rejected) / `Unsigned`, and `oh sync --require-signed` gates the
 install. Each
-capability also declares a **permission manifest** (`read` / `exec` / `network`)
+capability also declares a **permission manifest** (`read` / `write` / `exec` / `network`)
 that is surfaced for consent. See `SECURITY.md` for the threat model.

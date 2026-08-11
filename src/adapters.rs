@@ -194,13 +194,23 @@ impl Harness {
         matches!(self, Harness::OpenCode | Harness::Pi)
     }
 
-    pub fn platform_note(&self) -> Option<&'static str> {
+    /// A caveat about running on this harness at all, for a capability bound to
+    /// `events`.
+    ///
+    /// Scoped to the events because not every caveat applies to every binding:
+    /// Codex's is about which *tool* calls reach `PreToolUse`, and attaching it
+    /// to a session-teardown capability tells the reader something true about
+    /// the harness but false about their capability. Cline's platform limit and
+    /// Antigravity's unstable layout are properties of the harness itself, so
+    /// they always apply.
+    pub fn platform_note(&self, events: &[NormEvent]) -> Option<&'static str> {
+        let binds_tool = events.iter().any(|e| e.subject == SubjectKind::Tool);
         match self {
             Harness::Cline => Some("hooks are macOS/Linux only (no Windows support)"),
             // Verified: Codex's PreToolUse fires for the shell (Bash) tool only;
             // apply_patch/Edit/Write/Read/web-fetch/MCP calls bypass it. Hooks are
             // also off by default (`[features].codex_hooks = true` to enable).
-            Harness::Codex => Some(
+            Harness::Codex if binds_tool => Some(
                 "PreToolUse fires for the shell tool only (file/MCP/web tools bypass it); enable with [features].codex_hooks = true",
             ),
             Harness::Antigravity => Some(
@@ -440,10 +450,32 @@ impl Harness {
             .or_else(|| native.get("user_prompt"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // Session identity, under the two spellings that appear in the payloads
+        // we have: `session_id` (Claude Code, and Codex which mirrors it) and
+        // `conversation_id` (Cursor — see tests/fixtures/cursor/). Read by name
+        // rather than per-harness so an adapter we cannot verify still surfaces
+        // an identity it happens to send; absent stays `None` rather than being
+        // invented.
+        let session = native
+            .get("session_id")
+            .or_else(|| native.get("conversation_id"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        // Falling back to the dispatcher's cwd: the harness invoked us from the
+        // project, so this is the project root everywhere the hook is a spawned
+        // process. It is still `Option` because an in-process shim host can be
+        // elsewhere, and a confidently wrong project root is worse than none.
         let cwd = native
             .get("cwd")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            });
         CanonicalPayload {
             protocol: PROTOCOL,
             harness: self.id().to_string(),
@@ -451,6 +483,7 @@ impl Harness {
             blocking: ev.blocking(),
             tool,
             prompt,
+            session,
             cwd,
             raw: native.clone(),
         }
@@ -569,7 +602,7 @@ impl Harness {
             "# open-harness registration for capability `{capability_id}` on {}\n",
             self.id()
         ));
-        if let Some(note) = self.platform_note() {
+        if let Some(note) = self.platform_note(events) {
             out.push_str(&format!("# NOTE: {note}\n"));
         }
         for w in &warnings {

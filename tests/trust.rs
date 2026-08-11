@@ -161,12 +161,14 @@ fn signature_file_is_excluded_from_the_digest() {
 fn permission_policy_flags_denied_capabilities() {
     let perms = Permissions {
         read: vec![],
+        write: vec![],
         exec: vec!["curl".into()],
         network: vec!["*".into()],
     };
     let deny_net = PermissionPolicy {
         allow_network: false,
         allow_exec: true,
+        allow_write: true,
     };
     let violations = trust::permission_violations(&perms, &deny_net);
     assert!(
@@ -179,6 +181,55 @@ fn permission_policy_flags_denied_capabilities() {
         trust::permission_violations(&perms, &allow_all).is_empty(),
         "default policy permits everything"
     );
+}
+
+/// Anything that persists state writes to disk, and until now a manifest could
+/// not say so — a truthful read/exec/network picture with no hint that the
+/// capability also touches your filesystem. Enforcement (#22) needs the
+/// vocabulary to exist before it has anything to confine.
+#[test]
+fn a_declared_write_is_surfaced_and_gateable() {
+    let perms = Permissions {
+        read: vec!["src/**".into()],
+        write: vec![".open-harness/state/**".into()],
+        exec: vec![],
+        network: vec![],
+    };
+    assert!(!perms.is_empty(), "a write-only manifest is not empty");
+    assert!(perms.requests_write());
+    assert!(
+        perms.summary().contains(".open-harness/state/**"),
+        "the consent surface must show what it writes: {}",
+        perms.summary()
+    );
+
+    let deny_write = PermissionPolicy {
+        allow_write: false,
+        ..PermissionPolicy::default()
+    };
+    let violations = trust::permission_violations(&perms, &deny_write);
+    assert!(
+        violations.iter().any(|v| v.contains("write")),
+        "--deny-write must flag it: {violations:?}"
+    );
+    // ...and the other scopes are unaffected by the new one.
+    assert_eq!(
+        trust::permission_violations(&perms, &PermissionPolicy::default()).len(),
+        0
+    );
+}
+
+/// The scope has to survive the round trip an author actually takes: written in
+/// `capability.yaml`, parsed back, and covered by the signed digest.
+#[test]
+fn a_write_scope_parses_from_a_manifest() {
+    let m: open_harness::manifest::Manifest = serde_json::from_value(serde_json::json!({
+        "id": "memo", "name": "Memo", "description": "d", "kind": "skill",
+        "permissions": { "read": ["src/**"], "write": ["notes/**"] },
+        "skill": { "body": "b" }
+    }))
+    .expect("a write scope is valid manifest input");
+    assert_eq!(m.permissions.write, vec!["notes/**".to_string()]);
 }
 
 /// Revocation (#22): a withdrawn key is rejected, even in lax mode, and even if
