@@ -117,6 +117,10 @@ const F_DENY_EXEC: Flag = Flag {
     spec: "--deny-exec",
     help: "refuse capabilities that declare exec access",
 };
+const F_GLOBAL: Flag = Flag {
+    spec: "--global",
+    help: "act on the user scope (~/.claude/… etc.) rather than a project",
+};
 const F_DENY_WRITE: Flag = Flag {
     spec: "--deny-write",
     help: "refuse capabilities that declare filesystem writes",
@@ -365,15 +369,26 @@ pub const COMMANDS: &[Command] = &[
         summary: "install capabilities into a project and converge them",
         synopsis: &[
             "sync --into DIR [--profile FILE] [--locked] [--dry-run]",
+            "sync --global [--dry-run]",
             "sync --into DIR --capabilities DIR [--harness H]",
             "sync --into DIR --uninstall",
         ],
         details: "Idempotent: re-running converges rather than duplicating. Files \
                   open-harness did not write are never clobbered — a target that \
                   belongs to you is reported as blocked and sync exits non-zero. \
-                  --uninstall removes only what the lockfile records as ours.",
+                  --uninstall removes only what the lockfile records as ours.\n\n\
+                  --global writes the **user** scope instead: ~/.claude/skills/, \
+                  ~/.cursor/rules/, ~/.config/opencode/ and friends, so a capability \
+                  applies to every project on this machine. It reads \
+                  ~/.open-harness/open-harness.yaml and keeps its own lockfile, so \
+                  the two scopes never prune each other. Harnesses that document no \
+                  user-level home for an artifact are reported, not guessed at.\n\n\
+                  The two scopes are not merged: every harness already reads both \
+                  levels and resolves the precedence itself (project wins), so a \
+                  project profile lists only what is extra.",
         flags: &[
             F_INTO,
+            F_GLOBAL,
             F_PROFILE,
             F_CAPABILITIES,
             F_HARNESS,
@@ -395,6 +410,10 @@ pub const COMMANDS: &[Command] = &[
                 what: "install everything the profile resolves to",
             },
             Example {
+                line: "oh sync --global",
+                what: "install into ~/ so it applies to every project",
+            },
+            Example {
                 line: "oh sync --into ./project --uninstall",
                 what: "remove it again, leaving your own files alone",
             },
@@ -407,6 +426,7 @@ pub const COMMANDS: &[Command] = &[
         synopsis: &[
             "check [--capabilities DIR] [--harness H]",
             "check --into DIR [--ci]",
+            "check --global [--ci]",
         ],
         details: "Without --into, reports per-capability installability across the \
                   target harnesses (clean / degraded / unsupported). With --into, it \
@@ -414,6 +434,7 @@ pub const COMMANDS: &[Command] = &[
                   there; --ci makes drift a non-zero exit.",
         flags: &[
             F_INTO,
+            F_GLOBAL,
             F_PROFILE,
             F_CAPABILITIES,
             F_HARNESS,

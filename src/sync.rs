@@ -115,13 +115,48 @@ pub struct DesiredFile {
     pub conflicts: Vec<String>,
 }
 
-/// Why a capability's output could not be placed as a project file.
+/// Which of the two places a harness looks for configuration.
+///
+/// Every harness open-harness targets reads its config from **two** levels: a
+/// user-level directory that applies to everything you do, and a project-level
+/// one that applies to the repo you are in. The harness itself resolves the
+/// precedence — project beats user, near-universally — so open-harness does not
+/// have to invent a merge. It has to write to the right level and get out of
+/// the way.
+///
+/// That is why this is a scope on the *plan* rather than a new composition
+/// mode: the artifact's contents are identical either way, only its location
+/// moves. See [`user_rel`] for the location table and why it is not simply the
+/// same relative path under `$HOME`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scope {
+    /// `.claude/skills/…` under the project. The default.
+    #[default]
+    Project,
+    /// `~/.claude/skills/…` — applies to every project on this machine.
+    User,
+}
+
+impl Scope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Scope::Project => "project",
+            Scope::User => "user",
+        }
+    }
+}
+
+/// Why a capability's output could not be placed as a file in this scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeferReason {
     /// A hook native snippet: wire it into the harness's entrypoint by hand.
     Registration,
-    /// The target is a global path (`~/…` / absolute), outside the project tree.
+    /// The target is outside the scope's root — a user-level path while syncing
+    /// a project, which is what [`Scope::User`] is for.
     GlobalPath,
+    /// The harness has no *documented* user-level location for this artifact, so
+    /// writing one would be a guess about someone's home directory.
+    NoUserLocation,
     /// The harness cannot host this capability at all (matrix BLOCKED).
     Unsupported,
 }
@@ -131,9 +166,70 @@ impl DeferReason {
         match self {
             DeferReason::Registration => "registration",
             DeferReason::GlobalPath => "global-path",
+            DeferReason::NoUserLocation => "no-user-location",
             DeferReason::Unsupported => "unsupported",
         }
     }
+}
+
+/// Where a project-scope artifact lives at **user** scope, relative to `$HOME`.
+///
+/// `None` means this harness has no documented user-level home for that
+/// artifact, and the caller must defer rather than write. That distinction is
+/// the whole point of the table: the naive rule — "same relative path, rooted at
+/// `$HOME`" — is wrong often enough to be dangerous, and being wrong here means
+/// writing files into someone's home directory that nothing will ever read.
+///
+/// Three ways it is wrong:
+///   * **A different directory entirely.** OpenCode's user config is XDG
+///     (`~/.config/opencode/`), not `~/.opencode/`.
+///   * **A different filename.** Claude's project brief is `CLAUDE.md` at the
+///     repo root; the user-level one is `~/.claude/CLAUDE.md`, not `~/CLAUDE.md`.
+///   * **A shared project file that splits.** `AGENTS.md` is one file six
+///     harnesses read in a project. At user scope they diverge —
+///     `~/.codex/AGENTS.md` and `~/.config/opencode/AGENTS.md` are different
+///     files — so the remap runs per harness, before paths are grouped.
+///
+/// Everything here was checked against vendor documentation in August 2026;
+/// the sources are listed in `docs/src/scopes.md`. Harnesses absent from the
+/// table are absent on purpose — see that page for what each one is missing and
+/// why a guess would be worse than a deferral.
+fn user_rel(h: Harness, project_path: &str) -> Option<String> {
+    // (project prefix, user prefix). A trailing `/` marks a directory prefix to
+    // rewrite; anything else must match the whole path.
+    let table: &[(&str, &str)] = match h {
+        Harness::Claude => &[
+            (".claude/skills/", ".claude/skills/"),
+            (".claude/agents/", ".claude/agents/"),
+            (".claude/commands/", ".claude/commands/"),
+            (".claude/settings.json", ".claude/settings.json"),
+            ("CLAUDE.md", ".claude/CLAUDE.md"),
+        ],
+        Harness::Cursor => &[(".cursor/rules/", ".cursor/rules/")],
+        Harness::Codex => &[("AGENTS.md", ".codex/AGENTS.md")],
+        Harness::Gemini => &[
+            ("GEMINI.md", ".gemini/GEMINI.md"),
+            (".gemini/commands/", ".gemini/commands/"),
+        ],
+        Harness::OpenCode => &[
+            ("AGENTS.md", ".config/opencode/AGENTS.md"),
+            (".opencode/agents/", ".config/opencode/agents/"),
+            (".opencode/commands/", ".config/opencode/commands/"),
+            (".opencode/skills/", ".config/opencode/skills/"),
+        ],
+        _ => &[],
+    };
+    for (from, to) in table {
+        if let Some(rest) = from.strip_suffix('/') {
+            let dir = format!("{rest}/");
+            if let Some(tail) = project_path.strip_prefix(dir.as_str()) {
+                return Some(format!("{to}{tail}"));
+            }
+        } else if project_path == *from {
+            return Some(to.to_string());
+        }
+    }
+    None
 }
 
 /// An artifact reported instead of written — never silently dropped.
@@ -163,9 +259,73 @@ struct Contribution {
     degraded: Option<String>,
 }
 
-/// Compose the desired project state from `caps` across the target `harnesses`.
+/// Where one artifact lands in a given scope, or why it cannot.
+enum Placement {
+    /// A path relative to the scope's root.
+    At(String),
+    Defer(DeferReason, String),
+}
+
+/// Resolve one artifact path for `scope`.
+///
+/// A `~/`-prefixed target is a user-level path the *kind* already knows about —
+/// Codex prompts, the Windsurf/Antigravity/Pi MCP configs. In a project those
+/// are outside the tree and deferred, exactly as before; at user scope the root
+/// **is** `$HOME`, so they become ordinary relative paths and are writable for
+/// the first time.
+fn place(scope: Scope, h: Harness, path: &str) -> Placement {
+    match scope {
+        Scope::Project => {
+            if is_placeable(path) {
+                Placement::At(path.to_string())
+            } else {
+                Placement::Defer(DeferReason::GlobalPath, path.to_string())
+            }
+        }
+        Scope::User => {
+            if let Some(rest) = path.strip_prefix("~/") {
+                return match is_placeable(rest) {
+                    true => Placement::At(rest.to_string()),
+                    false => Placement::Defer(DeferReason::GlobalPath, path.to_string()),
+                };
+            }
+            if !is_placeable(path) {
+                return Placement::Defer(DeferReason::GlobalPath, path.to_string());
+            }
+            // Our own managed directory is not a harness's config, so it needs
+            // no per-harness table: `~/.open-harness/tools/…` sits beside the
+            // user-scope lockfile and profile exactly as its project twin does.
+            if path.starts_with(".open-harness/") {
+                return Placement::At(path.to_string());
+            }
+            match user_rel(h, path) {
+                Some(rel) if is_placeable(&rel) => Placement::At(rel),
+                _ => Placement::Defer(
+                    DeferReason::NoUserLocation,
+                    format!(
+                        "{} has no documented user-level location for `{path}`; \
+                         install it into a project instead",
+                        h.id()
+                    ),
+                ),
+            }
+        }
+    }
+}
+
+/// Compose the desired **project** state from `caps` across `harnesses`.
 /// Pure: performs no filesystem writes. Deterministic for a given input.
 pub fn plan_sync(caps: &[LoadedCapability], harnesses: &[Harness]) -> SyncPlan {
+    plan_scoped(caps, harnesses, Scope::Project)
+}
+
+/// As [`plan_sync`], for either scope.
+///
+/// The artifacts are the same in both — a `SKILL.md` is a `SKILL.md` — so the
+/// scope only decides *where* each one goes, and everything downstream (the
+/// ownership model, merging, pruning, the lockfile) is untouched. That is what
+/// makes user-scope installs cheap rather than a second subsystem.
+pub fn plan_scoped(caps: &[LoadedCapability], harnesses: &[Harness], scope: Scope) -> SyncPlan {
     let mut groups: BTreeMap<String, Vec<Contribution>> = BTreeMap::new();
     let mut deferred: Vec<Deferred> = Vec::new();
 
@@ -204,21 +364,23 @@ pub fn plan_sync(caps: &[LoadedCapability], harnesses: &[Harness]) -> SyncPlan {
                         reason: DeferReason::Registration,
                         detail: text,
                     }),
-                    Artifact::File { path, contents } if is_placeable(&path) => {
-                        groups.entry(path).or_default().push(Contribution {
-                            source: id.clone(),
+                    Artifact::File { path, contents } => match place(scope, h, &path) {
+                        Placement::At(rel) => {
+                            groups.entry(rel).or_default().push(Contribution {
+                                source: id.clone(),
+                                harness: h.id().to_string(),
+                                contents,
+                                degraded: degraded.clone(),
+                            });
+                        }
+                        Placement::Defer(reason, detail) => deferred.push(Deferred {
                             harness: h.id().to_string(),
-                            contents,
-                            degraded: degraded.clone(),
-                        });
-                    }
-                    Artifact::File { path, .. } => deferred.push(Deferred {
-                        harness: h.id().to_string(),
-                        source: id.clone(),
-                        kind: kind.clone(),
-                        reason: DeferReason::GlobalPath,
-                        detail: path,
-                    }),
+                            source: id.clone(),
+                            kind: kind.clone(),
+                            reason,
+                            detail,
+                        }),
+                    },
                 }
             }
         }
