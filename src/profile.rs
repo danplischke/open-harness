@@ -667,7 +667,8 @@ impl Profile {
         crate::config::load(path).map_err(|e| format!("invalid profile: {e}"))
     }
 
-    fn harness_set(&self) -> Result<Vec<Harness>, String> {
+    /// The profile's target harnesses, or the first id it does not recognise.
+    pub fn harness_set(&self) -> Result<Vec<Harness>, String> {
         self.harnesses
             .iter()
             .map(|id| Harness::from_id(id).ok_or_else(|| format!("unknown harness '{id}'")))

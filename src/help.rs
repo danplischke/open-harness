@@ -368,6 +368,56 @@ pub const COMMANDS: &[Command] = &[
         }],
     },
     Command {
+        name: "try",
+        group: "compose & install",
+        summary: "preview what a source would install, without installing it",
+        synopsis: &["try <spec> [--harness H] [--global] [--wire]"],
+        details: "Resolves one source — a git URL, an archive URL, a registry \
+                  entry, a path — and reports what it would write where, what it \
+                  degrades to on each harness, what it asks for (network, exec, \
+                  filesystem writes, a runtime you may not have), and whether it \
+                  is signed. Nothing is written: not your profile, not the \
+                  lockfile, not one byte of harness config. Only the fetch cache \
+                  under ~/.open-harness/cache/ is touched.\n\n\
+                  The resolved revision is printed, so `oh add <spec>` afterwards \
+                  pins exactly what you previewed.\n\n\
+                  Harness targets come from the profile in the current directory \
+                  when there is one — previewing against harnesses you do not use \
+                  answers a question nobody asked — and `--harness` overrides. \
+                  Which set was used is always printed.\n\n\
+                  Dependencies are never fetched, whatever the capability \
+                  declares: acquiring a graph is the thing you ran `try` to avoid \
+                  committing to. A capability with unmet `requires` is reported \
+                  as such.",
+        // `--harness` and `--wire` mean something slightly different here than
+        // they do on `sync`, and reusing the shared text would misstate both:
+        // `try`'s harness default is the profile's list, not `all`, and nothing
+        // it reports is ever written.
+        flags: &[
+            Flag {
+                spec: "--harness H",
+                help: "preview one harness by id, or `all` (default: the profile's list)",
+            },
+            F_GLOBAL,
+            Flag {
+                spec: "--wire",
+                help: "show hook registrations as file writes, as `sync --wire` would make them",
+            },
+            F_PROFILE,
+            F_TRUST,
+        ],
+        examples: &[
+            Example {
+                line: "oh try git+https://github.com/me/review-skill@v1",
+                what: "see what a stranger's capability would put on your machine",
+            },
+            Example {
+                line: "oh try ./capabilities/my-skill --harness cursor",
+                what: "check one harness before committing to it",
+            },
+        ],
+    },
+    Command {
         name: "sync",
         group: "compose & install",
         summary: "install capabilities into a project and converge them",

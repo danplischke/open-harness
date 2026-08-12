@@ -74,6 +74,7 @@ oh check                                                  # per-capability insta
 oh emit   --harness cursor                                # native registration config (note the fan-out)
 
 # Compose & install  (the profile is found in the current directory)
+oh try     git+https://github.com/me/my-skill@v1.2.0      # what it WOULD install, where, and what it asks for — writes nothing
 oh add     git+https://github.com/me/my-skill@v1.2.0      # add a source — kind inferred from the spec
 oh resolve                                                # sources → a pinned open-harness.lock
 oh resolve --locked                                       # verify the lock instead of rewriting it (CI)
@@ -348,6 +349,29 @@ it must exist, the resolution must match, nothing is written, and a mismatch
 prints exactly what drifted. See [`docs/src/dependencies.md`](./docs/src/dependencies.md)
 for the full model.
 
+### Looking before you adopt: `oh try`
+
+Every command above answers for capabilities you have already committed to.
+`oh try` answers for one you have not:
+
+```sh
+oh try git+https://github.com/me/review-skill@v1
+```
+
+It resolves the source and reports the pinned revision, what it would write and
+where, what it degrades to on each harness, what it cannot do at all, what it
+asks for — network, exec, filesystem writes, a runtime you may not have — and
+whether anyone signed it. Then it writes nothing: not your profile, not the
+lockfile, not one byte of harness config. Only the fetch cache under
+`~/.open-harness/cache/` is touched, and the last two lines are the `oh add` /
+`oh sync` pair that adopts exactly what you just read.
+
+Harness targets come from the profile in the current directory when there is
+one, because previewing against harnesses you do not use answers a question
+nobody asked; `--harness` overrides, and which set was used is always printed.
+Dependencies are reported, never fetched — acquiring a graph is the commitment
+`try` exists to defer.
+
 ## Importing plugins
 
 Claude Code plugins are a populated ecosystem, and a `plugin` source imports one
@@ -499,7 +523,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `capabilities/` | Real example capabilities — all eight portable kinds, in Python, Node and shell. Document kinds are authored as single files (`SKILL.md`, `RULE.md`, …); `postgres-review` is the one manifest + `body_file` example, and `tests/authoring.rs` gates that neither form becomes the only face of a kind |
 | `docs/` | mdBook site (concepts, authoring, dependencies, runtimes, plugins, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 479 tests: conformance (88) + scopes & wiring (13) + sourcing & dependencies (67) + runtimes & provisioning (31) + `oh import` (31) + new kinds (35) + config/YAML (24) + deps vocabulary (21) + selection (21) + plugin import (21) + trust (23) + single-file (19) + CLI help & completions (13) + JSON→YAML migration (12) + adapter provenance (9) + `--locked` (9) + unit (7) + CLI arguments (7) + streamable-HTTP (6) + publishing (6) + authoring (11) + MCP bridge (3) + capture (2) |
+| `tests/` | 493 tests: conformance (88) + sourcing & dependencies (67) + new kinds (35) + runtimes & provisioning (31) + `oh import` (31) + config/YAML (24) + trust (23) + deps vocabulary (21) + selection (21) + plugin import (21) + single-file (19) + `oh try` (14) + scopes & wiring (13) + CLI help & completions (13) + JSON→YAML migration (12) + authoring (11) + adapter provenance (9) + `--locked` (9) + unit (7) + CLI arguments (7) + streamable-HTTP (6) + publishing (6) + MCP bridge (3) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies

@@ -4,11 +4,12 @@
 #
 #   1. author    — capabilities in any language, one stdio contract
 #   2. sign+trust— integrity & authorship for a distributable capability
-#   3. compose   — a profile of sources → a pinned lockfile
-#   4. sync      — install the composed set into a project (native fan-out)
-#   5. dispatch  — one decision → each harness's native deny convention
-#   6. import    — the project's native config read back into capabilities
-#   7. bridge+report — MCP→CLI bridge + the generated support matrix
+#   3. try       — what a source would install, before adopting any of it
+#   4. compose   — a profile of sources → a pinned lockfile
+#   5. sync      — install the composed set into a project (native fan-out)
+#   6. dispatch  — one decision → each harness's native deny convention
+#   7. import    — the project's native config read back into capabilities
+#   8. bridge+report — MCP→CLI bridge + the generated support matrix
 #
 # Everything is written under examples/.walkthrough (a throwaway workspace, git
 # ignored); nothing here mutates the repo's own capabilities or keys.
@@ -55,7 +56,11 @@ note "Trust the signer (trust-on-first-use), then verify again → trusted:"
 oh trust --capability "$CAPS/secret-guard" --trust "$WORK/trust.yaml" --label demo-author
 oh verify --capability "$CAPS/secret-guard" --trust "$WORK/trust.yaml"
 
-act "3 · COMPOSE — a profile of sources → a pinned lockfile"
+act "3 · TRY — what a source would install, before adopting any of it"
+note "nothing is written: not a profile, not a lockfile, not one byte of config."
+oh try "$CAPS/postgres-review" --harness cursor
+
+act "4 · COMPOSE — a profile of sources → a pinned lockfile"
 cat > "$WORK/open-harness.yaml" <<'YAML'
 name: walkthrough
 harnesses: [claude-code, cursor, opencode]
@@ -66,14 +71,14 @@ YAML
 note "profile: 3 harnesses, 1 local source ($WORK/open-harness.yaml)"
 oh resolve --profile "$WORK/open-harness.yaml"
 
-act "4 · SYNC — install the composed set into a project (native fan-out)"
+act "5 · SYNC — install the composed set into a project (native fan-out)"
 oh sync --profile "$WORK/open-harness.yaml" --into "$WORK/project"
 note "the native files open-harness wrote — one composed set → three harnesses:"
 ( cd "$WORK/project" && find . -type f | sort | sed 's/^/      /' )
 note "re-check drift against the SAME profile → in sync (sync is idempotent):"
 oh check --profile "$WORK/open-harness.yaml" --into "$WORK/project" --ci
 
-act "5 · DISPATCH — one decision, each harness's native deny convention"
+act "6 · DISPATCH — one decision, each harness's native deny convention"
 note "Claude — SAFE input → exit 0 (allowed), audit note added to model context:"
 printf '%s' "$SAFE"   | oh run --harness claude-code --event pre.tool.any --capabilities "$CAPS" --explain || true
 note "Claude — SECRET input → exit 2 (a deny wins over the allow):"
@@ -85,7 +90,7 @@ printf '%s' "$CURSOR_SECRET" | oh run --harness cursor --event pre.tool.shell --
 note "OpenCode — the same deny, as the canonical decision its in-process shim reads:"
 printf '%s' "$SECRET" | oh run --harness opencode --event pre.tool.any --capabilities "$CAPS" || true
 
-act "6 · IMPORT — read the project's native config back into capabilities"
+act "7 · IMPORT — read the project's native config back into capabilities"
 note "the inverse of step 4: what sync just wrote, read back as portable capabilities."
 note "this is the adoption path for a project that already has harness config."
 oh import --into "$WORK/project" --out "$WORK/reimported" --dry-run || true
@@ -95,7 +100,7 @@ oh import --into "$WORK/project" --out "$WORK/reimported" >/dev/null 2>&1 || tru
 # `head` closes the pipe; with `pipefail` that surfaces as SIGPIPE (141).
 oh check --capabilities "$WORK/reimported" 2>/dev/null | head -n 14 || true
 
-act "7 · BRIDGE & REPORT — MCP→CLI bridge + the generated support matrix"
+act "8 · BRIDGE & REPORT — MCP→CLI bridge + the generated support matrix"
 note "Call an MCP server's tool through the shell (for MCP-disabled environments):"
 oh mcp call --id echo-bridge --capabilities "$CAPS" --tool echo --json '{"text":"hello from the bridge"}' || true
 note "The (event × harness) support grid + how each adapter was established:"
