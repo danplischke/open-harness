@@ -121,6 +121,10 @@ const F_GLOBAL: Flag = Flag {
     spec: "--global",
     help: "act on the user scope (~/.claude/… etc.) rather than a project",
 };
+const F_WIRE: Flag = Flag {
+    spec: "--wire",
+    help: "write hook registrations into the harness's own config, not just report them",
+};
 const F_DENY_WRITE: Flag = Flag {
     spec: "--deny-write",
     help: "refuse capabilities that declare filesystem writes",
@@ -369,7 +373,7 @@ pub const COMMANDS: &[Command] = &[
         summary: "install capabilities into a project and converge them",
         synopsis: &[
             "sync --into DIR [--profile FILE] [--locked] [--dry-run]",
-            "sync --global [--dry-run]",
+            "sync --global [--wire] [--dry-run]",
             "sync --into DIR --capabilities DIR [--harness H]",
             "sync --into DIR --uninstall",
         ],
@@ -385,10 +389,21 @@ pub const COMMANDS: &[Command] = &[
                   user-level home for an artifact are reported, not guessed at.\n\n\
                   The two scopes are not merged: every harness already reads both \
                   levels and resolves the precedence itself (project wins), so a \
-                  project profile lists only what is extra.",
+                  project profile lists only what is extra.\n\n\
+                  A hook is the one kind whose install is an entry *inside* the \
+                  harness's own config rather than a file it reads, so by default \
+                  sync hands you the snippet. --wire writes it instead, into the \
+                  same file and under the same ownership rules as everything else: \
+                  your own keys survive, the contribution is recorded, and \
+                  --uninstall subtracts it rather than deleting your file. Off by \
+                  default because editing a harness's configuration is a larger \
+                  claim on your machine than dropping a file in a directory it \
+                  reads. Harnesses whose hook config location is not established \
+                  are still reported, never guessed at.",
         flags: &[
             F_INTO,
             F_GLOBAL,
+            F_WIRE,
             F_PROFILE,
             F_CAPABILITIES,
             F_HARNESS,
@@ -410,8 +425,8 @@ pub const COMMANDS: &[Command] = &[
                 what: "install everything the profile resolves to",
             },
             Example {
-                line: "oh sync --global",
-                what: "install into ~/ so it applies to every project",
+                line: "oh sync --global --wire",
+                what: "install into ~/ and register the hooks, no manual step",
             },
             Example {
                 line: "oh sync --into ./project --uninstall",

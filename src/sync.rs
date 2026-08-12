@@ -205,17 +205,23 @@ fn user_rel(h: Harness, project_path: &str) -> Option<String> {
             (".claude/settings.json", ".claude/settings.json"),
             ("CLAUDE.md", ".claude/CLAUDE.md"),
         ],
-        Harness::Cursor => &[(".cursor/rules/", ".cursor/rules/")],
+        Harness::Cursor => &[
+            (".cursor/rules/", ".cursor/rules/"),
+            // Cursor reads hooks from the project and from `~/.cursor/hooks.json`.
+            (".cursor/hooks.json", ".cursor/hooks.json"),
+        ],
         Harness::Codex => &[("AGENTS.md", ".codex/AGENTS.md")],
         Harness::Gemini => &[
             ("GEMINI.md", ".gemini/GEMINI.md"),
             (".gemini/commands/", ".gemini/commands/"),
+            (".gemini/settings.json", ".gemini/settings.json"),
         ],
         Harness::OpenCode => &[
             ("AGENTS.md", ".config/opencode/AGENTS.md"),
             (".opencode/agents/", ".config/opencode/agents/"),
             (".opencode/commands/", ".config/opencode/commands/"),
             (".opencode/skills/", ".config/opencode/skills/"),
+            (".opencode/plugins/", ".config/opencode/plugins/"),
         ],
         _ => &[],
     };
@@ -319,6 +325,29 @@ pub fn plan_sync(caps: &[LoadedCapability], harnesses: &[Harness]) -> SyncPlan {
     plan_scoped(caps, harnesses, Scope::Project)
 }
 
+/// Whether `sync` writes a hook's native registration itself.
+///
+/// A hook is the one kind whose install is not a file the harness reads
+/// directly — it is an entry *inside* the harness's own config, so open-harness
+/// used to hand you the snippet and let you paste it. That was the right call
+/// before ownership existed. It is not any more: `.claude/settings.json` is
+/// already a merge target with fingerprint ownership, because that is where the
+/// permission kind installs, so a hook entry goes in beside it under exactly the
+/// same rules — your keys survive, the contribution is recorded, and an
+/// uninstall subtracts it rather than deleting your file.
+///
+/// Off by default all the same. Editing a harness's own configuration is a
+/// larger claim on someone's machine than dropping a file into a directory it
+/// reads, and it should be asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Wire {
+    /// Report the registration as a manual step (the default).
+    #[default]
+    Report,
+    /// Write it into the harness's own config, where the path is known.
+    Write,
+}
+
 /// As [`plan_sync`], for either scope.
 ///
 /// The artifacts are the same in both — a `SKILL.md` is a `SKILL.md` — so the
@@ -326,6 +355,17 @@ pub fn plan_sync(caps: &[LoadedCapability], harnesses: &[Harness]) -> SyncPlan {
 /// ownership model, merging, pruning, the lockfile) is untouched. That is what
 /// makes user-scope installs cheap rather than a second subsystem.
 pub fn plan_scoped(caps: &[LoadedCapability], harnesses: &[Harness], scope: Scope) -> SyncPlan {
+    plan_with(caps, harnesses, scope, Wire::Report)
+}
+
+/// As [`plan_scoped`], choosing whether hook registrations are written or
+/// reported.
+pub fn plan_with(
+    caps: &[LoadedCapability],
+    harnesses: &[Harness],
+    scope: Scope,
+    wire: Wire,
+) -> SyncPlan {
     let mut groups: BTreeMap<String, Vec<Contribution>> = BTreeMap::new();
     let mut deferred: Vec<Deferred> = Vec::new();
 
@@ -357,13 +397,50 @@ pub fn plan_scoped(caps: &[LoadedCapability], harnesses: &[Harness], scope: Scop
 
             for art in plan.artifacts {
                 match art {
-                    Artifact::Registration { text } => deferred.push(Deferred {
-                        harness: h.id().to_string(),
-                        source: id.clone(),
-                        kind: kind.clone(),
-                        reason: DeferReason::Registration,
-                        detail: text,
-                    }),
+                    Artifact::Registration { text } => {
+                        let bound: Vec<_> = cap.manifest.events.iter().map(|b| b.event()).collect();
+                        // Nothing resolves to a native event here, so there is no
+                        // registration to perform and no manual step to report.
+                        // The plan's installability already says the harness
+                        // cannot host this.
+                        if !h.registers(&bound) {
+                            continue;
+                        }
+                        // With `Wire::Write`, a registration whose target file is
+                        // known becomes an ordinary file contribution and goes
+                        // through the same merge and ownership path as anything
+                        // else. Where the path is not known it still reports —
+                        // guessing at a config file is how you corrupt one.
+                        let wired = (wire == Wire::Write)
+                            .then(|| h.registration_file(&bound, &cap.manifest.id))
+                            .flatten();
+                        match wired {
+                            Some((path, contents)) => match place(scope, h, &path) {
+                                Placement::At(rel) => {
+                                    groups.entry(rel).or_default().push(Contribution {
+                                        source: id.clone(),
+                                        harness: h.id().to_string(),
+                                        contents,
+                                        degraded: degraded.clone(),
+                                    });
+                                }
+                                Placement::Defer(reason, detail) => deferred.push(Deferred {
+                                    harness: h.id().to_string(),
+                                    source: id.clone(),
+                                    kind: kind.clone(),
+                                    reason,
+                                    detail,
+                                }),
+                            },
+                            None => deferred.push(Deferred {
+                                harness: h.id().to_string(),
+                                source: id.clone(),
+                                kind: kind.clone(),
+                                reason: DeferReason::Registration,
+                                detail: text,
+                            }),
+                        }
+                    }
                     Artifact::File { path, contents } => match place(scope, h, &path) {
                         Placement::At(rel) => {
                             groups.entry(rel).or_default().push(Contribution {

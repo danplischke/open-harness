@@ -158,6 +158,9 @@ struct Opts {
     locked: bool,
     /// Confirm an action that executes code (`install --runtimes`).
     yes: bool,
+    /// `sync --wire`: write hook registrations into the harness's own config
+    /// instead of reporting them as a manual step.
+    wire: bool,
     /// `sync`/`check` at **user** scope: `~/.claude/skills/…` instead of the
     /// project's, so a capability applies to every project on this machine.
     global: bool,
@@ -218,6 +221,7 @@ fn parse_opts(rest: &[String]) -> Opts {
         locked: false,
         yes: false,
         global: false,
+        wire: false,
         runtimes: false,
         markdown: false,
         provenance: false,
@@ -416,6 +420,10 @@ fn parse_opts(rest: &[String]) -> Opts {
             }
             "--global" => {
                 o.global = true;
+                i += 1;
+            }
+            "--wire" => {
+                o.wire = true;
                 i += 1;
             }
             "--runtimes" => {
@@ -1195,6 +1203,14 @@ fn cmd_resolve(rest: &[String]) {
 }
 
 /// The scope a `sync`/`check` acts on.
+fn wire_of(o: &Opts) -> sync::Wire {
+    if o.wire {
+        sync::Wire::Write
+    } else {
+        sync::Wire::Report
+    }
+}
+
 fn scope_of(o: &Opts) -> sync::Scope {
     if o.global {
         sync::Scope::User
@@ -1310,7 +1326,7 @@ fn cmd_sync(rest: &[String]) {
         println!();
     }
 
-    let plan = sync::plan_scoped(&caps, &harnesses, scope);
+    let plan = sync::plan_with(&caps, &harnesses, scope, wire_of(&o));
     let report = sync::apply(&into, &plan, o.dry_run).unwrap_or_else(|e| {
         eprintln!("sync failed: {e}");
         exit(1);
@@ -1360,7 +1376,7 @@ fn cmd_check(rest: &[String]) {
             }
             (caps, select_harnesses(&o))
         };
-        let plan = sync::plan_scoped(&caps, &harnesses, scope);
+        let plan = sync::plan_with(&caps, &harnesses, scope, wire_of(&o));
         let report = sync::check(&into, &plan).unwrap_or_else(|e| {
             eprintln!("check failed: {e}");
             exit(1);

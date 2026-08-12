@@ -79,6 +79,48 @@ writing files into a home directory that nothing will ever read:
   `~/.config/opencode/AGENTS.md` are different files — so the remap runs per
   harness, before paths are grouped.
 
+## Hooks: `--wire`
+
+A hook is the one kind whose install is not a file the harness reads, but an
+entry *inside* the harness's own config. So by default `sync` hands you the
+snippet and lets you paste it:
+
+```
+manual: 4 hook registration(s) to wire into a native entrypoint (see `emit`)
+```
+
+`--wire` writes it instead:
+
+```sh
+oh sync --global --wire
+```
+
+This is safe for the same reason everything else is: `.claude/settings.json` was
+*already* a merge target with fingerprint ownership, because that is where the
+permission kind installs. A hook entry goes in beside it under exactly the same
+rules — your own keys survive, the contribution is recorded, and `--uninstall`
+subtracts it rather than deleting your file. If you already have a
+`SessionStart` hook of your own, it is still there afterwards.
+
+It is off by default because editing a harness's own configuration is a larger
+claim on your machine than dropping a file into a directory it reads. That
+should be asked for.
+
+| harness | wired into |
+|---|---|
+| Claude Code | `.claude/settings.json` (merged) |
+| Gemini CLI | `.gemini/settings.json` (merged) |
+| Cursor | `.cursor/hooks.json` (merged) |
+| Codex | `~/.codex/hooks.json` — user scope only |
+| OpenCode | `.opencode/plugins/open-harness.mjs` (a whole file we own) |
+| Pi | `.pi/extensions/open-harness.ts` (a whole file we own) |
+
+Cline and Windsurf still report. Cline's hooks are executable shell scripts,
+which need a mode bit as well as content; Windsurf's hook config location is not
+established here. Aider, Copilot and Antigravity have no hook mechanism, so
+there is nothing to register and nothing is reported — telling you to wire in
+something that does not exist is its own kind of dishonesty.
+
 ## What is deliberately missing
 
 `oh sync --global` reports these instead of writing them. Each is a case where a
@@ -107,6 +149,8 @@ know a documented path that is missing here, it is a one-line table entry in
 - [Gemini CLI — settings](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/settings.md)
 - [OpenCode — rules](https://opencode.ai/docs/rules/)
 - [Windsurf — Cascade memories](https://docs.windsurf.com/windsurf/cascade/memories)
+- [Cursor — hooks](https://cursor.com/docs/agent/hooks) (`.cursor/hooks.json`,
+  `~/.cursor/hooks.json`)
 - [Cline — rules](https://docs.cline.bot/customization/cline-rules) and
   [cline#5153](https://github.com/cline/cline/issues/5153) (the Linux path
   discrepancy)

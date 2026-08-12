@@ -270,3 +270,178 @@ fn a_user_scope_sync_converges() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ---- wiring hook registrations --------------------------------------------
+//
+// A hook is the one kind whose install is not a file the harness reads, but an
+// entry *inside* the harness's own config. That is why it was a manual step —
+// and why it stopped needing to be one: `.claude/settings.json` is already a
+// merge target with fingerprint ownership, because that is where the permission
+// kind installs. A hook entry goes in beside it under exactly the same rules.
+
+fn wired(h: Harness, scope: Scope) -> sync::SyncPlan {
+    sync::plan_with(&corpus(), &[h], scope, sync::Wire::Write)
+}
+
+#[test]
+fn wiring_writes_the_registration_into_the_harnesss_own_config() {
+    let paths: Vec<String> = wired(Harness::Claude, Scope::Project)
+        .files
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    assert!(
+        paths.contains(&".claude/settings.json".to_string()),
+        "{paths:?}"
+    );
+
+    // ...and it is the *same file* the permission kind writes, merged, not a
+    // second one beside it.
+    let file = sync::plan_with(
+        &corpus(),
+        &[Harness::Claude],
+        Scope::Project,
+        sync::Wire::Write,
+    )
+    .files
+    .into_iter()
+    .find(|f| f.path == ".claude/settings.json")
+    .expect("settings.json");
+    let doc: serde_json::Value = serde_json::from_str(&file.contents).unwrap();
+    assert!(
+        doc.get("hooks").is_some(),
+        "the hook entry: {}",
+        file.contents
+    );
+    assert!(
+        doc.get("permissions").is_some(),
+        "the permission entry must survive alongside it: {}",
+        file.contents
+    );
+}
+
+/// Off by default. Editing a harness's own configuration is a larger claim on
+/// someone's machine than dropping a file into a directory it reads.
+#[test]
+fn without_the_flag_a_registration_is_still_a_reported_manual_step() {
+    let plan = sync::plan_scoped(&corpus(), &[Harness::Claude], Scope::Project);
+    assert!(
+        plan.deferred
+            .iter()
+            .any(|d| d.reason == DeferReason::Registration),
+        "the default must still report rather than write"
+    );
+    assert!(
+        !plan
+            .files
+            .iter()
+            .any(|f| f.path == ".claude/settings.json" && f.contents.contains("\"hooks\"")),
+        "nothing should be wired without --wire"
+    );
+}
+
+/// Where the harness's hook config location is not established, wiring still
+/// reports. Guessing at the path of a config file is how you corrupt one.
+#[test]
+fn a_harness_with_no_known_hook_config_is_reported_not_guessed_at() {
+    for h in [Harness::Cline, Harness::Windsurf] {
+        let plan = wired(h, Scope::Project);
+        assert!(
+            plan.deferred
+                .iter()
+                .any(|d| d.reason == DeferReason::Registration),
+            "{} should still report its registration",
+            h.id()
+        );
+    }
+}
+
+/// A harness with no hook mechanism has nothing to wire, so it is not a manual
+/// step either — telling someone to go and register something that does not
+/// exist is its own kind of dishonesty.
+#[test]
+fn a_harness_without_hooks_reports_no_manual_step_at_all() {
+    for h in [Harness::Aider, Harness::Copilot, Harness::Antigravity] {
+        for wire in [sync::Wire::Report, sync::Wire::Write] {
+            let plan = sync::plan_with(&corpus(), &[h], Scope::Project, wire);
+            assert!(
+                !plan
+                    .deferred
+                    .iter()
+                    .any(|d| d.reason == DeferReason::Registration),
+                "{} has no hook mechanism, so there is no registration to report",
+                h.id()
+            );
+        }
+    }
+}
+
+/// The property that makes wiring safe: it merges into a developer's own config
+/// and gives it back untouched on the way out.
+#[test]
+fn wiring_preserves_a_developers_own_config_and_unwires_cleanly() {
+    let root = tmp("wire-own");
+    let home = root.join("home");
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::write(
+        home.join(".claude/settings.json"),
+        r#"{"model":"opus","hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":"mine"}]}]}}"#,
+    )
+    .unwrap();
+    let caps = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("capabilities")
+        .to_string_lossy()
+        .into_owned();
+
+    let args = [
+        "sync",
+        "--global",
+        "--wire",
+        "--into",
+        "home",
+        "--capabilities",
+        &caps,
+    ];
+    let out = oh(&args, &root);
+    assert!(out.status.success() || out.status.code() == Some(1));
+
+    let read = |p: &Path| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+    };
+    let settings = home.join(".claude/settings.json");
+    let d = read(&settings);
+    assert_eq!(d["model"], "opus", "their key must survive");
+    assert!(
+        d["hooks"]["SessionStart"].is_array(),
+        "their hook must survive"
+    );
+    assert!(d["hooks"]["PreToolUse"].is_array(), "ours must be added");
+
+    let out = oh(
+        &[
+            "sync",
+            "--global",
+            "--wire",
+            "--into",
+            "home",
+            "--uninstall",
+        ],
+        &root,
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let d = read(&settings);
+    assert_eq!(d["model"], "opus", "their key must survive the uninstall");
+    assert!(
+        d["hooks"]["SessionStart"].is_array(),
+        "their hook must survive the uninstall"
+    );
+    assert!(
+        d["hooks"].get("PreToolUse").is_none(),
+        "ours must be subtracted, not left behind: {d}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

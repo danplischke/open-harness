@@ -568,10 +568,98 @@ impl Harness {
         }
     }
 
-    /// Produce the native registration config that wires the dispatcher in as a
-    /// SINGLE entrypoint per (native) event. Unsupported bindings are emitted as
-    /// warning comments so "where it breaks" is visible in the output.
-    pub fn emit_registration(&self, events: &[NormEvent], capability_id: &str) -> String {
+    /// The registration as a **file this tool can own**: `(path, contents)`,
+    /// where the path is relative to the scope root.
+    ///
+    /// `None` for a harness whose registration is not a file at a path we know,
+    /// which is what keeps `oh sync --wire` from writing a guess into somebody's
+    /// config. Today that means Cline (executable shell hooks, which need a
+    /// mode bit as well as content), Windsurf (its hooks file location is not
+    /// established here) and the three harnesses with no hook mechanism at all.
+    ///
+    /// The JSON harnesses return a document rather than a fragment on purpose:
+    /// `sync` merges it into whatever is already in that file under the same
+    /// ownership rules as every other shared target, so a developer's own hooks
+    /// and settings survive.
+    pub fn registration_file(
+        &self,
+        events: &[NormEvent],
+        capability_id: &str,
+    ) -> Option<(String, String)> {
+        let (targets, _) = self.registration_targets(events);
+        if targets.is_empty() {
+            return None;
+        }
+        let cmd = |cev: &NormEvent| format!("oh run --harness {} --event {}", self.id(), cev.id());
+        let hook_map = |shape: fn(&str) -> Value| {
+            let mut hooks = serde_json::Map::new();
+            for (name, cev) in &targets {
+                hooks.insert(name.clone(), shape(&cmd(cev)));
+            }
+            Value::Object(hooks)
+        };
+        let _ = capability_id;
+        Some(match self {
+            // `.claude/settings.json` / `.gemini/settings.json` are already the
+            // permission kind's targets, so the path is as established as any
+            // other in this codebase — and the merge machinery is the same.
+            Harness::Claude => (
+                ".claude/settings.json".to_string(),
+                pretty(
+                    &json!({ "hooks": hook_map(|c| json!([{ "matcher": "*", "hooks": [{ "type": "command", "command": c }] }])) }),
+                ),
+            ),
+            Harness::Gemini => (
+                ".gemini/settings.json".to_string(),
+                pretty(
+                    &json!({ "hooks": hook_map(|c| json!([{ "matcher": "*", "hooks": [{ "type": "command", "command": c }] }])) }),
+                ),
+            ),
+            // Verified: Codex loads `~/.codex/hooks.json`. User scope only —
+            // there is no project-level equivalent, so `sync` defers it in a
+            // project exactly as it defers the Codex prompts directory.
+            Harness::Codex => (
+                "~/.codex/hooks.json".to_string(),
+                pretty(&json!({ "hooks": hook_map(|c| json!([{ "command": c }])) })),
+            ),
+            // Cursor reads `.cursor/hooks.json` in a project and
+            // `~/.cursor/hooks.json` at user scope.
+            Harness::Cursor => (
+                ".cursor/hooks.json".to_string(),
+                pretty(&json!({ "version": 1, "hooks": hook_map(|c| json!([{ "command": c }])) })),
+            ),
+            // The in-process shims are whole files open-harness owns outright,
+            // not merges into someone else's config.
+            Harness::OpenCode => (
+                ".opencode/plugins/open-harness.mjs".to_string(),
+                opencode_shim(&targets, self.id()),
+            ),
+            Harness::Pi => (
+                ".pi/extensions/open-harness.ts".to_string(),
+                pi_shim(&targets, self.id()),
+            ),
+            _ => return None,
+        })
+    }
+
+    /// Whether there is any registration to perform for these bindings.
+    ///
+    /// `false` on a harness with no hook mechanism at all. That is not a manual
+    /// step, and listing it as one tells you to go and do something that does
+    /// not exist — the capability's plan already reports the harness as
+    /// unsupported or degraded, which is where that belongs.
+    pub fn registers(&self, events: &[NormEvent]) -> bool {
+        !self.registration_targets(events).0.is_empty()
+    }
+
+    /// The native targets a binding set resolves to, plus the warnings worth
+    /// showing. Shared by [`emit_registration`](Self::emit_registration) and
+    /// [`registration_file`](Self::registration_file) so the two cannot describe
+    /// different registrations.
+    fn registration_targets(
+        &self,
+        events: &[NormEvent],
+    ) -> (Vec<(String, NormEvent)>, Vec<String>) {
         let mut targets: Vec<(String, NormEvent)> = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
         for ev in events {
@@ -596,6 +684,14 @@ impl Harness {
                 from.join(" + ")
             ));
         }
+        (targets, warnings)
+    }
+
+    /// Produce the native registration config that wires the dispatcher in as a
+    /// SINGLE entrypoint per (native) event. Unsupported bindings are emitted as
+    /// warning comments so "where it breaks" is visible in the output.
+    pub fn emit_registration(&self, events: &[NormEvent], capability_id: &str) -> String {
+        let (targets, warnings) = self.registration_targets(events);
         let cmd = |cev: &NormEvent| format!("oh run --harness {} --event {}", self.id(), cev.id());
         let mut out = String::new();
         out.push_str(&format!(
