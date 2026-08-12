@@ -158,6 +158,9 @@ struct Opts {
     locked: bool,
     /// Confirm an action that executes code (`install --runtimes`).
     yes: bool,
+    /// `sync`/`check` at **user** scope: `~/.claude/skills/…` instead of the
+    /// project's, so a capability applies to every project on this machine.
+    global: bool,
     /// `install --runtimes`: provision capabilities' declared dependencies.
     runtimes: bool,
     /// `matrix --markdown`: emit the support grid as a Markdown table.
@@ -214,6 +217,7 @@ fn parse_opts(rest: &[String]) -> Opts {
         ci: false,
         locked: false,
         yes: false,
+        global: false,
         runtimes: false,
         markdown: false,
         provenance: false,
@@ -408,6 +412,10 @@ fn parse_opts(rest: &[String]) -> Opts {
             }
             "--ci" => {
                 o.ci = true;
+                i += 1;
+            }
+            "--global" => {
+                o.global = true;
                 i += 1;
             }
             "--runtimes" => {
@@ -1186,11 +1194,74 @@ fn cmd_resolve(rest: &[String]) {
     }
 }
 
+/// The scope a `sync`/`check` acts on.
+fn scope_of(o: &Opts) -> sync::Scope {
+    if o.global {
+        sync::Scope::User
+    } else {
+        sync::Scope::Project
+    }
+}
+
+/// The root to write into, and the profile to read, for this scope.
+///
+/// `--global` is a flag rather than a profile field on purpose: a profile is
+/// data that travels — cloned, vendored, resolved from a git source — and a
+/// `scope: user` key in one would let a repository you cloned write into your
+/// home directory. A flag cannot be set by anything but the person at the
+/// keyboard.
+fn scope_root(o: &Opts) -> PathBuf {
+    if !o.global {
+        return o.into.clone().unwrap_or_else(|| PathBuf::from("."));
+    }
+    if let Some(into) = &o.into {
+        // Honoured so the whole user scope is testable without touching a real
+        // home directory.
+        return into.clone();
+    }
+    home_dir().unwrap_or_else(|| {
+        eprintln!("--global needs a home directory: set HOME (or USERPROFILE on Windows)");
+        exit(2);
+    })
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// The user-scope profile: `~/.open-harness/open-harness.yaml`.
+///
+/// Deliberately *not* merged with the project profile. The harnesses already
+/// read both levels and resolve the precedence themselves, so the project
+/// profile lists only what is extra — resolving the two together would vendor
+/// your global capabilities into every repo, which is churn in `git status` and
+/// a second copy to keep in step.
+fn user_profile_path(o: &Opts) -> Option<PathBuf> {
+    if let Some(p) = &o.profile {
+        return Some(p.clone());
+    }
+    let p = scope_root(o)
+        .join(".open-harness")
+        .join(profile::PROFILE_NAME);
+    p.is_file().then_some(p)
+}
+
 fn cmd_sync(rest: &[String]) {
     let o = parse_opts(rest);
-    let Some(into) = o.into.clone() else {
-        eprintln!("sync requires --into <project-dir>");
-        exit(2);
+    let scope = scope_of(&o);
+    let into = if o.global {
+        scope_root(&o)
+    } else {
+        match o.into.clone() {
+            Some(p) => p,
+            None => {
+                eprintln!("sync requires --into <project-dir> (or --global for user scope)");
+                exit(2);
+            }
+        }
     };
 
     // Uninstall short-circuits: it reads the lockfile, not the capabilities.
@@ -1209,11 +1280,14 @@ fn cmd_sync(rest: &[String]) {
 
     // Profile mode (#15): resolve sources + harnesses from the profile; else the
     // ad-hoc `--capabilities` / `--harness` mode.
-    let (caps, harnesses) = if let Some(profile_path) = o
-        .profile
-        .clone()
-        .or_else(|| profile::find_profile(std::path::Path::new(".")))
-    {
+    let discovered = if o.global {
+        user_profile_path(&o)
+    } else {
+        o.profile
+            .clone()
+            .or_else(|| profile::find_profile(std::path::Path::new(".")))
+    };
+    let (caps, harnesses) = if let Some(profile_path) = discovered {
         let resolved = resolve_profile_opts(&profile_path, o.locked);
         if resolved.harnesses.is_empty() {
             eprintln!("profile '{}' targets no harnesses", resolved.profile);
@@ -1236,12 +1310,12 @@ fn cmd_sync(rest: &[String]) {
         println!();
     }
 
-    let plan = sync::plan_sync(&caps, &harnesses);
+    let plan = sync::plan_scoped(&caps, &harnesses, scope);
     let report = sync::apply(&into, &plan, o.dry_run).unwrap_or_else(|e| {
         eprintln!("sync failed: {e}");
         exit(1);
     });
-    print_apply_report(&report, "sync", &into);
+    print_apply_report(&report, &format!("sync ({} scope)", scope.as_str()), &into);
     // A blocked target means the requested state is not on disk. Reporting it
     // and still exiting 0 would be the silent-success lie this project forbids.
     if report.has_blocked() {
@@ -1257,12 +1331,21 @@ fn cmd_check(rest: &[String]) {
     // resolve the same way as `sync`: from a `--profile` (its sources + harnesses)
     // or the ad-hoc `--capabilities` / `--harness` mode — so you can drift-check
     // exactly what you profile-synced.
-    if let Some(into) = o.into.clone() {
-        let (caps, harnesses) = if let Some(profile_path) = o
-            .profile
-            .clone()
-            .or_else(|| profile::find_profile(std::path::Path::new(".")))
-        {
+    let scope = scope_of(&o);
+    let checked_root = if o.global {
+        Some(scope_root(&o))
+    } else {
+        o.into.clone()
+    };
+    if let Some(into) = checked_root {
+        let discovered = if o.global {
+            user_profile_path(&o)
+        } else {
+            o.profile
+                .clone()
+                .or_else(|| profile::find_profile(std::path::Path::new(".")))
+        };
+        let (caps, harnesses) = if let Some(profile_path) = discovered {
             let resolved = resolve_profile_opts(&profile_path, o.locked);
             if resolved.harnesses.is_empty() {
                 eprintln!("profile '{}' targets no harnesses", resolved.profile);
@@ -1277,7 +1360,7 @@ fn cmd_check(rest: &[String]) {
             }
             (caps, select_harnesses(&o))
         };
-        let plan = sync::plan_sync(&caps, &harnesses);
+        let plan = sync::plan_scoped(&caps, &harnesses, scope);
         let report = sync::check(&into, &plan).unwrap_or_else(|e| {
             eprintln!("check failed: {e}");
             exit(1);
@@ -1448,11 +1531,13 @@ fn print_deferred(deferred: &[Deferred]) {
     }
     let mut registration = Vec::new();
     let mut global = Vec::new();
+    let mut no_user = Vec::new();
     let mut blocked = Vec::new();
     for d in deferred {
         match d.reason {
             sync::DeferReason::Registration => registration.push(d),
             sync::DeferReason::GlobalPath => global.push(d),
+            sync::DeferReason::NoUserLocation => no_user.push(d),
             sync::DeferReason::Unsupported => blocked.push(d),
         }
     }
@@ -1464,6 +1549,34 @@ fn print_deferred(deferred: &[Deferred]) {
         for d in &registration {
             println!("    → {} on {} [{}]", d.source, d.harness, d.kind);
         }
+    }
+    if !no_user.is_empty() {
+        // Not a limitation of open-harness so much as of what is knowable: the
+        // harness documents no user-level home for this artifact, and writing a
+        // guess into someone's home directory is worse than saying so.
+        //
+        // Summarized by harness rather than listed: at user scope this is most
+        // of the matrix, and eighty lines of detail buries the handful of things
+        // that did install.
+        let mut by_harness: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+        for d in &no_user {
+            by_harness
+                .entry(d.harness.as_str())
+                .or_default()
+                .push(d.source.as_str());
+        }
+        println!(
+            "\n  manual: {} target(s) across {} harness(es) have no documented user-level location",
+            no_user.len(),
+            by_harness.len()
+        );
+        for (harness, sources) in &by_harness {
+            let mut ids = sources.to_vec();
+            ids.sort_unstable();
+            ids.dedup();
+            println!("    → {harness}: {}", ids.join(", "));
+        }
+        println!("      install these into a project, or see `oh help sync` on scopes");
     }
     if !global.is_empty() {
         println!(
