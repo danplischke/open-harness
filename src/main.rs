@@ -7,9 +7,10 @@
 //!   environment + capability health).
 //! Runtime:    `run` (a harness's single native hook entrypoint) · `mcp`
 //!   (list/call an MCP server's tools through the shell — the MCP→CLI bridge).
-//! Delivery:   `emit` (native registration config) · `resolve` (sources → lock)
-//!   · `sync` (install/converge into a project) · `check` (installability, or
-//!   drift vs a synced project with `--ci`).
+//! Delivery:   `emit` (native registration config) · `try` (what a source would
+//!   install, writing nothing) · `resolve` (sources → lock) · `sync`
+//!   (install/converge into a project) · `check` (installability, or drift vs a
+//!   synced project with `--ci`).
 //! Trust:      `keygen` · `sign` · `verify` · `trust` · `revoke` · `keyring`
 //!   (a root of trust: `keyring` + `trust --root`/`--keyring`).
 //! Publishing: `pack` (capabilities → content-addressed archives + a registry
@@ -101,6 +102,7 @@ fn main() {
         "keyring" => cmd_keyring(&rest),
         "mcp" => cmd_mcp(&rest),
         "resolve" => cmd_resolve(&rest),
+        "try" => cmd_try(&rest),
         "sync" => cmd_sync(&rest),
         "check" => cmd_check(&rest),
         "matrix" => cmd_matrix(&rest),
@@ -1199,6 +1201,227 @@ fn cmd_resolve(rest: &[String]) {
     if trust_requested(&o) {
         println!();
         enforce_trust(&resolved.capabilities, &o);
+    }
+}
+
+// ---- try ------------------------------------------------------------------
+
+/// Where `try` resolves. Only the fetch cache is written, and only under
+/// `<workdir>/.open-harness/cache/` — so rooting it at `$HOME` puts it in
+/// `~/.open-harness/cache/`, beside the user scope's own, and a second `try` of
+/// the same repo is a fetch rather than a clone.
+///
+/// The project is never the workdir: `try` must not leave a `.open-harness/`
+/// behind in a repository you were only evaluating something for.
+fn try_workdir() -> PathBuf {
+    home_dir().unwrap_or_else(std::env::temp_dir)
+}
+
+/// Re-root a local spec on the caller's cwd.
+///
+/// A `local` source path is resolved against the *profile's* workdir, and
+/// `try`'s workdir is `$HOME` rather than the directory you are standing in. So
+/// `oh try ./capabilities` would ask `$HOME` for `./capabilities` — a path
+/// nobody meant. Every other source kind is absolute already (a URL, a repo).
+fn absolutise_local(source: profile::Source) -> profile::Source {
+    match source {
+        profile::Source::Local(mut l) => {
+            let p = PathBuf::from(&l.path);
+            if p.is_relative() {
+                if let Ok(mut abs) = std::env::current_dir() {
+                    // `./` components are dropped rather than joined: the result
+                    // is echoed back as the source's origin and as the `oh add`
+                    // line, and `/home/me/proj/./caps` reads like a bug.
+                    for c in p.components() {
+                        match c {
+                            std::path::Component::CurDir => {}
+                            other => abs.push(other.as_os_str()),
+                        }
+                    }
+                    l.path = abs.to_string_lossy().into_owned();
+                }
+            }
+            profile::Source::Local(l)
+        }
+        other => other,
+    }
+}
+
+/// The harnesses `try` previews against, and a word on where that set came from.
+///
+/// Defaulting to all eleven would answer a question nobody asked: what matters
+/// is whether this capability works on *your* harnesses. So the existing profile
+/// decides, and `--harness` overrides it. Which set was used is printed, because
+/// a preview that quietly narrowed itself is a preview you cannot trust.
+fn try_harnesses(o: &Opts) -> (Vec<Harness>, String) {
+    if o.harness.is_some() {
+        return (select_harnesses(o), "--harness".to_string());
+    }
+    let found = if o.global {
+        user_profile_path(o)
+    } else {
+        o.profile
+            .clone()
+            .or_else(|| profile::find_profile(std::path::Path::new(".")))
+    };
+    if let Some(path) = found {
+        if let Ok(p) = Profile::load(&path) {
+            if let Ok(hs) = p.harness_set() {
+                if !hs.is_empty() {
+                    return (hs, format!("from {}", path.display()));
+                }
+            }
+        }
+    }
+    (ALL.to_vec(), "no profile found — all harnesses".to_string())
+}
+
+/// `oh try <spec>` — resolve one source and report what it *would* install.
+///
+/// The gap this fills: every other command answers for capabilities you have
+/// already committed to. `add` edits your profile, `resolve` pins it, `sync`
+/// writes it. To judge a stranger's capability you had to adopt it first and
+/// read the diff afterwards — which is exactly backwards for a tool whose claim
+/// is that you can see what lands on your machine before it lands.
+///
+/// So: nothing is written outside the fetch cache. Not the profile, not the
+/// lockfile, not one byte of harness config. What comes back is the resolved
+/// revision (so `oh add` gets the same bits), what it would write where, what it
+/// degrades to per harness, what it asks for — network, exec, filesystem writes,
+/// a runtime you may not have — and whether anyone signed it.
+///
+/// Resolution stays `flat` regardless of what the capability declares: a preview
+/// that cloned a dependency graph would be doing the thing you ran `try` to
+/// avoid committing to.
+fn cmd_try(rest: &[String]) {
+    let o = parse_opts(rest);
+    let Some(spec) = o.positional.first().cloned() else {
+        eprintln!("try requires a source: `oh try <spec>` (a git URL, an archive URL, or a path)");
+        exit(2);
+    };
+    let source = profile::Source::parse_spec(&spec).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        exit(2);
+    });
+    let (harnesses, target_origin) = try_harnesses(&o);
+    let profile = Profile {
+        name: format!("try:{spec}"),
+        harnesses: harnesses.iter().map(|h| h.id().to_string()).collect(),
+        sources: vec![absolutise_local(source)],
+        resolution: profile::Resolution::Flat,
+        transitive_trust: profile::TransitiveTrust::default(),
+        trust: None,
+    };
+    let workdir = try_workdir();
+    let resolved = profile::resolve(&profile, &workdir, None).unwrap_or_else(|e| {
+        eprintln!("resolve failed: {e}");
+        exit(1);
+    });
+    for w in &resolved.warnings {
+        eprintln!("warning: {w}");
+    }
+
+    for s in &resolved.lock.sources {
+        let at = s
+            .rev
+            .as_deref()
+            .map(|r| &r[..r.len().min(12)])
+            .unwrap_or("-");
+        println!("source   [{}] {} @ {}", s.kind, s.origin, at);
+    }
+    let ids: Vec<&str> = harnesses.iter().map(|h| h.id()).collect();
+    println!("targets  {} ({target_origin})", ids.join(" "));
+    println!(
+        "scope    {}",
+        match scope_of(&o) {
+            sync::Scope::User => "user (--global)",
+            sync::Scope::Project => "project",
+        }
+    );
+
+    if resolved.capabilities.is_empty() {
+        eprintln!("\n{spec} resolved, but provides no capabilities");
+        exit(1);
+    }
+
+    let store = load_trust(&o);
+    let plan = sync::plan_with(
+        &resolved.capabilities,
+        &harnesses,
+        scope_of(&o),
+        wire_of(&o),
+    );
+
+    for cap in &resolved.capabilities {
+        let m = &cap.manifest;
+        println!(
+            "\ncapability  {}  ({})  {}  [{}]",
+            cap.qualified_name(),
+            m.name,
+            m.version,
+            m.kind.as_str()
+        );
+        println!("  signature {}", trust::verify(&cap.dir, &store).status());
+        // Always printed, including the all-empty case. "asks for nothing" is
+        // the single most useful thing a preview can tell you, and it only
+        // means anything if its absence would have been shown too.
+        let p = &m.permissions;
+        println!(
+            "  asks      network {} · exec {} · writes {}",
+            p.network_summary(),
+            list_or_none(&p.exec),
+            list_or_none(&p.write),
+        );
+        if !m.runtime.requires.is_empty() {
+            let state = match open_harness::runtime::missing_requirements(&m.runtime) {
+                None => "ready".to_string(),
+                Some(gap) => format!("MISSING — {gap}"),
+            };
+            println!("  runtime   {} — {state}", m.runtime.requires.join(", "));
+        }
+
+        let mine: Vec<&sync::DesiredFile> = plan
+            .files
+            .iter()
+            .filter(|f| f.sources.iter().any(|s| s == &m.id))
+            .collect();
+        if mine.is_empty() {
+            println!("  writes    (nothing on these harnesses)");
+        } else {
+            println!("  writes");
+            for f in mine {
+                let deg = if f.degraded.is_empty() {
+                    String::new()
+                } else {
+                    format!("   degraded: {}", f.degraded.join("; "))
+                };
+                println!("    {}  [{}]{deg}", f.path, f.harnesses.join(" "));
+            }
+        }
+    }
+
+    // Everything that could not be placed, in the same shape `sync` reports it —
+    // a preview that hid the unsupported half would be the friendlier lie.
+    print_deferred(&plan.deferred);
+
+    println!("\nnothing was written. to keep it:");
+    println!("  oh add {spec}");
+    println!(
+        "  oh sync {}",
+        if o.global {
+            "--global".to_string()
+        } else {
+            "--into .".to_string()
+        }
+    );
+    print_provenance_note(&harnesses);
+}
+
+fn list_or_none(v: &[String]) -> String {
+    if v.is_empty() {
+        "none".to_string()
+    } else {
+        v.join(",")
     }
 }
 
