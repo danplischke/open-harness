@@ -27,6 +27,7 @@ pub mod profile;
 pub mod publish;
 pub mod runtime;
 pub mod scaffold;
+pub mod state;
 pub mod sync;
 pub mod tools;
 pub mod trust;

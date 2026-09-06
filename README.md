@@ -70,6 +70,9 @@ oh doctor                                                 # check interpreters, 
 
 # Run & inspect
 oh run    --harness claude-code --event pre.tool.any      # a harness's single native hook entrypoint
+oh state  set gate.phase plan                             # the scoped KV store a capability keeps state in
+oh state  get gate.phase                                  # --scope user|project|session (default: project)
+oh state  prune --older-than 30                           # drop abandoned session stores
 oh matrix                                                 # the (event × harness) support grid + adapter provenance
 oh matrix --provenance                                    # just: which adapters are verified vs merely documented
 oh check                                                  # per-capability installability across all harnesses
@@ -105,7 +108,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 499 tests, green on Linux/macOS/Windows
+cargo test                            # 511 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -508,6 +511,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `src/config.rs` | open-harness's own config files: YAML out, YAML-or-JSON in — the boundary against a harness's native formats |
 | `src/dispatch.rs` | Single-entrypoint dispatcher: concurrent fan-out, merge, policy-driven fail-closed |
 | `src/runtime.rs` | Hardened execution: per-capability timeout, output cap, error taxonomy, cross-platform interpreters, `runtime.requires` pre-flight |
+| `src/state.rs` | The scoped key-value store (`oh state`): user / project / session, atomic + locked, keyed by the project but stored outside it |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
 | `src/profile.rs` | Profiles + sources (local / git / http archive / registry / plugin), qualified names, selection, opt-in transitive acquisition → `open-harness.lock` |
@@ -525,7 +529,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `capabilities/` | Real example capabilities — all eight portable kinds, in Python, Node and shell. Document kinds are authored as single files (`SKILL.md`, `RULE.md`, …); `postgres-review` is the one manifest + `body_file` example, and `tests/authoring.rs` gates that neither form becomes the only face of a kind |
 | `docs/` | mdBook site (concepts, authoring, dependencies, runtimes, plugins, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 499 tests: conformance (94) + sourcing & dependencies (67) + new kinds (35) + runtimes & provisioning (31) + `oh import` (31) + config/YAML (24) + trust (23) + deps vocabulary (21) + selection (21) + plugin import (21) + single-file (19) + `oh try` (14) + scopes & wiring (13) + CLI help & completions (13) + JSON→YAML migration (12) + authoring (11) + adapter provenance (9) + `--locked` (9) + unit (7) + CLI arguments (7) + streamable-HTTP (6) + publishing (6) + MCP bridge (3) + capture (2) |
+| `tests/` | 511 tests: conformance (94) + sourcing & dependencies (67) + new kinds (35) + runtimes & provisioning (31) + `oh import` (31) + config/YAML (24) + trust (23) + deps vocabulary (21) + selection (21) + plugin import (21) + single-file (19) + `oh try` (14) + scopes & wiring (13) + CLI help & completions (13) + state store (12) + JSON→YAML migration (12) + authoring (11) + adapter provenance (9) + `--locked` (9) + unit (7) + CLI arguments (7) + streamable-HTTP (6) + publishing (6) + MCP bridge (3) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies

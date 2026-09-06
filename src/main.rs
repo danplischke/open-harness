@@ -26,6 +26,7 @@ use open_harness::mcp::{self, HttpServerSpec, McpServer, ServerSpec};
 use open_harness::profile::{self, Lock, Profile, Resolved};
 use open_harness::publish;
 use open_harness::scaffold::{self, Lang};
+use open_harness::state;
 use open_harness::sync::{self, ApplyReport, ChangeAction, Deferred, DriftKind, DriftReport};
 use open_harness::trust::{self, TrustStore};
 use std::io::Read;
@@ -109,6 +110,7 @@ fn main() {
         "version" | "--version" | "-V" => cmd_version(),
         "scaffold" => cmd_scaffold(&rest),
         "capture" => cmd_capture(&rest),
+        "state" => cmd_state(&rest),
         "init" => cmd_init(&rest),
         "migrate" => cmd_migrate(&rest),
         "install" => cmd_install(&rest),
@@ -204,6 +206,13 @@ struct Opts {
     scaffold_project: bool,
     local: Option<String>,
     git: Option<String>,
+    // state store (`oh state`)
+    /// Which store `oh state` reads: user / project / session.
+    scope: Option<String>,
+    /// The harness session id, for `--scope session`.
+    session: Option<String>,
+    /// `state prune`: the age above which a session store is abandoned.
+    older_than_days: u64,
     /// Bare arguments (a source spec for `add`, a subcommand for `mcp`).
     positional: Vec<String>,
     // publishing (#21)
@@ -254,6 +263,9 @@ fn parse_opts(rest: &[String]) -> Opts {
         scaffold_project: false,
         local: None,
         git: None,
+        scope: None,
+        session: None,
+        older_than_days: 30,
         positional: Vec::new(),
         base_url: None,
     };
@@ -266,6 +278,18 @@ fn parse_opts(rest: &[String]) -> Opts {
             }
             "--event" => {
                 o.event = Some(value_for(rest, i));
+                i += 2;
+            }
+            "--scope" => {
+                o.scope = Some(value_for(rest, i));
+                i += 2;
+            }
+            "--session" => {
+                o.session = Some(value_for(rest, i));
+                i += 2;
+            }
+            "--older-than" => {
+                o.older_than_days = numeric_value(rest, i);
                 i += 2;
             }
             "--capabilities" => {
@@ -578,6 +602,155 @@ fn cmd_run(rest: &[String]) {
 /// It goes to **stderr**: stdout is the artifact. `oh emit > hooks.json` has to
 /// produce the config and nothing else, or every consumer has to learn to strip
 /// our commentary — and someone will paste it into a real file first.
+/// `oh state` — read and write the scoped key-value store.
+///
+/// The key is positional (`oh state get gate.phase`) rather than a `--key`
+/// flag because `--key` already means the signing key on `oh sign`, and one
+/// flag meaning two different things across a shared parser is how a CLI starts
+/// lying to its users.
+fn cmd_state(rest: &[String]) {
+    let o = parse_opts(rest);
+    let sub = o.positional.first().map(|s| s.as_str()).unwrap_or("");
+    if sub.is_empty() {
+        eprintln!("usage: oh state <get|set|delete|list|path|prune> [KEY] [VALUE] [--scope S]");
+        exit(2);
+    }
+
+    // Project scope is the default: a hook fires in a project, and per-project
+    // state is what a gate or a working-state recorder actually wants.
+    let scope = match o.scope.as_deref() {
+        Some(s) => match state::Scope::parse(s) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("state: {e}");
+                exit(2);
+            }
+        },
+        None => state::Scope::Project,
+    };
+    // A capability normally passes the session id it read from the payload;
+    // the env var is a convenience for driving `oh state` by hand.
+    let session = o
+        .session
+        .clone()
+        .or_else(|| std::env::var("OPEN_HARNESS_SESSION").ok())
+        .filter(|s| !s.is_empty());
+
+    if sub == "prune" {
+        match state::prune(o.older_than_days, o.into.as_deref()) {
+            Ok(pruned) if pruned.is_empty() => {
+                println!("no session state older than {} days", o.older_than_days)
+            }
+            Ok(pruned) => {
+                for p in &pruned {
+                    println!("pruned {} ({}d old)", p.path.display(), p.age_days);
+                }
+                println!("{} session store(s) pruned", pruned.len());
+            }
+            Err(e) => {
+                eprintln!("state: {e}");
+                exit(2);
+            }
+        }
+        return;
+    }
+
+    let path = match state::store_path(scope, o.into.as_deref(), session.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("state: {e}");
+            exit(2);
+        }
+    };
+
+    match sub {
+        "path" => println!("{}", path.display()),
+        "list" => match state::list(&path) {
+            Ok(map) if map.is_empty() => {}
+            Ok(map) => {
+                // YAML, because that is what the store itself is written in and
+                // because `--json` is already taken by `oh mcp call`.
+                let obj: serde_json::Map<String, serde_json::Value> = map
+                    .into_iter()
+                    .map(|(k, v)| (k, serde_json::Value::String(v)))
+                    .collect();
+                print!(
+                    "{}",
+                    open_harness::yaml::to_document(&serde_json::Value::Object(obj))
+                );
+            }
+            Err(e) => {
+                eprintln!("state: {e}");
+                exit(2);
+            }
+        },
+        "get" => {
+            let key = require_state_key(&o, "get");
+            match state::get(&path, &key) {
+                // A trailing newline makes this usable from a shell; `$(…)`
+                // strips it, so a value is never corrupted by round-tripping.
+                Ok(Some(v)) => println!("{v}"),
+                // Absent is exit 1, not an error message on stdout: it lets a
+                // capability write `if ! oh state get k; then …` without having
+                // to distinguish "empty value" from "no key".
+                Ok(None) => exit(1),
+                Err(e) => {
+                    eprintln!("state: {e}");
+                    exit(2);
+                }
+            }
+        }
+        "set" => {
+            let key = require_state_key(&o, "set");
+            // The value may be a whole session summary, which does not belong on
+            // a command line, so an omitted value is read from stdin.
+            let value = match o.positional.get(2) {
+                Some(v) => v.clone(),
+                None => {
+                    let mut buf = String::new();
+                    if std::io::stdin().read_to_string(&mut buf).is_err() {
+                        eprintln!("state: no VALUE argument and stdin could not be read");
+                        exit(2);
+                    }
+                    buf.trim_end_matches('\n').to_string()
+                }
+            };
+            match state::set(&path, &key, &value) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("state: {e}");
+                    exit(2);
+                }
+            }
+        }
+        "delete" => {
+            let key = require_state_key(&o, "delete");
+            match state::delete(&path, &key) {
+                Ok(true) => {}
+                Ok(false) => exit(1),
+                Err(e) => {
+                    eprintln!("state: {e}");
+                    exit(2);
+                }
+            }
+        }
+        other => {
+            eprintln!("state: unknown subcommand `{other}` — expected get, set, delete, list, path or prune");
+            exit(2);
+        }
+    }
+}
+
+fn require_state_key(o: &Opts, sub: &str) -> String {
+    match o.positional.get(1) {
+        Some(k) => k.clone(),
+        None => {
+            eprintln!("state {sub}: a KEY is required (e.g. `oh state {sub} gate.phase`)");
+            exit(2);
+        }
+    }
+}
+
 fn print_provenance_note(harnesses: &[Harness]) {
     let unverified = open_harness::matrix::unverified(harnesses);
     if unverified.is_empty() {
