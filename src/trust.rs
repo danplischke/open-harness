@@ -608,8 +608,14 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
     if !bytes.len().is_multiple_of(2) {
         return Err("odd-length hex".to_string());
     }
+    // `as_chunks` rather than `chunks_exact`: the size is a constant, so this
+    // gives fixed-size `[u8; 2]` arrays and clippy's `chunks_exact_to_as_chunks`
+    // (new in 1.98) asks for it. The odd-length check above is what guarantees
+    // the remainder half of the pair is empty, so it is correct to ignore.
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Ok(hex_digit(pair[0])? << 4 | hex_digit(pair[1])?))
         .collect()
 }
