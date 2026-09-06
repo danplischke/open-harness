@@ -251,8 +251,11 @@ pub const COMMANDS: &[Command] = &[
         ],
         details: "The source kind is inferred from the spec: a bare path is local, \
                   `git+https://…@rev` is a repo, `https://…` is an archive or a \
-                  registry index. `--harness` adds a harness to the profile's target \
-                  list instead of a source.",
+                  registry index, and `plugin:…` / `plugin+…` is a Claude plugin \
+                  bundle imported as capabilities. A plugin needs the prefix because \
+                  no URL can say whether a repository holds capabilities or a \
+                  `.claude-plugin` bundle. `--harness` adds a harness to the \
+                  profile's target list instead of a source.",
         flags: &[
             Flag {
                 spec: "--local PATH",
@@ -268,10 +271,16 @@ pub const COMMANDS: &[Command] = &[
             },
             F_PROFILE,
         ],
-        examples: &[Example {
-            line: "oh add git+https://github.com/me/my-skill@v1.2.0",
-            what: "pin a capability repo at a tag",
-        }],
+        examples: &[
+            Example {
+                line: "oh add git+https://github.com/me/my-skill@v1.2.0",
+                what: "pin a capability repo at a tag",
+            },
+            Example {
+                line: "oh add 'plugin+https://github.com/ruvnet/ruflo@main#name=ruflo-core'",
+                what: "import one plugin from a marketplace repo",
+            },
+        ],
     },
     Command {
         name: "remove",
@@ -427,7 +436,8 @@ pub const COMMANDS: &[Command] = &[
         summary: "preview what a source would install, without installing it",
         synopsis: &["try <spec> [--harness H] [--global] [--wire]"],
         details: "Resolves one source — a git URL, an archive URL, a registry \
-                  entry, a path — and reports what it would write where, what it \
+                  entry, a `plugin:` bundle, a path — and reports what it would \
+                  write where, what it \
                   degrades to on each harness, what it asks for (network, exec, \
                   filesystem writes, a runtime you may not have), and whether it \
                   is signed. Nothing is written: not your profile, not the \
@@ -548,9 +558,13 @@ pub const COMMANDS: &[Command] = &[
             "check --global [--ci]",
         ],
         details: "Without --into, reports per-capability installability across the \
-                  target harnesses (clean / degraded / unsupported). With --into, it \
-                  compares the project on disk against what the profile says should be \
-                  there; --ci makes drift a non-zero exit.",
+                  target harnesses (clean / degraded / unsupported) — for the \
+                  profile's own sources when there is a profile, so a git, \
+                  registry or plugin source can be answered for without installing \
+                  it first. An explicit --capabilities scans that directory \
+                  instead. With --into, it compares the project on disk against \
+                  what the profile says should be there; --ci makes drift a \
+                  non-zero exit.",
         flags: &[
             F_INTO,
             F_GLOBAL,

@@ -3,12 +3,49 @@
 Claude Code plugins are a real, populated ecosystem, and the layout is becoming
 a de-facto standard. A `plugin` source imports one as capabilities:
 
+```sh
+# the spec form — `oh try` previews it, `oh add` adopts it
+oh try 'plugin+https://github.com/thedotmack/claude-mem@v13.14.0'
+oh add 'plugin+https://github.com/ruvnet/ruflo@main#name=ruflo-core'
+```
+
 ```yaml
 sources:
+  - plugin+https://github.com/thedotmack/claude-mem@v13.14.0
+  # the mapping form, when a marketplace publishes several or you want a select
   - plugin:
-      url: https://github.com/thedotmack/claude-mem
-      rev: v13.14.0
+      url: https://github.com/ruvnet/ruflo
+      rev: main
+      name: ruflo-core
 ```
+
+A plugin bundle needs the `plugin+` / `plugin:` prefix rather than being inferred
+from its URL, because no URL can distinguish a repository of capabilities from a
+repository holding a `.claude-plugin` bundle — and the two read completely
+differently. For the same reason, pointing a **plain path** at a directory that
+turns out to hold a `.claude-plugin/` is an error naming the fix, not a scan:
+reading a bundle as a capability directory *succeeds*, and quietly returns the
+`SKILL.md`s as bare capabilities with no version and no namespace while missing
+the `.mcp.json` and `hooks/hooks.json` entirely. A plausible partial answer is
+worse than a refusal.
+
+## As a dependency
+
+A capability may name a plugin in its own `dependencies:`, and with
+`resolution: transitive` the bundle is acquired (trust-gated) like any other
+source. Depend on a capability **inside** the bundle — `ruflo-core/discover-plugins`,
+or the bare `discover-plugins` — because the plugin's name becomes the
+*namespace*, not a capability. Depending on `ruflo-core` itself acquires the
+bundle and still reports the requirement unmet, which is confusing but correct:
+nothing is called that.
+
+## One name, two kinds
+
+Plugins routinely ship a name as both a skill and a command. Those are two
+capabilities, not two versions of one: they emit to `skills/<id>/SKILL.md` and
+`commands/<id>.md`, different files that do not clash. Capability identity is
+therefore `(qualified name, kind)` — keyed on the name alone, half of such a
+pair was dropped as a duplicate.
 
 ```
 warning: plugin 'claude-mem': MCP server 'mcp-search' imported as a portable tool,

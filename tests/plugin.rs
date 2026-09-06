@@ -503,3 +503,247 @@ fn native_cannot_be_scaffolded() {
     assert!(err.contains("importing a plugin"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- adopting a plugin: the path a person actually meets first --------------
+//
+// The import machinery above was correct long before any of this worked. What
+// did not work was reaching it: `oh add` accepted a `plugin:` string and wrote a
+// broken profile, `oh try` read a bundle as a plain directory and produced a
+// confidently wrong answer, and two capabilities that merely shared a name were
+// treated as duplicates. These pin the adoption path.
+
+use open_harness::profile::Source;
+
+#[test]
+fn a_plugin_has_a_spec_form_so_add_and_try_can_take_one() {
+    // Inference cannot tell a capability repo from a plugin bundle by URL alone
+    // — the same repository could be either — so the prefix is what decides,
+    // exactly as `git+` does.
+    let Source::Plugin(p) =
+        Source::parse_spec("plugin+https://github.com/ruvnet/ruflo@main#name=ruflo-core").unwrap()
+    else {
+        panic!("plugin+ must infer a plugin source");
+    };
+    assert_eq!(p.url, "https://github.com/ruvnet/ruflo");
+    assert_eq!(p.rev.as_deref(), Some("main"));
+    assert_eq!(p.name.as_deref(), Some("ruflo-core"));
+
+    // `plugin:` is the other spelling people type, and a local checkout needs
+    // no rev — the same rule the mapping form already had.
+    let Source::Plugin(local) = Source::parse_spec("plugin:../checkouts/claude-mem").unwrap()
+    else {
+        panic!("plugin: must infer a plugin source");
+    };
+    assert_eq!(local.url, "../checkouts/claude-mem");
+    assert!(local.rev.is_none(), "no @rev means a local path, not git");
+}
+
+#[test]
+fn a_plugin_spec_refuses_what_it_cannot_read_instead_of_guessing() {
+    for bad in [
+        "plugin+",
+        "plugin+https://example.com/repo@",
+        "plugin+https://example.com/repo#nonsense=1",
+    ] {
+        let err = Source::parse_spec(bad).unwrap_err();
+        assert!(!err.is_empty(), "{bad} should be refused");
+    }
+    // The fragment error names the keys that *are* accepted.
+    let err = Source::parse_spec("plugin+https://example.com/r#nonsense=1").unwrap_err();
+    assert!(
+        err.contains("name=") && err.contains("subdirectory="),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_plugin_bundle_is_refused_as_a_local_directory_rather_than_misread() {
+    // Both are "a directory with files in it", so scanning a bundle as a local
+    // source *succeeds* — and quietly produces a wrong answer: skills load as
+    // bare single-file capabilities with no version and no namespace, and the
+    // `.mcp.json` and `hooks/hooks.json` are not seen at all. A plausible
+    // partial reading is the worst failure this project can have.
+    let bundle = plugin_bundle("misread");
+    let wd = tmp("misread-wd");
+    let p = Profile::from_text(
+        &json!({
+            "name": "p", "harnesses": ["claude-code"],
+            "sources": [bundle.to_string_lossy()],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let err = match profile::resolve(&p, &wd, None) {
+        Err(e) => e,
+        Ok(_) => panic!("a plugin bundle must not resolve as a local directory"),
+    };
+    assert!(err.contains("Claude plugin bundle"), "{err}");
+    assert!(
+        err.contains("plugin:"),
+        "the error must carry the fix, not just the diagnosis: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+    let _ = std::fs::remove_dir_all(&bundle);
+}
+
+#[test]
+fn a_marketplace_directory_is_refused_with_the_name_fragment_in_the_fix() {
+    let repo = tmp("misread-market");
+    write(
+        &repo.join(".claude-plugin/marketplace.json"),
+        r#"{"plugins": [{"name": "alpha", "source": "./a"}]}"#,
+    );
+    let wd = tmp("misread-market-wd");
+    let p = Profile::from_text(
+        &json!({
+            "name": "p", "harnesses": ["claude-code"],
+            "sources": [repo.to_string_lossy()],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let err = match profile::resolve(&p, &wd, None) {
+        Err(e) => e,
+        Ok(_) => panic!("a marketplace must not resolve as a local directory"),
+    };
+    assert!(err.contains("marketplace"), "{err}");
+    assert!(
+        err.contains("#name="),
+        "a marketplace needs the plugin named, and the fix should say so: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+/// A bundle shipping one name as *both* a skill and a command — which real
+/// plugins do routinely.
+fn plugin_with_a_shared_name(tag: &str) -> PathBuf {
+    let root = tmp(tag);
+    write(
+        &root.join(".claude-plugin/plugin.json"),
+        r#"{"name": "dual", "version": "1.0.0"}"#,
+    );
+    write(
+        &root.join("skills/status/SKILL.md"),
+        "---\ndescription: the status skill\n---\n\nHow to read status.\n",
+    );
+    write(
+        &root.join("commands/status.md"),
+        "---\ndescription: the status command\n---\n\nPrint status.\n",
+    );
+    root
+}
+
+#[test]
+fn a_skill_and_a_command_with_one_name_both_survive() {
+    // Identity is (name, kind). Keyed on the name alone, one of these was
+    // dropped as a duplicate of the other — a silent loss of half a plugin's
+    // surface, reported as "shadowed by an earlier source" when there was only
+    // ever one source.
+    let bundle = plugin_with_a_shared_name("dual");
+    let wd = tmp("dual-wd");
+    let p = Profile::from_text(
+        &json!({
+            "name": "p", "harnesses": ["claude-code"],
+            "sources": [{ "plugin": { "url": bundle.to_string_lossy() } }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let r = profile::resolve(&p, &wd, None).unwrap();
+    let mut got: Vec<String> = r
+        .capabilities
+        .iter()
+        .map(|c| format!("{}:{}", c.manifest.kind.as_str(), c.manifest.id))
+        .collect();
+    got.sort();
+    assert_eq!(got, vec!["command:status", "skill:status"]);
+    assert!(
+        !r.warnings.iter().any(|w| w.contains("shadowed")),
+        "neither shadows the other: {:?}",
+        r.warnings
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+    let _ = std::fs::remove_dir_all(&bundle);
+}
+
+#[test]
+fn the_bare_id_clash_warning_only_fires_within_a_kind() {
+    // The warning tells you to rename one of them. Firing it across kinds meant
+    // proposing a fix for a problem the user did not have: a skill emits to
+    // `skills/<id>/SKILL.md` and a command to `commands/<id>.md`, so there is
+    // no shared filename to clash over.
+    let bundle = plugin_with_a_shared_name("dual-warn");
+    let wd = tmp("dual-warn-wd");
+    let p = Profile::from_text(
+        &json!({
+            "name": "p", "harnesses": ["claude-code"],
+            "sources": [{ "plugin": { "url": bundle.to_string_lossy() } }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let r = profile::resolve(&p, &wd, None).unwrap();
+    assert!(
+        !r.warnings.iter().any(|w| w.contains("bare id")),
+        "different kinds are not a filename clash: {:?}",
+        r.warnings
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+    let _ = std::fs::remove_dir_all(&bundle);
+}
+
+#[test]
+fn a_plugin_can_be_reached_as_a_transitive_dependency() {
+    // The sharp edge worth pinning: the plugin's *name* is the namespace, not a
+    // capability, so a dependency must name something inside it. Depending on
+    // "dual" acquires the bundle and still reports the requirement unmet.
+    let bundle = plugin_with_a_shared_name("dep");
+    let wd = tmp("dep-wd");
+    let manifest = format!(
+        "id: needs-it\n\
+         name: Needs It\n\
+         description: depends on a capability inside a plugin\n\
+         runtime:\n  requires: [python3]\n\
+         run:\n  command: python3\n  args: [x.py]\n\
+         events:\n  - phase: pre\n    subject: tool\n    tool_class: any\n\
+         dependencies:\n\
+         \x20 status:\n\
+         \x20   version: \"*\"\n\
+         \x20   relation: requires\n\
+         \x20   source:\n\
+         \x20     plugin:\n\
+         \x20       url: {}\n",
+        bundle.to_string_lossy()
+    );
+    write(&wd.join("caps/needs-it/capability.yaml"), &manifest);
+    write(&wd.join("caps/needs-it/x.py"), "print(1)\n");
+    let p = Profile::from_text(
+        &json!({
+            "name": "p", "harnesses": ["claude-code"],
+            "resolution": "transitive", "transitive_trust": "any",
+            "sources": ["caps"],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let r = profile::resolve(&p, &wd, None).unwrap();
+    let ids: Vec<&str> = r
+        .capabilities
+        .iter()
+        .map(|c| c.manifest.id.as_str())
+        .collect();
+    assert!(ids.contains(&"status"), "the plugin was acquired: {ids:?}");
+    assert!(
+        !r.warnings
+            .iter()
+            .any(|w| w.contains("requires 'status'") && w.contains("no source provides")),
+        "naming a capability inside the plugin satisfies the dependency: {:?}",
+        r.warnings
+    );
+    let _ = std::fs::remove_dir_all(&wd);
+    let _ = std::fs::remove_dir_all(&bundle);
+}

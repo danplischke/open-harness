@@ -81,6 +81,7 @@ oh emit   --harness cursor                                # native registration 
 # Compose & install  (the profile is found in the current directory)
 oh try     git+https://github.com/me/my-skill@v1.2.0      # what it WOULD install, where, and what it asks for — writes nothing
 oh add     git+https://github.com/me/my-skill@v1.2.0      # add a source — kind inferred from the spec
+oh add     'plugin+https://github.com/acme/repo#name=x'   # a Claude plugin bundle, imported as capabilities
 oh resolve                                                # sources → a pinned open-harness.lock
 oh resolve --locked                                       # verify the lock instead of rewriting it (CI)
 oh sync    --global --wire                                # install into ~/ + register hooks — applies to every project
@@ -108,7 +109,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 511 tests, green on Linux/macOS/Windows
+cargo test                            # 518 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -270,10 +271,15 @@ sources:
 ```
 
 Inference reads the spec: `git+…`, `ssh://`, `git@host:path` and `.git` are
-repositories; `#sha256=` makes a digest-pinned archive; `#name=` selects from a
-registry index; anything else is a path. The two kinds a URL alone cannot
-describe say so — an archive without `#sha256=` and an index without `#name=`
-are **refused with the fix in the message**, never guessed at. The tagged form
+repositories; `plugin+…` / `plugin:…` is a Claude plugin bundle; `#sha256=`
+makes a digest-pinned archive; `#name=` selects from a registry index; anything
+else is a path. The kinds a URL alone cannot describe say so — an archive
+without `#sha256=`, an index without `#name=`, and a plugin bundle (whose
+repository is indistinguishable from a capability repo by URL) are **refused
+with the fix in the message**, never guessed at. Pointing a plain path at a
+directory that turns out to hold a `.claude-plugin/` is refused the same way,
+because reading a bundle as a capability directory succeeds while quietly
+missing its MCP servers and hooks. The tagged form
 still works whenever you want to be explicit (or to set a version):
 
 ```yaml
@@ -384,11 +390,22 @@ as capabilities:
 
 ```yaml
 sources:
+  # the spec form, which `oh add` and `oh try` also take
+  - plugin+https://github.com/thedotmack/claude-mem@v13.14.0
+  # the mapping form, for a marketplace publishing several plugins, or a select
   - plugin:
-      url: https://github.com/thedotmack/claude-mem
-      rev: v13.14.0
-      select: { kinds: [skill] }     # optional — the same select every source takes
+      url: https://github.com/ruvnet/ruflo
+      rev: main
+      name: ruflo-core              # which plugin, when the repo is a marketplace
+      select: { kinds: [skill] }    # optional — the same select every source takes
 ```
+
+A plugin can also be reached as a **dependency**: a capability's
+`dependencies:` entry may carry a `source:` naming a plugin, and with
+`resolution: transitive` it is acquired (trust-gated) like any other. Depend on
+a capability *inside* the bundle — `ruflo-core/discover-plugins`, or the bare
+`discover-plugins` — since the plugin's own name becomes the namespace, not a
+capability.
 
 Importing is reverse-compilation, so the honesty rule bites hardest here: **a
 plugin is not uniformly portable.** Its `skills/` `commands/` `agents/` are
@@ -529,7 +546,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `capabilities/` | Real example capabilities — all eight portable kinds, in Python, Node and shell. Document kinds are authored as single files (`SKILL.md`, `RULE.md`, …); `postgres-review` is the one manifest + `body_file` example, and `tests/authoring.rs` gates that neither form becomes the only face of a kind |
 | `docs/` | mdBook site (concepts, authoring, dependencies, runtimes, plugins, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 511 tests: conformance (94) + sourcing & dependencies (67) + new kinds (35) + runtimes & provisioning (31) + `oh import` (31) + config/YAML (24) + trust (23) + deps vocabulary (21) + selection (21) + plugin import (21) + single-file (19) + `oh try` (14) + scopes & wiring (13) + CLI help & completions (13) + state store (12) + JSON→YAML migration (12) + authoring (11) + adapter provenance (9) + `--locked` (9) + unit (7) + CLI arguments (7) + streamable-HTTP (6) + publishing (6) + MCP bridge (3) + capture (2) |
+| `tests/` | 518 tests: conformance (94) + sourcing & dependencies (67) + new kinds (35) + runtimes & provisioning (31) + `oh import` (31) + config/YAML (24) + trust (23) + deps vocabulary (21) + selection (21) + plugin import (28) + single-file (19) + `oh try` (14) + scopes & wiring (13) + CLI help & completions (13) + state store (12) + JSON→YAML migration (12) + authoring (11) + adapter provenance (9) + `--locked` (9) + unit (7) + CLI arguments (7) + streamable-HTTP (6) + publishing (6) + MCP bridge (3) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies
