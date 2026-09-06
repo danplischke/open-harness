@@ -1,0 +1,10 @@
+{
+  "session_id": "1d559174-f1c0-5421-8619-a95975b4bb37",
+  "transcript_path": "/root/.claude/projects/-tmp-claude-0--home-user-1d559174-f1c0-5421-8619-a95975b4bb37-scratchpad-capture-claude/1d559174-f1c0-5421-8619-a95975b4bb37.jsonl",
+  "cwd": "/tmp/claude-0/-home-user/1d559174-f1c0-5421-8619-a95975b4bb37/scratchpad/capture-claude",
+  "scratchpad_dir": "/tmp/claude-0/-tmp-claude-0--home-user-1d559174-f1c0-5421-8619-a95975b4bb37-scratchpad-capture-claude/1d559174-f1c0-5421-8619-a95975b4bb37/scratchpad",
+  "prompt_id": "76bb0386-57f6-4c92-b204-97e209925ebe",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Run exactly this bash command and then stop: echo capture-probe"
+}

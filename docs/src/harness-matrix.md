@@ -28,7 +28,7 @@
 | `post.tool.mcp` | native | native | native | — | — | native | native | native | — | — | — |
 | `post.tool.web` | native | native | native | — | — | native | native | native | — | — | — |
 | `post.model` | — | — | native | — | — | — | — | — | — | — | — |
-| `post.prompt` | — | — | — | — | native | — | native | — | — | — | — |
+| `post.prompt` | native | — | — | — | native | — | native | — | — | — | — |
 | `post.session.start` | native | native | native | native | — | — | native | — | — | — | — |
 | `post.session.end` | native | native | native | — | — | — | native | — | — | — | — |
 | `post.subagent.start` | native | native | — | — | — | — | — | — | — | — | — |
@@ -47,7 +47,7 @@ How each adapter was established. `native` above describes what the adapter targ
 
 | harness | provenance | established against |
 |---|---|---|
-| claude-code | doc-only | Claude Code hooks + settings.json documentation |
+| claude-code | live-captured | Claude Code 2.1.263, recorded via `oh capture` wired as its own hook entrypoint (8 events; exit-2 deny and SessionStart context injection exercised end to end) |
 | codex | doc-fixture | Codex hooks references (agenticcontrolplane.com, developers.openai.com, deepwiki); the exact stdin field names are modeled on Claude's and are the one part not recorded |
 | gemini | doc-only | Gemini CLI hooks documentation |
 | cursor | doc-fixture | Cursor Hooks documentation and deep-dives (blog.gitbutler.com, johnlindquist/cursor-hooks) |
@@ -61,4 +61,4 @@ How each adapter was established. `native` above describes what the adapter targ
 
 Legend: `live-captured` = a payload recorded from a real install (`oh capture`) and committed as a fixture · `doc-fixture` = a fixture built from the vendor's primary docs, decoded by the conformance suite, but never recorded from a live run · `doc-only` = encoded from documentation, no recorded payload.
 
-2 of 11 adapters are backed by a recorded payload. Upgrading one means running `oh capture` against a real install and committing the fixture — see [`tests/fixtures/`](https://github.com/danplischke/open-harness/tree/main/tests/fixtures).
+3 of 11 adapters are backed by a recorded payload. Upgrading one means running `oh capture` against a real install and committing the fixture — see [`tests/fixtures/`](https://github.com/danplischke/open-harness/tree/main/tests/fixtures).

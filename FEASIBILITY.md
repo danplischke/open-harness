@@ -29,11 +29,22 @@ spike — exactly where it breaks.
 - A **16-test conformance suite** (`tests/conformance.rs`), all passing, that
   encodes each harness's contract and runs the capabilities end-to-end.
 
-**Method boundary (important):** the 8 proprietary harnesses are not installed
-here, so their *native runtime* is not exercised. What is exercised for real is
-the part a library actually owns: the event model, the dispatcher, the
-stdio contract, decode/encode translation, and composition. Each harness's
-native convention is encoded from its **documented** contract. Claude Code,
+**Method boundary (important):** most harnesses are not installed here, so their
+*native runtime* is not exercised. What is exercised for real is the part a
+library actually owns: the event model, the dispatcher, the stdio contract,
+decode/encode translation, and composition. Each remaining harness's native
+convention is encoded from its **documented** contract.
+
+**Since updated (#24): Claude Code is no longer in that boundary.** Its adapter
+was recorded off a real 2.1.263 install with `oh capture` — eight native events,
+committed under `tests/fixtures/claude-code/` with provenance sidecars — and the
+two claims that mattered most were exercised against the live harness rather
+than read off a page: an exit-2 `PreToolUse` hook really blocked a tool call
+with its stderr as the reason (Finding 3's exit-2 family, confirmed), and a
+`SessionStart` hook's stdout really was injected into the model's context. The
+recording also *corrected* the mapping in the direction nobody expects: `Stop`
+fires at the end of an agent's response, so `post.prompt` was supported all
+along and the matrix had it as Unsupported. Claude Code,
 Gemini, Windsurf, Cline are high-confidence; **Codex and Cursor** (once
 `MEDIUM CONFIDENCE`) have since been validated against primary docs and their
 adapters corrected — Cursor's per-event snake_case payloads and `permission`

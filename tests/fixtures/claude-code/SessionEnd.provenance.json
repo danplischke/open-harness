@@ -1,0 +1,9 @@
+{
+  "kind": "live-captured",
+  "fixture": "SessionEnd.stdin.json",
+  "harness": "claude-code",
+  "event": "post.session.end",
+  "harness_version": "Claude Code 2.1.263",
+  "recorded_by": "oh 0.1.0",
+  "recorded_at": "2026-09-06T06:33:31Z"
+}
