@@ -228,6 +228,17 @@ impl Source {
         if spec.starts_with("git+") {
             return GitSource::parse_spec(spec).map(Source::Git);
         }
+        // A plugin bundle is not inferable from its URL — the same repository
+        // could be a capability set or a `.claude-plugin` bundle, and the two
+        // read completely differently — so it takes an explicit prefix, the way
+        // `git+` forces a repository. Both spellings are accepted because both
+        // are what people type.
+        if let Some(rest) = spec
+            .strip_prefix("plugin+")
+            .or_else(|| spec.strip_prefix("plugin:"))
+        {
+            return PluginSource::parse_spec(rest).map(Source::Plugin);
+        }
 
         let (locator, fragment) = split_fragment(spec);
         let (path_part, _) = split_rev(locator);
@@ -381,6 +392,69 @@ pub struct GitSource {
     pub subdir: Option<String>,
     #[serde(default, skip_serializing_if = "Select::is_empty")]
     pub select: Select,
+}
+
+impl PluginSource {
+    /// Parse a plugin spec, in the same shape as the git one:
+    ///
+    /// ```text
+    /// plugin+<url>[@<rev>][#name=<plugin>[&subdirectory=<path>]]
+    ///
+    /// plugin+https://github.com/ruvnet/ruflo@main#name=ruflo-core
+    /// plugin:../checkouts/claude-mem
+    /// ```
+    ///
+    /// `@<rev>` makes it a git bundle; without one the locator is a local path,
+    /// so a plugin checked out beside your profile needs no git at all — the
+    /// same rule the mapping form already used. `#name=` selects one plugin
+    /// from a marketplace repository publishing several.
+    ///
+    /// Note `#name=` means something different here than it does on a bare URL,
+    /// where it selects from a registry index. That is not a clash: the prefix
+    /// has already decided which kind of source this is, and a fragment is read
+    /// in the context of its source.
+    pub fn parse_spec(spec: &str) -> Result<PluginSource, String> {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return Err(
+                "empty plugin spec — expected `plugin+<url>[@<rev>][#name=<plugin>]`".to_string(),
+            );
+        }
+        let (locator, fragment) = split_fragment(spec);
+        let mut name = None;
+        let mut subdir = None;
+        if let Some(f) = fragment {
+            for part in f.split('&') {
+                if let Some(v) = part.strip_prefix("name=") {
+                    name = Some(v.to_string()).filter(|v: &String| !v.is_empty());
+                } else if let Some(v) = part.strip_prefix("subdirectory=") {
+                    subdir =
+                        Some(v.trim_matches('/').to_string()).filter(|v: &String| !v.is_empty());
+                } else if !part.is_empty() {
+                    return Err(format!(
+                        "plugin spec '{spec}' has an unknown fragment '{part}' — \
+                         expected `name=<plugin>` or `subdirectory=<path>`"
+                    ));
+                }
+            }
+        }
+        let (url, rev) = split_rev(locator);
+        if url.is_empty() {
+            return Err(format!("plugin spec '{spec}' has no URL or path"));
+        }
+        if rev.as_deref().is_some_and(str::is_empty) {
+            return Err(format!(
+                "plugin spec '{spec}' has an empty revision after '@'"
+            ));
+        }
+        Ok(PluginSource {
+            url: url.to_string(),
+            rev,
+            subdir,
+            name,
+            select: Select::default(),
+        })
+    }
 }
 
 impl GitSource {
@@ -1096,12 +1170,21 @@ struct Selection {
 /// discovered. That limit is deliberate at this scale, and the conflict report
 /// says what was asked and by whom rather than pretending to have searched.
 fn select(candidates: Vec<Candidate>, warnings: &mut Vec<String>) -> Selection {
-    // Group by qualified name, preserving source order within each group.
-    let mut groups: Vec<(String, Vec<Candidate>)> = Vec::new();
+    // Group by qualified name **and kind**, preserving source order within each
+    // group. Kind belongs in the key because two capabilities that share a name
+    // but not a kind are not two versions of one thing — a plugin routinely
+    // ships `review` as both a skill and a command, and they land at different
+    // paths (`skills/review/SKILL.md` vs `commands/review.md`), so neither
+    // shadows the other. Keying on the name alone silently dropped one of them.
+    //
+    // Dependencies still resolve by name: a `requires: review` is satisfied by
+    // whichever kinds of `review` are present, which is what a dependent means.
+    let mut groups: Vec<((String, &'static str), Vec<Candidate>)> = Vec::new();
     for c in candidates {
-        match groups.iter_mut().find(|(n, _)| *n == c.name) {
+        let key = (c.name.clone(), c.cap.manifest.kind.as_str());
+        match groups.iter_mut().find(|(k, _)| *k == key) {
             Some((_, list)) => list.push(c),
-            None => groups.push((c.name.clone(), vec![c])),
+            None => groups.push((key, vec![c])),
         }
     }
     for (_, list) in &mut groups {
@@ -1111,7 +1194,9 @@ fn select(candidates: Vec<Candidate>, warnings: &mut Vec<String>) -> Selection {
     // Pass 1: the preferred candidate of each name, used only to read
     // requirements off (see the note about backtracking above).
     let preferred: Vec<&Candidate> = groups.iter().filter_map(|(_, l)| l.first()).collect();
-    let known: Vec<String> = groups.iter().map(|(n, _)| n.clone()).collect();
+    let mut known: Vec<String> = groups.iter().map(|((n, _), _)| n.clone()).collect();
+    known.sort();
+    known.dedup();
     let aliases = build_aliases(&preferred);
 
     // Pass 2: every `requires` edge, indexed by the name it constrains.
@@ -1137,7 +1222,7 @@ fn select(candidates: Vec<Candidate>, warnings: &mut Vec<String>) -> Selection {
 
     // Pass 3: pick, honoring source order but skipping vetoed candidates.
     let mut capabilities = Vec::new();
-    for (name, list) in groups {
+    for ((name, _kind), list) in groups {
         let asks = demands.get(&name).cloned().unwrap_or_default();
         let combined = asks
             .iter()
@@ -1225,9 +1310,10 @@ fn build_aliases(candidates: &[&Candidate]) -> HashMap<String, String> {
 /// 3. a `replaces` alias;
 /// 4. a bare id that is unique across everything composed.
 ///
-/// An ambiguous bare id (step 4 with several matches) resolves to nothing, and
-/// the caller reports it as unmet — guessing between two strangers' capabilities
-/// is exactly the failure qualified names exist to prevent.
+/// An ambiguous bare id (step 4 matching several *distinct* qualified names)
+/// resolves to nothing, and the caller reports it as unmet — guessing between
+/// two strangers' capabilities is exactly the failure qualified names exist to
+/// prevent. One qualified name appearing under several kinds is not ambiguity.
 fn resolve_dep_name(
     written: &str,
     requirer: &LoadedCapability,
@@ -1246,11 +1332,20 @@ fn resolve_dep_name(
     if let Some(target) = aliases.get(written) {
         return Some(target.clone());
     }
-    let mut bare = known
+    // Distinct qualified names, not distinct entries: one capability can appear
+    // under several kinds (a plugin's `status` skill and `status` command share
+    // a qualified name), and that is not the ambiguity this guards against. The
+    // failure worth refusing is two *different* strangers' capabilities both
+    // answering to one bare id.
+    let mut distinct: Vec<&str> = known
         .iter()
-        .filter(|n| n.rsplit('/').next() == Some(written));
-    match (bare.next(), bare.next()) {
-        (Some(only), None) => Some(only.clone()),
+        .filter(|n| n.rsplit('/').next() == Some(written))
+        .map(String::as_str)
+        .collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    match distinct.as_slice() {
+        [only] => Some((*only).to_string()),
         _ => None,
     }
 }
@@ -1271,30 +1366,38 @@ struct ResolvedSource {
     caps: Vec<LoadedCapability>,
 }
 
-/// Warn when two distinct capabilities share a bare `id`.
+/// Warn when two distinct capabilities of the **same kind** share a bare `id`.
 ///
 /// Namespacing lets `acme/mem-search` and `thedotmack/mem-search` both compose,
-/// which is right — but the *emitted* filenames use the bare id, so they will
-/// land on the same `.claude/skills/mem-search/SKILL.md`. `sync` already handles
-/// that collision honestly (first producer wins, loudly flagged), and this warns
-/// at resolve time so the clash is visible before anything is written, with the
-/// fix named: override the path per harness, or rename the id.
+/// which is right — but the *emitted* filenames use the bare id, so two skills
+/// called `mem-search` land on the same `.claude/skills/mem-search/SKILL.md`.
+/// `sync` handles that collision honestly (first producer wins, loudly flagged),
+/// and this warns at resolve time so it is visible before anything is written,
+/// with the fix named: override the path per harness, or rename the id.
+///
+/// Kind is part of the key because a filename is only shared *within* a kind. A
+/// plugin routinely ships one name as both a skill and a command, and those
+/// emit to `skills/<id>/SKILL.md` and `commands/<id>.md` — different files, no
+/// clash. Keying on the bare id alone reported those as colliding and told the
+/// user to rename one, which would have been a fix for a problem they did not
+/// have. `sync`'s own grouping by real on-disk path stays the authority for any
+/// overlap this pre-check cannot see.
 fn warn_on_bare_id_collisions(caps: &[LoadedCapability], warnings: &mut Vec<String>) {
-    let mut by_id: HashMap<&str, Vec<String>> = HashMap::new();
+    let mut by_id: HashMap<(&str, &'static str), Vec<String>> = HashMap::new();
     for cap in caps {
         by_id
-            .entry(cap.manifest.id.as_str())
+            .entry((cap.manifest.id.as_str(), cap.manifest.kind.as_str()))
             .or_default()
             .push(cap.qualified_name());
     }
-    let mut collisions: Vec<(&str, Vec<String>)> = by_id
+    let mut collisions: Vec<((&str, &'static str), Vec<String>)> = by_id
         .into_iter()
         .filter(|(_, names)| names.len() > 1)
         .collect();
-    collisions.sort_by(|a, b| a.0.cmp(b.0));
-    for (id, names) in collisions {
+    collisions.sort_by(|a, b| a.0.cmp(&b.0));
+    for ((id, kind), names) in collisions {
         warnings.push(format!(
-            "bare id '{id}' is claimed by {} capabilities ({}) — they compose, but \
+            "bare id '{id}' is claimed by {} {kind} capabilities ({}) — they compose, but \
              emit to the same paths; set a per-harness `overrides.path` or rename one",
             names.len(),
             names.join(", ")
@@ -1527,7 +1630,9 @@ fn resolve_source(
 ) -> Result<Option<ResolvedSource>, String> {
     match source {
         Source::Local(l) => {
-            let caps = crate::manifest::discover(&workdir.join(&l.path))?;
+            let dir = workdir.join(&l.path);
+            refuse_plugin_read_as_directory(&dir, &l.path)?;
+            let caps = crate::manifest::discover(&dir)?;
             Ok(Some(ResolvedSource {
                 origin: l.path.clone(),
                 kind: "local",
@@ -1560,6 +1665,41 @@ fn resolve_source(
         Source::Registry(r) => resolve_registry(r, workdir, lock, warnings),
         Source::Plugin(p) => resolve_plugin(p, workdir, lock, warnings),
     }
+}
+
+/// Refuse to scan a `.claude-plugin` bundle as if it were a capability set.
+///
+/// Both are "a directory with files in it", so scanning a plugin as a local
+/// source *succeeds* — and produces a quietly wrong answer: the `SKILL.md`s are
+/// picked up as bare single-file capabilities with no version and no namespace,
+/// while the plugin's `.mcp.json` and `hooks/hooks.json` are not seen at all.
+/// A plausible partial reading is the worst failure this project can have, so
+/// this is an error naming the fix rather than a warning attached to output the
+/// user is already reading as correct.
+fn refuse_plugin_read_as_directory(dir: &Path, spec: &str) -> Result<(), String> {
+    let marker = dir.join(".claude-plugin");
+    let is_plugin = marker.join("plugin.json").is_file();
+    let is_marketplace = marker.join("marketplace.json").is_file();
+    if !is_plugin && !is_marketplace {
+        return Ok(());
+    }
+    let what = if is_marketplace {
+        "a Claude plugin marketplace"
+    } else {
+        "a Claude plugin bundle"
+    };
+    let hint = if is_marketplace {
+        format!("plugin:{spec}#name=<plugin>")
+    } else {
+        format!("plugin:{spec}")
+    };
+    Err(format!(
+        "'{spec}' is {what} (it has a .claude-plugin/), not a capability directory. \
+         Reading it as one would silently miss its MCP servers and hooks and drop \
+         every version and namespace. Import it instead:\n    {hint}\n\
+         If you really meant to scan a directory of open-harness capabilities, \
+         point at that subdirectory."
+    ))
 }
 
 /// Resolve a plugin bundle: fetch it (git or a local path), locate the plugin

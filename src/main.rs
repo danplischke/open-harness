@@ -153,6 +153,9 @@ struct Opts {
     harness: Option<String>,
     event: Option<String>,
     capabilities: PathBuf,
+    /// Whether `--capabilities` was given explicitly. An explicit directory
+    /// outranks a profile that merely happens to sit in the working directory.
+    capabilities_explicit: bool,
     profile: Option<PathBuf>,
     into: Option<PathBuf>,
     dry_run: bool,
@@ -224,6 +227,7 @@ fn parse_opts(rest: &[String]) -> Opts {
         harness: None,
         event: None,
         capabilities: PathBuf::from("capabilities"),
+        capabilities_explicit: false,
         profile: None,
         into: None,
         dry_run: false,
@@ -294,6 +298,7 @@ fn parse_opts(rest: &[String]) -> Opts {
             }
             "--capabilities" => {
                 o.capabilities = PathBuf::from(value_for(rest, i));
+                o.capabilities_explicit = true;
                 i += 2;
             }
             "--profile" => {
@@ -1785,9 +1790,50 @@ fn cmd_check(rest: &[String]) {
         return;
     }
 
-    let caps = load_caps(&o);
+    // Without `--into`, `check` answers "what would each of these install, and
+    // where does it degrade" — and the set to answer for is the profile's when
+    // there is one. It used to always scan `./capabilities`, silently ignoring
+    // the `--profile` its own help advertised, so the question could not be
+    // asked at all about a git, registry or plugin source: the only way to see
+    // what a plugin did to your harnesses was to install it first.
+    //
+    // An explicit `--capabilities` still wins, so the ad-hoc mode is intact and
+    // a profile sitting in the working directory cannot hijack it.
+    let profile_path = if o.capabilities_explicit {
+        None
+    } else {
+        o.profile
+            .clone()
+            .or_else(|| profile::find_profile(std::path::Path::new(".")))
+    };
+    let (caps, harnesses) = match profile_path {
+        Some(path) => {
+            let resolved = resolve_profile_opts(&path, o.locked);
+            let harnesses = if o.harness.is_some() {
+                select_harnesses(&o)
+            } else if resolved.harnesses.is_empty() {
+                ALL.to_vec()
+            } else {
+                resolved.harnesses
+            };
+            println!(
+                "profile: {} ({} capabilities)\n",
+                resolved.profile,
+                resolved.capabilities.len()
+            );
+            (resolved.capabilities, harnesses)
+        }
+        None => {
+            let caps = load_caps(&o);
+            if caps.is_empty() {
+                eprintln!("no capabilities found under {}", o.capabilities.display());
+                exit(1);
+            }
+            (caps, select_harnesses(&o))
+        }
+    };
     if caps.is_empty() {
-        eprintln!("no capabilities found under {}", o.capabilities.display());
+        eprintln!("no capabilities to check");
         exit(1);
     }
     for cap in &caps {
@@ -1812,8 +1858,12 @@ fn cmd_check(rest: &[String]) {
             }
         }
         let k = kind_impl(cap.manifest.kind);
-        for h in ALL {
-            let plan = k.plan(cap, h);
+        // The harnesses the *question* is about: a profile's targets, or one
+        // named with `--harness`. This used to be hardcoded to all eleven, so a
+        // profile targeting three still printed eight rows nobody asked for and
+        // `--harness` was accepted and ignored.
+        for h in &harnesses {
+            let plan = k.plan(cap, *h);
             let status = match &plan.installability {
                 Installability::Clean => "installable — clean".to_string(),
                 Installability::Degraded(d) => format!("installable — {d}"),
@@ -1831,7 +1881,7 @@ fn cmd_check(rest: &[String]) {
     // "installable — clean" is a claim about the *adapter*, so it inherits that
     // adapter's provenance. Saying so here is the difference between "this will
     // work" and "this is what we believe the harness reads".
-    print_provenance_note(&ALL);
+    print_provenance_note(&harnesses);
 }
 
 // ---- sync / check reporting ----------------------------------------------
