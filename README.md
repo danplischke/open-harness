@@ -19,9 +19,11 @@ model, Python + Node bindings, and a single `oh` CLI — built to a strict
 declared and surfaced (a loud "degraded" note or an "unsupported" reason), never
 silently dropped. It began as a feasibility spike (see
 [`FEASIBILITY.md`](./FEASIBILITY.md)); what's deferred now is precise and listed
-at the end — the language bindings aren't yet published to npm/PyPI, and the
-proprietary harnesses' adapters are encoded from documentation + recorded
-fixtures rather than exercised against a live install.
+at the end — the language bindings aren't yet published to npm/PyPI, and ten of
+the eleven adapters are still encoded from documentation + recorded fixtures
+rather than exercised against a live install. Claude Code is the exception: its
+adapter is recorded from a real install, deny path and context channel
+included.
 
 ## The contract (this is the whole point)
 
@@ -68,6 +70,9 @@ oh doctor                                                 # check interpreters, 
 
 # Run & inspect
 oh run    --harness claude-code --event pre.tool.any      # a harness's single native hook entrypoint
+oh state  set gate.phase plan                             # the scoped KV store a capability keeps state in
+oh state  get gate.phase                                  # --scope user|project|session (default: project)
+oh state  prune --older-than 30                           # drop abandoned session stores
 oh matrix                                                 # the (event × harness) support grid + adapter provenance
 oh matrix --provenance                                    # just: which adapters are verified vs merely documented
 oh check                                                  # per-capability installability across all harnesses
@@ -103,7 +108,7 @@ oh mcp call --id echo-bridge --tool echo --json '{"text":"hi"}'
 ### Try it in 30 seconds
 
 ```sh
-cargo test                            # 479 tests, green on Linux/macOS/Windows
+cargo test                            # 511 tests, green on Linux/macOS/Windows
 bash examples/walkthrough.sh          # the whole lifecycle: author → sign → compose → sync → dispatch → report
 bash examples/demo.sh                 # one decision, four native deny conventions
 cargo run -- matrix                   # the honest support grid across 11 harnesses
@@ -506,6 +511,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `src/config.rs` | open-harness's own config files: YAML out, YAML-or-JSON in — the boundary against a harness's native formats |
 | `src/dispatch.rs` | Single-entrypoint dispatcher: concurrent fan-out, merge, policy-driven fail-closed |
 | `src/runtime.rs` | Hardened execution: per-capability timeout, output cap, error taxonomy, cross-platform interpreters, `runtime.requires` pre-flight |
+| `src/state.rs` | The scoped key-value store (`oh state`): user / project / session, atomic + locked, keyed by the project but stored outside it |
 | `src/model.rs` | The canonical stdio contract (payload in, decision out) |
 | `src/sync.rs` | Compose a capability set, converge it into a project, detect drift |
 | `src/profile.rs` | Profiles + sources (local / git / http archive / registry / plugin), qualified names, selection, opt-in transitive acquisition → `open-harness.lock` |
@@ -523,7 +529,7 @@ in-process dispatch test. See [`bindings/README.md`](./bindings/README.md).
 | `capabilities/` | Real example capabilities — all eight portable kinds, in Python, Node and shell. Document kinds are authored as single files (`SKILL.md`, `RULE.md`, …); `postgres-review` is the one manifest + `body_file` example, and `tests/authoring.rs` gates that neither form becomes the only face of a kind |
 | `docs/` | mdBook site (concepts, authoring, dependencies, runtimes, plugins, generated matrix) |
 | `spec/` | The frozen `hook@1` protocol + JSON Schemas |
-| `tests/` | 493 tests: conformance (88) + sourcing & dependencies (67) + new kinds (35) + runtimes & provisioning (31) + `oh import` (31) + config/YAML (24) + trust (23) + deps vocabulary (21) + selection (21) + plugin import (21) + single-file (19) + `oh try` (14) + scopes & wiring (13) + CLI help & completions (13) + JSON→YAML migration (12) + authoring (11) + adapter provenance (9) + `--locked` (9) + unit (7) + CLI arguments (7) + streamable-HTTP (6) + publishing (6) + MCP bridge (3) + capture (2) |
+| `tests/` | 511 tests: conformance (94) + sourcing & dependencies (67) + new kinds (35) + runtimes & provisioning (31) + `oh import` (31) + config/YAML (24) + trust (23) + deps vocabulary (21) + selection (21) + plugin import (21) + single-file (19) + `oh try` (14) + scopes & wiring (13) + CLI help & completions (13) + state store (12) + JSON→YAML migration (12) + authoring (11) + adapter provenance (9) + `--locked` (9) + unit (7) + CLI arguments (7) + streamable-HTTP (6) + publishing (6) + MCP bridge (3) + capture (2) |
 | `.github/workflows/` | `ci.yml` (test on Linux/macOS/Windows; fmt+clippy; docs + matrix drift gate; e2e walkthrough; TLS feature) + `release.yml` (cross-platform `oh` binaries + checksums on a version tag) |
 
 ## Dependencies
@@ -547,18 +553,31 @@ library is for, not something to hand-roll. We still emit our own frontmatter.
 ## Scope & honesty
 
 - **Supported is not the same claim as verified, and the tool says which.**
-  Eight of the eleven adapters are encoded from primary documentation and have
-  never been run against the harness they describe. That is now first-class
-  output rather than a footnote: `Harness::provenance()` labels each adapter
+  Ten of the eleven adapters are encoded from primary documentation and have
+  never been run against the harness they describe. That is first-class output
+  rather than a footnote: `Harness::provenance()` labels each adapter
   `live-captured`, `doc-fixture` or `doc-only` with what it was established
   against, and `oh matrix`, `oh check` and `oh emit` all carry it — `emit`
-  especially, since that output gets pasted into a real config. Today **2 of 11**
-  are backed by a recorded payload (Codex and Cursor, doc-derived, under
-  [`tests/fixtures/`](./tests/fixtures/)) and **none is live-captured**.
-  The claim is checked, not asserted: `oh capture` writes a provenance sidecar
-  alongside each fixture, and `tests/provenance.rs` fails if a declaration
-  overstates *or* understates what is committed. Upgrading a harness is four
-  steps, documented in [`tests/fixtures/README.md`](./tests/fixtures/README.md).
+  especially, since that output gets pasted into a real config. Today **3 of 11**
+  are backed by a recorded payload, and exactly one — **Claude Code** — is
+  **live-captured**: eight native events recorded off Claude Code 2.1.263 with
+  `oh capture` wired as its own hook entrypoint, under
+  [`tests/fixtures/claude-code/`](./tests/fixtures/claude-code/). Codex and
+  Cursor remain doc-derived fixtures. The claim is checked, not asserted:
+  `oh capture` writes a provenance sidecar alongside each fixture, and
+  `tests/provenance.rs` fails if a declaration overstates *or* understates what
+  is committed. Upgrading a harness is four steps, documented in
+  [`tests/fixtures/README.md`](./tests/fixtures/README.md).
+- **What the live capture changed.** Recording beat reading the docs, in both
+  directions. It confirmed the `tool_name`/`tool_input` pair, `session_id`,
+  `cwd`, and that subagent hooks fire on *both* boundaries. It also caught the
+  matrix **understating** the harness: `Stop` fires when the agent finishes
+  responding, which is the post half of the prompt subject, and the adapter had
+  it as Unsupported. Claude's arm is now separate from Codex's so that finding
+  is not credited to an adapter that has no evidence for it. The two mechanisms
+  the runtime rests on were exercised end to end rather than assumed: an exit-2
+  `PreToolUse` hook really did block a Bash call with its stderr as the reason,
+  and a `SessionStart` hook's stdout really did reach the model as context.
 - Execution is **cross-platform**: interpreters are resolved per-OS (no `#!`
   reliance — `python3`→`python` on Windows, `PATHEXT` honored), and the Python +
   Node capabilities run on Linux/macOS/Windows in CI.

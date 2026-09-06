@@ -2149,3 +2149,143 @@ fn the_session_field_is_a_backward_compatible_minor_bump() {
         "an absent session must not serialize as null: {wire}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Claude Code — decoded from payloads recorded off a live install (#24).
+//
+// Everything below is asserted against bytes Claude Code 2.1.263 actually sent,
+// not against a transcription of its documentation. That is what lets
+// `Harness::Claude` claim `Provenance::LiveCaptured`; `tests/provenance.rs`
+// holds the declaration and the corpus against each other.
+// ---------------------------------------------------------------------------
+
+/// The tool events carry the `tool_name` / `tool_input` pair the adapter
+/// assumed, and one generic event covers every tool class (no fan-out).
+#[test]
+fn claude_live_tool_fixtures_decode_to_canonical() {
+    let ev = NormEvent::tool(Phase::Pre, ToolClass::Any);
+    let pre = Harness::Claude.decode(&fixture("claude-code/PreToolUse.stdin.json"), &ev);
+    let tool = pre.tool.expect("a tool event carries a tool");
+    assert_eq!(tool.name, "Bash");
+    assert_eq!(tool.input["command"], json!("echo capture-probe"));
+    assert!(pre.session.is_some(), "Claude sends session_id");
+    assert!(pre.cwd.is_some(), "Claude sends cwd");
+    assert!(pre.blocking, "a pre-tool gate can actually deny here");
+
+    // The post payload adds `tool_response`, and is not blocking.
+    let post = Harness::Claude.decode(
+        &fixture("claude-code/PostToolUse.stdin.json"),
+        &NormEvent::tool(Phase::Post, ToolClass::Any),
+    );
+    assert_eq!(post.tool.unwrap().name, "Bash");
+    assert_eq!(post.raw["tool_response"]["stdout"], json!("capture-probe"));
+    assert!(!post.blocking);
+}
+
+/// `UserPromptSubmit` carries the prompt under `prompt`, and the session id
+/// ties it to the tool calls that follow.
+#[test]
+fn claude_live_prompt_fixture_carries_the_prompt_and_session() {
+    let p = Harness::Claude.decode(
+        &fixture("claude-code/UserPromptSubmit.stdin.json"),
+        &NormEvent::simple(Phase::Pre, SubjectKind::Prompt),
+    );
+    assert!(p.prompt.unwrap().contains("capture-probe"));
+    let tool = Harness::Claude.decode(
+        &fixture("claude-code/PreToolUse.stdin.json"),
+        &NormEvent::tool(Phase::Pre, ToolClass::Any),
+    );
+    assert_eq!(
+        p.session, tool.session,
+        "the same session id groups a prompt with the tool calls it caused — \
+         the property a per-session capability keys on"
+    );
+}
+
+/// The finding the capture produced: `Stop` fires when the agent finishes
+/// responding, so `post.prompt` is supported on Claude. The adapter used to
+/// call it Unsupported, i.e. the matrix understated the harness.
+#[test]
+fn claude_post_prompt_lands_on_stop_which_the_matrix_used_to_deny() {
+    let ev = NormEvent::simple(Phase::Post, SubjectKind::Prompt);
+    match Harness::Claude.support(&ev) {
+        Support::Native(name, _) => assert_eq!(name, "Stop"),
+        other => panic!("post.prompt should be native `Stop` on Claude, got {other:?}"),
+    }
+    let p = Harness::Claude.decode(&fixture("claude-code/Stop.stdin.json"), &ev);
+    assert!(p.session.is_some());
+    assert!(
+        !p.blocking,
+        "a turn-end notification cannot veto anything already said"
+    );
+    assert!(
+        p.raw["last_assistant_message"].is_string(),
+        "Stop carries what the agent just said — the hook a session recorder wants"
+    );
+
+    // Codex shares the native event names but not the evidence, so it must not
+    // have inherited this claim.
+    assert!(matches!(
+        Harness::Codex.support(&ev),
+        Support::Unsupported(_)
+    ));
+}
+
+/// Session start and end are distinct events, and distinct from `Stop`.
+#[test]
+fn claude_session_boundaries_are_separate_events_from_the_turn_boundary() {
+    let mut start = NormEvent::simple(Phase::Pre, SubjectKind::Session);
+    start.boundary = Some(Boundary::Start);
+    let mut end = NormEvent::simple(Phase::Post, SubjectKind::Session);
+    end.boundary = Some(Boundary::End);
+
+    assert!(
+        matches!(Harness::Claude.support(&start), Support::Native(n, _) if n == "SessionStart")
+    );
+    assert!(matches!(Harness::Claude.support(&end), Support::Native(n, _) if n == "SessionEnd"));
+
+    let s = Harness::Claude.decode(&fixture("claude-code/SessionStart.stdin.json"), &start);
+    assert_eq!(s.raw["source"], json!("startup"));
+    let e = Harness::Claude.decode(&fixture("claude-code/SessionEnd.stdin.json"), &end);
+    assert!(e.raw["reason"].is_string(), "SessionEnd says why it ended");
+    assert_eq!(s.session, e.session, "one session, both boundaries");
+}
+
+/// Subagent hooks exist on both boundaries — the doc-derived mapping was right,
+/// and now it is recorded. Both payloads name the agent, which is what a
+/// per-subagent capability needs to correlate them.
+#[test]
+fn claude_subagent_boundaries_are_live_and_name_the_agent() {
+    let mut start = NormEvent::simple(Phase::Pre, SubjectKind::Subagent);
+    start.boundary = Some(Boundary::Start);
+    let mut end = NormEvent::simple(Phase::Post, SubjectKind::Subagent);
+    end.boundary = Some(Boundary::End);
+
+    let a = Harness::Claude.decode(&fixture("claude-code/SubagentStart.stdin.json"), &start);
+    let b = Harness::Claude.decode(&fixture("claude-code/SubagentStop.stdin.json"), &end);
+    assert_eq!(a.raw["agent_type"], json!("Explore"));
+    assert_eq!(
+        a.raw["agent_id"], b.raw["agent_id"],
+        "the agent id pairs a subagent's start with its stop"
+    );
+}
+
+/// The deny path, against the real thing: an exit-2 `PreToolUse` hook blocked
+/// the Bash call on the live install and its stderr came back as the reason.
+/// This asserts the encoder produces exactly that shape.
+#[test]
+fn claude_deny_encodes_as_the_exit_2_the_live_install_honored() {
+    let ev = NormEvent::tool(Phase::Pre, ToolClass::Any);
+    assert!(matches!(Harness::Claude.deny_style(), DenyStyle::Exit2));
+    let r = Harness::Claude.encode(
+        &Decision {
+            decision: Verdict::Deny,
+            reason: "shell is disabled by open-harness policy".into(),
+            context_append: None,
+            modified_input: None,
+        },
+        &ev,
+    );
+    assert_eq!(r.exit_code, 2);
+    assert!(r.stderr.contains("shell is disabled"));
+}

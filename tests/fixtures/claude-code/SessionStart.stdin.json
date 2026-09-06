@@ -1,0 +1,8 @@
+{
+  "session_id": "1d559174-f1c0-5421-8619-a95975b4bb37",
+  "transcript_path": "/root/.claude/projects/-tmp-claude-0--home-user-1d559174-f1c0-5421-8619-a95975b4bb37-scratchpad-capture-claude/1d559174-f1c0-5421-8619-a95975b4bb37.jsonl",
+  "cwd": "/tmp/claude-0/-home-user/1d559174-f1c0-5421-8619-a95975b4bb37/scratchpad/capture-claude",
+  "scratchpad_dir": "/tmp/claude-0/-tmp-claude-0--home-user-1d559174-f1c0-5421-8619-a95975b4bb37-scratchpad-capture-claude/1d559174-f1c0-5421-8619-a95975b4bb37/scratchpad",
+  "hook_event_name": "SessionStart",
+  "source": "startup"
+}

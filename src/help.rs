@@ -304,6 +304,60 @@ pub const COMMANDS: &[Command] = &[
         examples: &[],
     },
     Command {
+        name: "state",
+        group: "runtime",
+        summary: "read and write the scoped key-value store capabilities keep state in",
+        synopsis: &[
+            "state get|delete KEY [--scope S]",
+            "state set KEY [VALUE] [--scope S]",
+            "state list|path [--scope S]",
+            "state prune [--older-than DAYS]",
+        ],
+        details: "A capability is a process that lives for milliseconds, so what it \
+                  must remember between events lives here instead of in a file it \
+                  invents. Three scopes: `user` (this machine), `project` (default \
+                  — this codebase) and `session` (one harness conversation, keyed \
+                  by the payload's `session` field). Project and session state is \
+                  stored under ~/.open-harness/state keyed BY the project path, \
+                  never inside the project — runtime state in a repository dirties \
+                  `git status` and breaks a read-only checkout. Writes are atomic \
+                  and locked, because the dispatcher runs capabilities \
+                  concurrently and an unlocked read-modify-write would lose one of \
+                  them. `get` exits 1 when the key is absent, so a caller can tell \
+                  that apart from an empty value; VALUE may be omitted on `set` to \
+                  read it from stdin. Session stores are the only unbounded scope, \
+                  which is what `prune` is for.",
+        flags: &[
+            Flag {
+                spec: "--scope S",
+                help: "which store: user | project | session (default: project)",
+            },
+            Flag {
+                spec: "--session ID",
+                help: "the harness session id, required by --scope session",
+            },
+            F_INTO,
+            Flag {
+                spec: "--older-than DAYS",
+                help: "prune: the age above which a session store is abandoned (default: 30)",
+            },
+        ],
+        examples: &[
+            Example {
+                line: "oh state set gate.phase plan",
+                what: "record a fact about this project",
+            },
+            Example {
+                line: "oh state get gate.phase || echo 'no gate open'",
+                what: "absent keys exit 1, so this reads naturally in a hook",
+            },
+            Example {
+                line: "oh state set task.goal --scope session --session \"$SID\" < summary.txt",
+                what: "keep per-conversation working state, value read from stdin",
+            },
+        ],
+    },
+    Command {
         name: "capture",
         group: "authoring",
         summary: "record a harness's real native hook payload as a fixture",

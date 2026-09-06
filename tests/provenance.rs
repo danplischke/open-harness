@@ -158,24 +158,29 @@ fn every_adapter_states_what_it_was_established_against() {
     }
 }
 
-/// The honest headline: today nothing is live-captured. This is not a wish —
-/// it fails the moment a real capture lands, which is the prompt to update the
-/// README's claim along with it.
+/// The honest headline, pinned so it cannot drift away from the README.
+///
+/// This test used to assert that *nothing* was live-captured, with a message
+/// saying to update it when a real capture landed. Claude Code is that capture:
+/// eight native events recorded off 2.1.263 via `oh capture`. The assertion is
+/// inverted rather than deleted — the count is still the thing the README
+/// quotes, so it must still fail when the evidence changes in either direction.
 #[test]
-fn the_current_state_is_that_no_adapter_is_live_captured_yet() {
+fn only_claude_code_is_live_captured_so_far() {
     let live: Vec<&str> = ALL
         .iter()
         .filter(|h| matches!(h.provenance(), Provenance::LiveCaptured(_)))
         .map(|h| h.id())
         .collect();
-    assert!(
-        live.is_empty(),
-        "{live:?} are now live-captured — good; update this test and the README's \
-         \"encoded from documentation\" caveat to match"
+    assert_eq!(
+        live,
+        vec!["claude-code"],
+        "the set of live-captured adapters changed; update this test and the README's \
+         provenance counts to match"
     );
     let backed = ALL.iter().filter(|h| h.provenance().has_fixture()).count();
     assert_eq!(
-        backed, 2,
+        backed, 3,
         "the number of fixture-backed adapters changed; update the README count"
     );
 }

@@ -1,0 +1,19 @@
+{
+  "session_id": "1d559174-f1c0-5421-8619-a95975b4bb37",
+  "transcript_path": "/root/.claude/projects/-tmp-claude-0--home-user-1d559174-f1c0-5421-8619-a95975b4bb37-scratchpad-capture-claude/1d559174-f1c0-5421-8619-a95975b4bb37.jsonl",
+  "cwd": "/tmp/claude-0/-home-user/1d559174-f1c0-5421-8619-a95975b4bb37/scratchpad/capture-claude",
+  "scratchpad_dir": "/tmp/claude-0/-tmp-claude-0--home-user-1d559174-f1c0-5421-8619-a95975b4bb37-scratchpad-capture-claude/1d559174-f1c0-5421-8619-a95975b4bb37/scratchpad",
+  "prompt_id": "4389860c-59f0-4a1b-a4fc-9d7175dea6b6",
+  "permission_mode": "acceptEdits",
+  "agent_id": "a491651de5dc7fc6d",
+  "agent_type": "Explore",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "agent_transcript_path": "/root/.claude/projects/-tmp-claude-0--home-user-1d559174-f1c0-5421-8619-a95975b4bb37-scratchpad-capture-claude/1d559174-f1c0-5421-8619-a95975b4bb37/subagents/agent-a491651de5dc7fc6d.jsonl",
+  "last_assistant_message": "The full contents of `/tmp/claude-0/-home-user/1d559174-f1c0-5421-8619-a95975b4bb37/scratchpad/capture-claude/README.md` are:\n\n```\nhello from the capture project\n```",
+  "background_tasks": [],
+  "session_crons": []
+}

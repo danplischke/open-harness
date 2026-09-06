@@ -1,9 +1,17 @@
-# Recorded native hook fixtures (#5)
+# Recorded native hook fixtures (#5, #24)
 
-Real native hook stdin payloads for the two harnesses whose adapters were
-`MEDIUM CONFIDENCE`. A live Codex/Cursor install isn't available in this repo, so
-these are **doc-derived fixtures** captured from primary documentation rather
-than a live capture — the adapter tests in `tests/conformance.rs` decode them and
+Real native hook stdin payloads. Two provenances live side by side here, and the
+difference is the whole point of the directory:
+
+- **`claude-code/` is live-captured.** Eight payloads recorded off a real
+  Claude Code 2.1.263 install by wiring `oh capture` as its hook entrypoint and
+  driving a headless session. Each has a sidecar with `"kind":
+  "live-captured"`, which is what lets `Harness::Claude` declare
+  `Provenance::LiveCaptured`. See the Claude Code section below for what the
+  recording changed.
+- **`codex/` and `cursor/` are doc-derived.** A live Codex/Cursor install isn't
+  available in this repo, so these are **doc-derived fixtures** captured from
+  primary documentation rather than a live capture — the adapter tests in `tests/conformance.rs` decode them and
 assert the canonical shape, and encode a deny and assert each harness's real
 native response format.
 
@@ -89,3 +97,47 @@ Sources: Codex hooks references —
 <https://agenticcontrolplane.com/blog/codex-cli-hooks-reference>,
 <https://developers.openai.com/codex/agent-approvals-security>,
 <https://deepwiki.com/openai/codex/3.11-hooks-system>.
+
+## Claude Code — live-captured (#24)
+
+Recorded from **Claude Code 2.1.263** with `oh capture` wired as each hook's
+command in a scratch project, then driven by headless `claude -p` runs. Eight
+native events fired and are committed here with their sidecars:
+
+`SessionStart` · `UserPromptSubmit` · `PreToolUse` · `PostToolUse` · `Stop` ·
+`SessionEnd` · `SubagentStart` · `SubagentStop`
+
+Every payload carries `session_id`, `transcript_path`, `cwd` and
+`hook_event_name`; tool events add the `tool_name` / `tool_input` pair, and
+`PostToolUse` adds `tool_response`. The paths inside are the recording
+container's real paths, left as recorded — sanitising them would make the
+fixture a transcription again.
+
+**What recording changed, in both directions:**
+
+- *Confirmed*: the `tool_name`/`tool_input` convention, `session_id` as the
+  grouping key, `cwd`, one generic tool event for every tool class (no
+  Cursor-style fan-out), and that subagent hooks fire on **both** boundaries —
+  `SubagentStart` was a doc-derived guess and it turned out to be real.
+- *Corrected*: **`Stop` fires when the agent finishes responding to a prompt.**
+  That is the post half of the prompt subject, and the adapter declared
+  `post.prompt` **Unsupported** — the matrix was understating the harness. It is
+  now `Native("Stop")` for Claude only. `Stop` and `SessionEnd` are distinct and
+  both fire: `Stop` once per turn (carrying `last_assistant_message`),
+  `SessionEnd` once when the session ends (carrying `reason`).
+- *Separated*: Claude and Codex previously shared one match arm. Codex is
+  doc-derived, so it must not inherit a finding recorded against Claude; the arm
+  is now split and Codex keeps the documented mapping.
+
+**Mechanisms exercised end to end** (not just decoded — actually run against the
+live install):
+
+- **Deny.** A `PreToolUse` hook exiting 2 with a reason on stderr blocked the
+  `Bash` call, and the reason reached the model. This is `DenyStyle::Exit2`
+  confirmed against the real thing rather than the docs.
+- **Context injection.** A `SessionStart` hook's **stdout** was injected into the
+  model's context — a fact planted that way was recalled in the same session.
+  This is the channel `Decision.context_append` targets on Claude.
+
+Reproducing it needs a real install, so it is not a CI step. The recipe is the
+four-step upgrade above with `--harness claude-code`, one hook per event.

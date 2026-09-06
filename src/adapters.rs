@@ -239,9 +239,19 @@ impl Harness {
             Harness::Cursor => Provenance::DocFixture(
                 "Cursor Hooks documentation and deep-dives (blog.gitbutler.com, johnlindquist/cursor-hooks)",
             ),
+            // Recorded off a real install with `oh capture` (#24): eight native
+            // events fired by Claude Code 2.1.263 into a scratch project, each
+            // with a sidecar under tests/fixtures/claude-code/. The deny signal
+            // and the SessionStart context channel were exercised too — an
+            // exit-2 PreToolUse hook blocked the Bash call and its stderr
+            // reached the model as the reason, and a SessionStart hook's stdout
+            // arrived as context.
+            Harness::Claude => Provenance::LiveCaptured(
+                "Claude Code 2.1.263, recorded via `oh capture` wired as its own hook entrypoint \
+                 (8 events; exit-2 deny and SessionStart context injection exercised end to end)",
+            ),
             // Conventions are well documented and stable, but nothing here has
             // been round-tripped against the real thing.
-            Harness::Claude => Provenance::DocOnly("Claude Code hooks + settings.json documentation"),
             Harness::Gemini => Provenance::DocOnly("Gemini CLI hooks documentation"),
             Harness::Windsurf => Provenance::DocOnly("Windsurf rules + hooks documentation"),
             Harness::Cline => Provenance::DocOnly("Cline hooks + .clinerules documentation"),
@@ -278,7 +288,35 @@ impl Harness {
         use SubjectKind::*;
         let pre = ev.phase == Phase::Pre;
         match self {
-            Claude | Codex => match ev.subject {
+            // Claude Code — every arm below fired on a live install; see
+            // `provenance()` and tests/fixtures/claude-code/.
+            Claude => match ev.subject {
+                Tool => single(if pre { "PreToolUse" } else { "PostToolUse" }, *ev),
+                Prompt if pre => single("UserPromptSubmit", *ev),
+                // `Stop` fires when the agent finishes responding to a prompt,
+                // which is exactly the post half of the prompt subject. It was
+                // declared Unsupported here until a live capture recorded it
+                // firing (with `last_assistant_message`), so the matrix was
+                // *understating* Claude. Distinct from `SessionEnd`: both fire,
+                // Stop once per turn and SessionEnd once when the session ends.
+                Prompt => single("Stop", *ev),
+                Session => match ev.boundary {
+                    Some(Boundary::Start) => single("SessionStart", *ev),
+                    Some(Boundary::End) => single("SessionEnd", *ev),
+                    None => Support::Unsupported("session event needs a start/end boundary"),
+                },
+                Subagent => match ev.boundary {
+                    Some(Boundary::Start) => single("SubagentStart", *ev),
+                    Some(Boundary::End) => single("SubagentStop", *ev),
+                    None => Support::Unsupported("subagent event needs a boundary"),
+                },
+                Model => Support::Unsupported("no model-phase hook (only Gemini exposes one)"),
+                Task => Support::Unsupported("no task lifecycle events"),
+            },
+            // Codex mirrors Claude's event names, but its own arm: it is
+            // doc-derived, so Claude's live findings (the `Stop` turn boundary)
+            // must not be attributed to it without evidence of its own.
+            Codex => match ev.subject {
                 Tool => single(if pre { "PreToolUse" } else { "PostToolUse" }, *ev),
                 Prompt if pre => single("UserPromptSubmit", *ev),
                 Session => match ev.boundary {
@@ -292,7 +330,7 @@ impl Harness {
                     None => Support::Unsupported("subagent event needs a boundary"),
                 },
                 Model => Support::Unsupported("no model-phase hook (only Gemini exposes one)"),
-                Prompt => Support::Unsupported("only the pre (submit) phase exists"),
+                Prompt => Support::Unsupported("only the pre (submit) phase is documented"),
                 Task => Support::Unsupported("no task lifecycle events"),
             },
             Gemini => match ev.subject {
